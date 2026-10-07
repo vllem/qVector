@@ -12,14 +12,18 @@ use matrix_sdk_ui::timeline::RoomExt;
 
 /// Build a client for `homeserver` whose state (including all encryption keys) lives in an encrypted sqlite store under `dir`.
 pub async fn open_client(homeserver: &str, dir: &Path, passphrase: &str) -> Result<Client, matrix_sdk::ClientBuildError> {
-    let client = Client::builder().homeserver_url(homeserver).sqlite_store(dir, Some(passphrase)).build().await?;
-    let _ = client.event_cache().subscribe(); /* timelines are fed from the event cache */
-    Ok(client)
+    Client::builder().homeserver_url(homeserver).sqlite_store(dir, Some(passphrase)).build().await
 }
+
+/// Timelines are fed from the event cache, and its redecryptor (which re-reads messages that were unreadable when a room key arrives later: from a
+/// backup, a verification, another session) only works when the cache is subscribed AFTER the session exists. Subscribing before the login left it
+/// shut down, and old messages stayed unreadable after entering the recovery key.
+pub fn start_event_cache(client: &Client) { let _ = client.event_cache().subscribe(); }
 
 /// Password login; `device_name` is what other sessions see in their device list.
 pub async fn login_password(client: &Client, user: &str, password: &str, device_name: &str) -> matrix_sdk::Result<()> {
     client.matrix_auth().login_username(user, password).initial_device_display_name(device_name).send().await?;
+    start_event_cache(client);
     Ok(())
 }
 

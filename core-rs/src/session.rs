@@ -63,8 +63,7 @@ async fn build_client(homeserver: &str, dir: &Path, secret: &str) -> Result<Clie
         .build()
         .await
         .map_err(|e| format!("cannot reach {homeserver}: {e}"))?;
-    let _ = client.event_cache().subscribe(); /* timelines are fed from the event cache */
-    Ok(client)
+    Ok(client) /* the event cache is subscribed once a session exists (see `start_event_cache`) */
 }
 
 fn save(dir: &Path, secret: &str, protection: Protection, homeserver: &str, session: MatrixSession) -> Result<(), String> {
@@ -112,6 +111,7 @@ pub async fn sign_in(dir: &Path, homeserver: &str, user: &str, password: &str, p
         client.matrix_auth().login_username(user, password).initial_device_display_name(device_name).send().await.map_err(|e| friendly(&e))?;
         let session = client.matrix_auth().session().ok_or("the server did not give a session")?;
         save(dir, &secret, protection, homeserver, session)?;
+        crate::start_event_cache(&client);
         Ok::<Client, String>(client)
     }.await;
     if result.is_err() { forget(dir); }
@@ -130,6 +130,7 @@ pub async fn restore(dir: &Path, secret: &str) -> Result<Client, String> {
     let saved: Saved = cipher.decrypt_value(&blob).map_err(|e| format!("the saved session is unreadable: {e}"))?;
     let client = build_client(&saved.homeserver, dir, secret).await?;
     client.matrix_auth().restore_session(saved.session, RoomLoadSettings::default()).await.map_err(|e| e.to_string())?;
+    crate::start_event_cache(&client);
     Ok(client)
 }
 

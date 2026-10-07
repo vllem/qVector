@@ -205,7 +205,7 @@ impl App {
                 None => json!({}),
             },
             "load_sessions" => { let i = i.clone(); self.rt().spawn(async move { if let Some(c) = i.client() { let out = crate::crypto::session_list(&c).await.unwrap_or_else(|_| json!([])); i.emit("sessions", out.to_string()); } }); Value::Null }
-            "recover" => { let (i, key) = (i.clone(), s(args, "key")); self.rt().spawn(async move { if let Some(c) = i.client() { let out = match crate::crypto::recover(&c, &key).await { Ok(()) => json!({"state": "done"}), Err(e) => json!({"state": "error", "message": e}) }; i.emit("recovery", out.to_string()); } }); Value::Null }
+            "recover" => { let (i, key) = (i.clone(), s(args, "key")); self.rt().spawn(async move { if let Some(c) = i.client() { let out = match crate::crypto::recover(&c, &key).await { Ok(()) => { let _ = crate::crypto::restore_keys(&c).await; json!({"state": "done"}) } Err(e) => json!({"state": "error", "message": e}) }; i.emit("recovery", out.to_string()); } }); Value::Null }
             "create_recovery" => {
                 let (i, pw) = (i.clone(), s(args, "password"));
                 self.rt().spawn(async move {
@@ -610,6 +610,7 @@ async fn sync_loop(i: Arc<Inner>, client: Client) {
     let mut last_status = String::new();
     let (mut last_save, mut crawled) = (std::time::Instant::now(), HashSet::<String>::new());
     let mut seen_unread = None;
+    let mut keys_restored = false;
     let spaces = matrix_sdk_ui::spaces::SpaceService::new(client.clone()).await;
     loop {
         let _ = client.sync_once(SyncSettings::default().timeout(Duration::from_secs(0))).await;
@@ -631,6 +632,7 @@ async fn sync_loop(i: Arc<Inner>, client: Client) {
         let alerts = ui::new_alerts(&mut seen_unread, &rooms, if focused { open.as_deref() } else { None });
         if !alerts.is_empty() { i.emit_json("alerts", &alerts); }
         if let Some(me) = client.user_id() { let _ = client.encryption().request_user_identity(me).await; } /* learn about our other sessions' identity */
+        if !keys_restored { if let Some(n) = crate::crypto::restore_keys(&client).await { keys_restored = true; i.notice(format!("Restoring old messages from your key backup ({n} rooms)...")); } } /* once the backup is usable here: after a recovery key, a verification, at start */
         let status = crate::crypto::session_status(&client).await.to_string();
         if status != last_status { last_status = status.clone(); i.emit("session", status); }
         tokio::time::sleep(Duration::from_millis(700)).await;

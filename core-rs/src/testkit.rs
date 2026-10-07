@@ -480,10 +480,20 @@ impl FakeHs {
                     if let Some(ss) = v["sessions"].as_object() { for (k, x) in ss { e["sessions"][k] = x.clone(); } }
                 }
             }
-            json!({"etag": "1", "count": 1})
+            let n: usize = u.backup_keys.values().map(|r| r["sessions"].as_object().map(|o| o.len()).unwrap_or(0)).sum();
+            st.log.push(format!("backup upload: {n} sessions stored"));
+            json!({"etag": "1", "count": n})
         }).await;
-        mount("GET", r"^/_matrix/client/v3/room_keys/keys", |st, who, _| {
-            json!({"rooms": st.users.get(&user_of(who)).map(|u| u.backup_keys.clone()).unwrap_or_default()})
+        mount("GET", r"^/_matrix/client/v3/room_keys/keys", |st, who, req| {
+            let parts: Vec<String> = req.url.path().split('/').map(|p| p.replace("%21", "!").replace("%3A", ":").replace("%3a", ":").replace("%2B", "+").replace("%2F", "/")).collect();
+            let at = parts.iter().position(|p| p == "keys").unwrap_or(0);
+            let all = st.users.get(&user_of(who)).map(|u| u.backup_keys.clone()).unwrap_or_default();
+            st.log.push(format!("backup download {}", parts[at + 1..].join("/")));
+            match (parts.get(at + 1), parts.get(at + 2)) {
+                (Some(room), Some(session)) => all.get(room.as_str()).and_then(|r| r["sessions"].get(session.as_str())).cloned().unwrap_or_else(|| json!({"errcode": "M_NOT_FOUND", "error": "no such key"})),
+                (Some(room), None) => all.get(room.as_str()).cloned().unwrap_or_else(|| json!({"sessions": {}})),
+                _ => json!({"rooms": all}),
+            }
         }).await;
         mount("GET", r"^/_matrix/client/v3/rooms/[^/]+/members$", |_, _, _| {
             let chunk: Vec<Value> = ["alice", "bob"].iter().enumerate().map(|(i, u)| { let mut e = member_event(u, 10 + i as u64); e["room_id"] = json!(ROOM); e }).collect();
@@ -566,7 +576,7 @@ pub async fn bob_says(hs: FakeHs, lines: Vec<String>) {
     for _ in 0..600 { if hs.has_device_keys("alice") { break; } tokio::time::sleep(std::time::Duration::from_millis(100)).await; }
     let dir = std::env::temp_dir().join(format!("vector-fake-bob-{}-{}", std::process::id(), hs.server.address().port()));
     let Ok(bob) = crate::open_client(&hs.uri(), &dir, "pw").await else { return };
-    if crate::login_password(&bob, "bob", "x", "bob's phone").await.is_err() { return; }
+    if crate::login_password(&bob, "bob", "x", "bob's phone").await.is_err() { return; } /* also starts the event cache */
     let _ = crate::sync_once(&bob).await;
     let Ok(room_id) = <&matrix_sdk::ruma::RoomId>::try_from(ROOM) else { return };
     let Some(room) = bob.get_room(room_id) else { return };
@@ -595,6 +605,7 @@ pub async fn alice_other_session(hs: FakeHs) {
     let dir = std::env::temp_dir().join(format!("vector-fake-other-{}-{}", std::process::id(), hs.server.address().port()));
     let Ok(client) = crate::open_client(&hs.uri(), &dir, "pw").await else { return };
     if client.matrix_auth().login_username("alice", "x").device_id("OTHER").initial_device_display_name("Alice's laptop").send().await.is_err() { return; }
+    crate::start_event_cache(&client);
     let _ = crate::sync_once(&client).await;
     match crate::crypto::enable_recovery(&client, None).await { Ok(k) => eprintln!("fake recovery key: {k}"), Err(_) => return }
     let state = std::sync::Arc::new(std::sync::Mutex::new(String::new()));

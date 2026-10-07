@@ -214,6 +214,18 @@ pub async fn recover(client: &Client, key: &str) -> Result<(), String> {
 /// Password asked by the server before it accepts new cross-signing keys: the UI shows a password field when `enable_recovery` fails with this.
 pub const PASSWORD_REQUIRED: &str = "password_required";
 
+/// After this session got the account's secrets (a recovery key, a verification): make sure the key backup is on and ask it for the room keys of every
+/// room we are in. The SDK also fetches a key when a new undecryptable message arrives, but messages that were already loaded wait for this.
+/// Returns how many rooms were asked, or None while no backup is usable here.
+pub async fn restore_keys(client: &Client) -> Option<usize> {
+    if !client.encryption().backups().are_enabled().await { return None; }
+    let mut n = 0;
+    for room in client.joined_rooms() {
+        if client.encryption().backups().download_room_keys_for_room(room.room_id()).await.is_ok() { n += 1; }
+    }
+    Some(n)
+}
+
 /// Create secret storage and the key backup for an account that has none; returns the new recovery key (show it to the user once).
 /// A server that wants the account password for the cross-signing keys makes this fail with `PASSWORD_REQUIRED`; call again with the password.
 pub async fn enable_recovery(client: &Client, password: Option<&str>) -> Result<String, String> {
@@ -272,6 +284,7 @@ mod tests {
     async fn second_session(hs: &FakeHs, dir: &std::path::Path) -> Client {
         let client = crate::open_client(&hs.uri(), dir, "pw").await.unwrap();
         client.matrix_auth().login_username("alice", "x").device_id("TWO").initial_device_display_name("second").send().await.unwrap();
+        crate::start_event_cache(&client);
         client
     }
 
@@ -429,5 +442,35 @@ mod tests {
         std::thread::spawn(move || { v.dismiss(); v.dismiss(); let _ = tx.send(()); });
         assert!(rx.recv_timeout(Duration::from_secs(5)).is_ok(), "dismiss deadlocked");
         assert_eq!(last(&seen)["state"], "idle");
+    }
+
+    #[tokio::test]
+    async fn old_messages_become_readable_on_a_new_session_after_the_recovery_key() {
+        use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
+        use matrix_sdk_ui::timeline::RoomExt;
+        if let Ok(f) = std::env::var("VC_TEST_LOG") { let _ = tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::new(f)).with_test_writer().try_init(); }
+        let hs = FakeHs::start().await;
+        let (d1, d2) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let one = crate::session::sign_in(d1.path(), &hs.uri(), "alice", "x", None, "first").await.unwrap();
+        crate::sync_once(&one).await.unwrap();
+        let key = enable_recovery(&one, None).await.unwrap();
+        let room_id = <&matrix_sdk::ruma::RoomId>::try_from(crate::testkit::ROOM).unwrap();
+        let room = one.get_room(room_id).unwrap();
+        room.send(RoomMessageEventContent::text_plain("written before the second session existed")).await.unwrap();
+        for _ in 0..40 { crate::sync_once(&one).await.unwrap(); if hs.log().iter().any(|l| l.contains("PUT /_matrix/client/v3/room_keys/keys")) { break; } tokio::time::sleep(Duration::from_millis(100)).await; }
+        assert!(hs.log().iter().any(|l| l.contains("PUT /_matrix/client/v3/room_keys/keys")), "the first session backed its room key up: {:#?}", hs.log().iter().filter(|l| l.contains("room_keys")).collect::<Vec<_>>());
+
+        let two = second_session(&hs, d2.path()).await;
+        for _ in 0..3 { crate::sync_once(&two).await.unwrap(); }
+        let timeline = two.get_room(room_id).unwrap().timeline().await.unwrap();
+        let _ = timeline.subscribe().await;
+        let body = || async { crate::ui::ui_messages(&timeline.items().await.iter().cloned().collect::<Vec<_>>(), "@alice:hs").into_iter().map(|m| m.body).collect::<Vec<_>>() };
+        assert!(body().await.iter().all(|b| !b.contains("written before")), "without keys the message is unreadable");
+        recover(&two, &key).await.unwrap();
+        let asked = restore_keys(&two).await;
+        assert!(asked.is_some(), "backup enabled after recovery: {:#?}", hs.log().iter().filter(|l| l.contains("room_keys") || l.contains("backup")).collect::<Vec<_>>());
+        let mut ok = false;
+        for _ in 0..60 { crate::sync_once(&two).await.unwrap(); crate::ui::retry_undecryptable(&timeline).await; if body().await.iter().any(|b| b.contains("written before")) { ok = true; break; } tokio::time::sleep(Duration::from_millis(100)).await; }
+        assert!(ok, "the old message is readable now: {:?}; {:#?}", body().await, hs.log().iter().filter(|l| l.contains("room_keys") || l.contains("backup")).collect::<Vec<_>>());
     }
 }
