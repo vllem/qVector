@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Vector
+Comment=Matrix chat client
+Exec=vector
+Icon=vector
+Terminal=false
+Categories=Network;Chat;InstantMessaging;
+StartupWMClass=vector

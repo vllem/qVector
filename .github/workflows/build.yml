@@ -1,0 +1,37 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang qt6-base-dev qt6-multimedia-dev qt6-webengine-dev libqt6multimedia6 libgl1-mesa-dev libxkbcommon-dev
+      - name: Rust tests (engine against the fake homeserver)
+        run: cargo test -p vector-core --lib --features testkit
+      - name: Build the application
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+      - name: Smoke test (every window and dialog, offscreen)
+        run: scripts/ui_smoke.sh build/vector
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Dependencies
+        run: brew install cmake ninja qt
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$(brew --prefix qt)"
+          cmake --build build

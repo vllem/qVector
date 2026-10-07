@@ -1,0 +1,7 @@
+# The Rust core (matrix-sdk): one workspace so the lock file and the target directory stay at the repository root.
+[workspace]
+resolver = "2"
+members = ["core-rs"]
+
+[profile.dev]
+debug = "line-tables-only"   # full debug info made the build directory tens of gigabytes
