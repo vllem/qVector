@@ -43,6 +43,7 @@ namespace {
 class FlatTabStyle : public QProxyStyle {
 public:
     explicit FlatTabStyle(const QString &base) : QProxyStyle(base) {}
+    void setLine(const QColor &c) { line_ = c; }
     void drawControl(ControlElement el, const QStyleOption *opt, QPainter *p, const QWidget *w) const override
     {
         const auto *tab = qstyleoption_cast<const QStyleOptionTab *>(opt);
@@ -51,7 +52,7 @@ public:
             const QPalette &pal = tab->palette;
             p->fillRect(tab->rect, sel ? pal.color(QPalette::Highlight) : hover ? pal.color(QPalette::Midlight) : pal.color(QPalette::Window));
             if (!sel && tab->selectedPosition != QStyleOptionTab::NextIsSelected) { /* inset separator between tabs */
-                p->fillRect(QRect(tab->rect.right(), tab->rect.top() + 6, 1, tab->rect.height() - 12), QColor("#8c8c8c")); /* same grey as the splitter */
+                p->fillRect(QRect(tab->rect.right(), tab->rect.top() + 6, 1, tab->rect.height() - 12), line_); /* same grey as the splitter */
             }
             if (sel) p->fillRect(QRect(tab->rect.left(), tab->rect.bottom() - 2, tab->rect.width(), 3), QColor("#d2d2d2"));
             return;
@@ -66,6 +67,7 @@ public:
         QProxyStyle::drawControl(el, opt, p, w);
     }
 private:
+    QColor line_ = QColor("#8c8c8c");
     /* dark text on a light accent, light text on a dark one (a theme's highlighted-text can be white on pale green) */
     static QColor onAccent(const QPalette &pal) { return pal.color(QPalette::Highlight).lightness() > 128 ? QColor("#1a1a1a") : QColor("#ffffff"); }
 };
@@ -217,7 +219,6 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     split_ = new QSplitter;
     split_->setChildrenCollapsible(false);
     split_->setHandleWidth(2);
-    split_->setStyleSheet("QSplitter::handle { background: #8c8c8c; image: none; }"); /* a visible divider between the room list and the chats */
     sidebar_ = new Sidebar;
     split_->addWidget(sidebar_);
 
@@ -237,7 +238,6 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     tabs_->setElideMode(Qt::ElideRight);
     tabs_->setIconSize(QSize(16, 16));
     tabs_->setDrawBase(false);
-    { auto *st = new FlatTabStyle(QApplication::style()->name()); st->setParent(tabs_); tabs_->setStyle(st); }
     plus_ = new QToolButton;
     plus_->setText("+");
     plus_->setAutoRaise(true);
@@ -330,8 +330,7 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     composer_ = new Composer;
     composer_->setPlaceholderText("Send a message");
     composer_->setMinimumHeight(48);
-    composer_->setStyleSheet("QLineEdit { border: 1px solid #8c8c8c; border-radius: 4px; padding: 6px 10px; background: palette(base); color: palette(text); font-size: 11pt; }"
-                             "QLineEdit:focus { border-color: palette(highlight); }");
+
     attach_ = new QToolButton;
     attach_->setIcon(QIcon::fromTheme("mail-attachment"));
     if (attach_->icon().isNull()) attach_->setText("Attach");
@@ -444,12 +443,12 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     connect(threadView_, &TimelineView::reactRequested, this, [this](const QString &id, const QString &key) { core_->call("react", {{"event_id", id}, {"key", key}}); });
     connect(threadView_, &TimelineView::deleteRequested, this, [this](const QString &id) { core_->call("redact", {{"event_id", id}}); });
     mv->addWidget(split_, 1);
-    auto *statusLine = new QFrame; /* the same divider as between the room list and the chats, above the status bar */
-    statusLine->setFixedHeight(2);
-    statusLine->setStyleSheet("background: #8c8c8c;");
-    mv->addWidget(statusLine);
+    statusLine_ = new QFrame; /* the same divider as between the room list and the chats, above the status bar */
+    statusLine_->setFixedHeight(2);
+    mv->addWidget(statusLine_);
     root_->addWidget(mainPage);
     setCentralWidget(root_);
+    applyChrome();
 
     statusLeft_ = new QLabel;
     statusRight_ = new QLabel;
@@ -638,8 +637,31 @@ void MainWindow::start()
     core_->call("init");
 }
 
+void MainWindow::applyChrome()
+{
+    /* Nothing here hard-codes a colour or replaces the platform style wholesale: dividers are a blend of the theme's text and window colours
+       (about #8c8c8c on a default light palette), and the tab bar is the theme's own style with flat tabs drawn over it. */
+    const QPalette pal = QApplication::palette();
+    const QColor line = QColor::fromRgbF(0.4 * pal.color(QPalette::WindowText).redF() + 0.6 * pal.color(QPalette::Window).redF(),
+                                         0.4 * pal.color(QPalette::WindowText).greenF() + 0.6 * pal.color(QPalette::Window).greenF(),
+                                         0.4 * pal.color(QPalette::WindowText).blueF() + 0.6 * pal.color(QPalette::Window).blueF());
+    split_->setStyleSheet(QString("QSplitter::handle { background: %1; image: none; }").arg(line.name()));
+    statusLine_->setStyleSheet(QString("background: %1;").arg(line.name()));
+    composer_->setStyleSheet(QString("QLineEdit { border: 1px solid %1; border-radius: 4px; padding: 6px 10px; background: palette(base); color: palette(text); font-size: 11pt; }"
+                                     "QLineEdit:focus { border-color: palette(highlight); }").arg(line.name()));
+    const QString base = QApplication::style()->name();
+    auto *cur = qobject_cast<QProxyStyle *>(tabs_->style());
+    if (!cur || !cur->baseStyle() || cur->baseStyle()->name() != base) {
+        auto *st = new FlatTabStyle(base);
+        st->setLine(line);
+        st->setParent(tabs_);
+        tabs_->setStyle(st);
+    } else if (auto *flat = dynamic_cast<FlatTabStyle *>(cur)) { flat->setLine(line); tabs_->update(); }
+}
+
 bool MainWindow::event(QEvent *e)
 {
+    if (e->type() == QEvent::ApplicationPaletteChange || e->type() == QEvent::ThemeChange) applyChrome();
     if (e->type() == QEvent::WindowActivate) core_->call("set_focus", {{"focused", true}});
     else if (e->type() == QEvent::WindowDeactivate) core_->call("set_focus", {{"focused", false}});
     return QMainWindow::event(e);

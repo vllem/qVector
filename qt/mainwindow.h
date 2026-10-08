@@ -22,6 +22,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMainWindow>
+#include <QFrame>
 #include <QPointer>
 #include <QPushButton>
 #include <QSet>
@@ -125,6 +126,8 @@ private:
     Sidebar *sidebar_;
     QSplitter *split_;
     QTabBar *tabs_;
+    QFrame *statusLine_ = nullptr;
+    void applyChrome(); /* divider/composer colours and tab style follow the current palette and style (system Qt themes) */
     QToolButton *plus_;
     QLabel *topic_, *banner_, *statusLeft_, *statusRight_, *typingLabel_;
     QToolButton *membersBtn_;
