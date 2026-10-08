@@ -8,10 +8,12 @@
 #include <QSettings>
 #include <QSlider>
 #include <QStyle>
+#include <QTimer>
 #include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <cmath>
+#include <complex>
 
 namespace vc {
 
@@ -69,6 +71,42 @@ void WaveformView::paintEvent(QPaintEvent *)
 void WaveformView::mousePressEvent(QMouseEvent *e) { if (e->button() == Qt::LeftButton) emit seekRequested(qBound(0.0, e->position().x() / width(), 1.0)); }
 void WaveformView::mouseMoveEvent(QMouseEvent *e) { if (e->buttons() & Qt::LeftButton) emit seekRequested(qBound(0.0, e->position().x() / width(), 1.0)); }
 
+void SpectrumView::paintEvent(QPaintEvent *)
+{
+    QPainter p(this);
+    const int n = levels_.size();
+    if (n == 0) return;
+    const double w = double(width()) / n;
+    for (int i = 0; i < n; i++) {
+        const double h = levels_[i] > 0 ? qMax(1.0, levels_[i] * (height() - 2)) : 0.0;
+        QColor c = QColor::fromHsvF(0.04 + 0.08 * levels_[i], 0.95, 1.0); /* orange, warmer when louder */
+        p.fillRect(QRectF(i * w + 1, height() - h, qMax(1.0, w - 2), h), c);
+    }
+}
+
+/* In-place radix-2 FFT of a power-of-two sized buffer. */
+static void fft(QVector<std::complex<float>> &a)
+{
+    const int n = a.size();
+    for (int i = 1, j = 0; i < n; i++) {
+        int bit = n >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) std::swap(a[i], a[j]);
+    }
+    for (int len = 2; len <= n; len <<= 1) {
+        const std::complex<float> wl(std::cos(2 * float(M_PI) / len), -std::sin(2 * float(M_PI) / len));
+        for (int i = 0; i < n; i += len) {
+            std::complex<float> w(1);
+            for (int k = 0; k < len / 2; k++) {
+                const auto u = a[i + k], v = a[i + k + len / 2] * w;
+                a[i + k] = u + v; a[i + k + len / 2] = u - v;
+                w *= wl;
+            }
+        }
+    }
+}
+
 AudioPlayer::AudioPlayer(const QString &path, const QString &title, QWidget *parent) : QDialog(parent)
 {
     setWindowTitle(title.isEmpty() ? "Audio" : title);
@@ -78,10 +116,12 @@ AudioPlayer::AudioPlayer(const QString &path, const QString &title, QWidget *par
     QFont f = name->font(); f.setBold(true); name->setFont(f);
     wave_ = new WaveformView(this);
     wave_->setMinimumHeight(110);
+    spectrum_ = new SpectrumView(this);
     status_ = new QLabel(this);
     status_->setEnabled(false);
     v->addWidget(name);
     v->addWidget(wave_, 1);
+    v->addWidget(spectrum_);
     auto *row = new QHBoxLayout;
     btn_ = new QToolButton(this);
     btn_->setIconSize(QSize(24, 24));
@@ -123,7 +163,10 @@ AudioPlayer::AudioPlayer(const QString &path, const QString &title, QWidget *par
     connect(decoder_, qOverload<QAudioDecoder::Error>(&QAudioDecoder::error), this, [this](QAudioDecoder::Error) { wave_->setPeaks(peaks_, true); });
     decoder_->setSource(QUrl::fromLocalFile(path));
     decoder_->start();
-    resize(560, 230);
+    spectrumTimer_ = new QTimer(this);
+    spectrumTimer_->setInterval(33);
+    connect(spectrumTimer_, &QTimer::timeout, this, &AudioPlayer::tickSpectrum);
+    resize(560, 340);
     refresh();
     player_->play(); /* clicked to be heard */
 }
@@ -134,6 +177,19 @@ void AudioPlayer::onBuffer()
     if (!b.isValid()) return;
     const QAudioFormat fmt = b.format();
     const int ch = qMax(1, fmt.channelCount()), frames = b.frameCount(), slice = 1024;
+    rate_ = fmt.sampleRate() > 0 ? fmt.sampleRate() : 44100;
+    if (mono_.size() < rate_ * 60 * 30) { /* keep up to half an hour for the analyser */
+        auto keep = [&](auto *d, double scale, int off) {
+            for (int f = 0; f < frames; f++) { double sum = 0; for (int c = 0; c < ch; c++) sum += double(d[f * ch + c]) - off; mono_.append(qint16(qBound(-1.0, sum / ch / scale, 1.0) * 32767)); }
+        };
+        switch (fmt.sampleFormat()) {
+        case QAudioFormat::UInt8: keep(b.constData<quint8>(), 128.0, 128); break;
+        case QAudioFormat::Int16: keep(b.constData<qint16>(), 32768.0, 0); break;
+        case QAudioFormat::Int32: keep(b.constData<qint32>(), 2147483648.0, 0); break;
+        case QAudioFormat::Float: keep(b.constData<float>(), 1.0, 0); break;
+        default: break;
+        }
+    }
     auto scan = [&](auto *data, double scale) {
         for (int f0 = 0; f0 < frames; f0 += slice) {
             float peak = 0;
@@ -152,6 +208,42 @@ void AudioPlayer::onBuffer()
     if (peaks_.size() % 64 == 0) wave_->setPeaks(peaks_, false); /* grows while decoding */
 }
 
+/* The bars: a Hann-windowed FFT of the 2048 samples at the playing position, grouped on a log frequency scale, in decibels, with a quick rise
+   and a slow fall. */
+void AudioPlayer::tickSpectrum()
+{
+    const int N = 2048, nBars = 48;
+    if (bars_.size() != nBars) bars_ = QVector<float>(nBars, 0.f);
+    const bool playing = player_->playbackState() == QMediaPlayer::PlayingState;
+    const qint64 start = qint64(player_->position()) * rate_ / 1000 - N / 2;
+    QVector<float> target(nBars, 0.f);
+    if (playing && !mono_.isEmpty()) {
+        QVector<std::complex<float>> a(N);
+        for (int i = 0; i < N; i++) {
+            const qint64 at = start + i;
+            const float x = at >= 0 && at < mono_.size() ? mono_[int(at)] / 32768.f : 0.f;
+            a[i] = x * (0.5f - 0.5f * std::cos(2 * float(M_PI) * i / (N - 1)));
+        }
+        fft(a);
+        const double lo = 40.0, hi = qMin(16000.0, rate_ / 2.0 - 1);
+        for (int b = 0; b < nBars; b++) {
+            const double f0 = lo * std::pow(hi / lo, double(b) / nBars), f1 = lo * std::pow(hi / lo, double(b + 1) / nBars);
+            const int k0 = qBound(1, int(f0 * N / rate_), N / 2 - 1), k1 = qBound(k0 + 1, int(std::ceil(f1 * N / rate_)), N / 2);
+            float m = 0;
+            for (int k = k0; k < k1; k++) m = qMax(m, std::abs(a[k]));
+            const float db = 20.f * std::log10(qMax(m / (N / 4.f), 1e-5f)); /* 0 dB is a full-scale tone */
+            target[b] = qBound(0.f, (db + 70.f) / 70.f, 1.f);
+        }
+    }
+    bool any = false;
+    for (int i = 0; i < nBars; i++) {
+        bars_[i] = target[i] > bars_[i] ? bars_[i] + (target[i] - bars_[i]) * 0.6f : bars_[i] * 0.88f;
+        if (bars_[i] > 0.004f) any = true; else bars_[i] = 0;
+    }
+    spectrum_->setLevels(bars_);
+    if (!playing && !any) spectrumTimer_->stop();
+}
+
 void AudioPlayer::toggle()
 {
     if (player_->playbackState() == QMediaPlayer::PlayingState) player_->pause();
@@ -164,6 +256,7 @@ void AudioPlayer::refresh()
     time_->setText(clock(p) + " / " + clock(d));
     wave_->setProgress(d > 0 ? double(p) / d : 0);
     const bool playing = player_->playbackState() == QMediaPlayer::PlayingState, ended = player_->mediaStatus() == QMediaPlayer::EndOfMedia;
+    if (playing && !spectrumTimer_->isActive()) spectrumTimer_->start();
     btn_->setIcon(style()->standardIcon(playing ? QStyle::SP_MediaPause : ended ? QStyle::SP_BrowserReload : QStyle::SP_MediaPlay));
     btn_->setToolTip(playing ? "Pause" : ended ? "Play again" : "Play");
 }
