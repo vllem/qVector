@@ -478,9 +478,9 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     statusBar()->setSizeGripEnabled(false);
     statusSep1_ = new QFrame;
     statusSep2_ = new QFrame;
-    for (QFrame *f : {statusSep1_, statusSep2_}) { f->setFrameShape(QFrame::NoFrame); f->setFixedSize(2, 16); }
-    statusLeft_->setContentsMargins(6, 0, 8, 0);
-    statusRight_->setContentsMargins(8, 0, 8, 0);
+    for (QFrame *f : {statusSep1_, statusSep2_}) { f->setFrameShape(QFrame::NoFrame); f->setFixedSize(1, 16); }
+    statusLeft_->setContentsMargins(6, 0, 6, 0);
+    statusRight_->setContentsMargins(6, 0, 6, 0);
     statusBar()->addWidget(statusLeft_);
     statusBar()->addWidget(statusSep1_);
     statusBar()->addWidget(statusRight_);
@@ -490,9 +490,9 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     statusBar()->addWidget(new QWidget, 1);
     statusSep3_ = new QFrame;
     statusSep3_->setFrameShape(QFrame::NoFrame);
-    statusSep3_->setFixedSize(2, 16);
+    statusSep3_->setFixedSize(1, 16);
     statusClock_ = new QLabel;
-    statusClock_->setContentsMargins(8, 0, 8, 0);
+    statusClock_->setContentsMargins(0, 0, 8, 0);
     statusBar()->addPermanentWidget(statusSep3_);
     statusBar()->addPermanentWidget(statusClock_);
     auto *clockTimer = new QTimer(this);
