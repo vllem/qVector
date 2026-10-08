@@ -73,6 +73,24 @@ pub struct UiMessage {
     pub avatar_path: String,
 }
 
+/// The other person's picture in a direct chat: from the room's heroes, else from the member event of the person it was made with,
+/// else from their profile (asked once per person; bridged chats often lack the hero's picture).
+async fn direct_avatar(client: &Client, r: &matrix_sdk::Room) -> Option<matrix_sdk::ruma::OwnedMxcUri> {
+    use std::sync::Mutex;
+    static PROFILES: Mutex<Option<HashMap<String, Option<matrix_sdk::ruma::OwnedMxcUri>>>> = Mutex::new(None);
+    if let Some(a) = r.heroes().await.into_iter().find_map(|h| h.avatar_url) { return Some(a); }
+    let me = client.user_id().map(|u| u.to_owned());
+    let mut people: Vec<matrix_sdk::ruma::OwnedUserId> = r.direct_targets().into_iter().filter_map(|t| t.as_user_id().map(|u| u.to_owned())).collect();
+    people.retain(|u| Some(u) != me.as_ref());
+    let who = people.into_iter().next()?;
+    if let Ok(Some(m)) = r.get_member_no_sync(&who).await { if let Some(a) = m.avatar_url() { return Some(a.to_owned()); } }
+    let key = who.to_string();
+    if let Some(known) = PROFILES.lock().unwrap().get_or_insert_with(HashMap::new).get(&key) { return known.clone(); }
+    let got = client.account().fetch_user_profile_of(&who).await.ok().and_then(|p| p.get_static::<matrix_sdk::ruma::api::client::profile::AvatarUrl>().ok().flatten());
+    PROFILES.lock().unwrap().get_or_insert_with(HashMap::new).insert(key, got.clone());
+    got
+}
+
 /// The joined rooms, grouped the way the sidebar shows them.
 pub async fn ui_rooms(client: &Client) -> Vec<UiRoom> {
     let mut out = Vec::new();
@@ -81,7 +99,7 @@ pub async fn ui_rooms(client: &Client) -> Vec<UiRoom> {
         let title = r.display_name().await.map(|n| n.to_string()).unwrap_or_else(|_| r.room_id().to_string());
         let direct = r.is_direct().await.unwrap_or(false);
         /* a direct chat shows the other person's picture when it has none of its own */
-        let avatar = match r.avatar_url() { Some(a) => Some(a), None if direct => r.heroes().await.into_iter().next().and_then(|h| h.avatar_url), None => None };
+        let avatar = match r.avatar_url() { Some(a) => Some(a), None if direct => direct_avatar(client, &r).await, None => None };
         out.push(UiRoom {
             id: r.room_id().to_string(),
             title,
