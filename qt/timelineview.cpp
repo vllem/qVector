@@ -236,6 +236,7 @@ void TimelineView::onAnchor(const QUrl &u)
     else if (s.startsWith("vc:save:")) emit saveRequested(QUrl::fromPercentEncoding(s.mid(8).toUtf8()));
     else if (s.startsWith("vc:text:")) emit textRequested(s.mid(8));
     else if (s.startsWith("vc:thread:")) emit threadRequested(s.mid(10));
+    else if (s.startsWith("vc:goto:")) revealMessage(s.mid(8)); /* the message a reply answers */
     else if (s.startsWith("vc:vid:")) emit playRequested(s.mid(7));
     else if (s.startsWith("https://matrix.to/#/") || s.startsWith("http://matrix.to/#/")) emit matrixLink(s);
     else if (s.startsWith("vc:poll/")) emit pollVote(part(1).mid(0), part(2)); /* vc:poll/<event>/<answer> */
@@ -464,7 +465,7 @@ void TimelineView::render()
             QString snip = S(reply, "preview").simplified();
             if (snip.size() > 90) snip = snip.left(90) + "...";
             const QString who = S(reply, "sender").isEmpty() ? QStringLiteral("a message") : S(reply, "sender");
-            content = "<span style=\"color:" + muted + "\">Replying to " + esc(who) + (snip.isEmpty() ? QString() : ": " + esc(snip)) + "</span><br>" + content;
+            content = "<a href=\"vc:goto:" + esc(S(reply, "event_id")) + "\" style=\"color:" + muted + ";text-decoration:none\">Replying to " + esc(who) + (snip.isEmpty() ? QString() : ": " + esc(snip)) + "</a><br>" + content;
         }
         const QJsonArray reactions = r.value("reactions").toArray();
         if (!eid.isEmpty() && !reactions.isEmpty()) {
@@ -764,8 +765,12 @@ void TimelineView::applyStyle()
 /* Scrolls to a message and marks it for a moment (a search hit, a jump). */
 void TimelineView::revealMessage(const QString &eventId)
 {
+    int at = -1;
+    for (int i = 0; i < rows_.size(); i++) if (S(rows_[i].toObject(), "id") == eventId) { at = i; break; }
+    if (at < 0) return; /* not loaded (older than what the room has fetched) */
     stick_ = false;
     highlight_ = eventId;
+    if (at < hiddenLocal_) { shownLimit_ = qMax(shownLimit_, size_t(rows_.size() - at)); windowStart_ = eventId; } /* still folded away above: show from there */
     if (!isVisible()) { pendingReveal_ = eventId; stale_ = true; return; }
     render();
     QTimer::singleShot(0, this, [this, eventId] {
