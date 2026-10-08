@@ -453,7 +453,7 @@ void TimelineView::render()
             content = "<a href=\"vc:vid:" + esc(eid) + "\"><img src=\"" + key + "\" width=" + QString::number(int(card.width() / dpr)) + "></a><br>" + esc(text);
         } else if (kind == "file" || kind == "audio") {
             const QString t = (kind == "file" ? "File: " : "Audio: ") + (S(r, "file_name").isEmpty() ? text : S(r, "file_name"));
-            content = pending || eid.isEmpty() ? esc(t) : "<a href=\"vc:save:" + esc(eid) + "\">" + esc(t) + "</a>" + (kind == "audio" ? " &nbsp;<a href=\"vc:open:" + esc(eid) + "\">Play</a>" : QString());
+            content = pending || eid.isEmpty() ? esc(t) : QString("<a href=\"") + (kind == "audio" ? "vc:vid:" : "vc:save:") + esc(eid) + "\">" + esc(t) + "</a>" + (kind == "audio" ? " &nbsp;<a href=\"vc:vid:" + esc(eid) + "\">Play</a>" : QString());
             const qint64 sz = qint64(r.value("size").toDouble());
             if (kind == "file" && sz > 0) content += " <span style=\"color:" + muted + "\">(" + (sz < 1024 ? QString::number(sz) + " B" : sz < 1024 * 1024 ? QString::number((sz + 1023) / 1024) + " KB" : QString::number(double(sz) / (1024 * 1024), 'f', 1) + " MB") + ")</span>";
             if (kind == "file" && B(r, "text_file") && !pending && !eid.isEmpty()) /* a text file can be read here: a button under it */

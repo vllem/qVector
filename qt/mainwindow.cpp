@@ -1,4 +1,5 @@
 #include "qt/mainwindow.h"
+#include "qt/audioplayer.h"
 #include "qt/avatar.h"
 #include "qt/theme.h"
 #include <QApplication>
@@ -681,7 +682,10 @@ void MainWindow::onEvent(const QString &name, const QJsonValue &p)
         connect(v, &TextViewer::saveRequested, this, [this, id] { saveAttachment(id); });
         v->show();
     } else if (name == "media_file") {
-        timeline_->playFile(S(p.toObject(), "event_id"), S(p.toObject(), "path"));
+        const QString id = S(p.toObject(), "event_id");
+        const QJsonObject row = timeline_->row(id);
+        if (S(row, "kind") == "audio") (new AudioPlayer(S(p.toObject(), "path"), S(row, "file_name").isEmpty() ? S(row, "body") : S(row, "file_name"), this))->show(); /* a window with the waveform */
+        else timeline_->playFile(id, S(p.toObject(), "path"));
     } else if (name == "open_file") {
         QDesktopServices::openUrl(QUrl::fromLocalFile(p.toString()));
     } else if (name == "alerts") {
@@ -1028,7 +1032,8 @@ void MainWindow::openPicture(const QString &eventId)
         v->setAttribute(Qt::WA_DeleteOnClose);
         connect(v, &ImageViewer::saveRequested, this, [this, eventId] { saveAttachment(eventId); });
         v->show();
-    } else core_->call("open_attachment", {{"event_id", eventId}});
+    } else if (kind == "audio") core_->call("fetch_media", {{"event_id", eventId}});
+    else core_->call("open_attachment", {{"event_id", eventId}});
 }
 
 void MainWindow::showPreferences()
@@ -1147,6 +1152,7 @@ void MainWindow::dialogForDemo(const QString &which)
         stageImage(img);
         composer_->setText("a caption");
     }
+    else if (which.startsWith("audio:")) (new AudioPlayer(which.mid(6), QFileInfo(which.mid(6)).fileName(), this))->show(); /* dev aid: --dialog audio:FILE */
     else if (which == "text") {
         for (const QJsonValue &v : timeline_->rows()) if (v.toObject()["text_file"].toBool()) { core_->call("fetch_text", {{"event_id", S(v.toObject(), "id")}}); return; }
         QTimer::singleShot(1000, this, [this] { dialogForDemo("text"); }); /* the file may not have arrived yet */
