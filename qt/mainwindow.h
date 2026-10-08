@@ -41,6 +41,7 @@ class Composer : public QLineEdit {
 public:
     struct Candidate { QString id, label, insert; }; /* insert: what replaces the typed word (default: the label and a space) */
     explicit Composer(QWidget *parent = nullptr);
+    void setButtons(QToolButton *left, QToolButton *right); /* drawn inside the box, left and right */
     ~Composer() override;
     std::function<QList<Candidate>(const QString &prefix)> candidates; /* people (and @room) matching what follows an '@' */
 signals:
@@ -51,7 +52,9 @@ signals:
 protected:
     void keyPressEvent(QKeyEvent *e) override;
     void focusOutEvent(QFocusEvent *e) override;
+    void resizeEvent(QResizeEvent *e) override;
 private:
+    QToolButton *left_ = nullptr, *right_ = nullptr;
     void updatePopup();
     void acceptCandidate();
     QListWidget *popup_;
@@ -143,7 +146,7 @@ private:
     QTemporaryDir *pasteDir_ = nullptr;
     QStackedWidget *timelines_;
     Composer *composer_;
-    QAction *attach_ = nullptr, *emojiBtn_ = nullptr;
+    QToolButton *attach_ = nullptr, *emojiBtn_ = nullptr;
     EmojiPicker *picker_, *reactPicker_;
     MemberList *memberList_;
     SearchPanel *searchPanel_;

@@ -86,6 +86,24 @@ Composer::Composer(QWidget *parent) : QLineEdit(parent)
 
 Composer::~Composer() { delete popup_; }
 
+void Composer::setButtons(QToolButton *left, QToolButton *right)
+{
+    left_ = left;
+    right_ = right;
+    for (QToolButton *b : {left, right}) b->setIconSize(QSize(20, 20));
+    setTextMargins(28, 0, 28, 0);
+}
+
+void Composer::resizeEvent(QResizeEvent *e)
+{
+    QLineEdit::resizeEvent(e);
+    if (!left_) return;
+    left_->setFixedSize(28, 28);
+    right_->setFixedSize(28, 28);
+    left_->move(5, (height() - 28) / 2);
+    right_->move(width() - 33, (height() - 28) / 2);
+}
+
 void Composer::focusOutEvent(QFocusEvent *e)
 {
     popup_->hide();
@@ -339,10 +357,15 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     composer_->setMinimumHeight(48);
 
     /* Attach on the left and emoji on the right, both inside the box; the icons are drawn in applyChrome in the palette's text colour. */
-    attach_ = composer_->addAction(QIcon(), QLineEdit::LeadingPosition);
+    attach_ = new QToolButton(composer_); /* real tool buttons: the style draws hover and pressed feedback */
+    attach_->setAutoRaise(true);
+    attach_->setCursor(Qt::ArrowCursor);
     attach_->setToolTip("Send a file or image");
-    emojiBtn_ = composer_->addAction(QIcon(), QLineEdit::TrailingPosition);
+    emojiBtn_ = new QToolButton(composer_);
+    emojiBtn_->setAutoRaise(true);
+    emojiBtn_->setCursor(Qt::ArrowCursor);
     emojiBtn_->setToolTip("Emoji (you can also type :name)");
+    composer_->setButtons(attach_, emojiBtn_);
     compRow->addWidget(composer_, 1);
     contextBar_ = new QWidget;
     {
@@ -493,11 +516,11 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     }
     connect(composer_, &QLineEdit::returnPressed, this, &MainWindow::send);
     connect(composer_, &QLineEdit::textEdited, this, [this](const QString &t) { if (!current_.isEmpty()) if (sendTyping_) core_->call("typing", {{"typing", !t.isEmpty()}}); });
-    connect(attach_, &QAction::triggered, this, &MainWindow::chooseFiles);
+    connect(attach_, &QToolButton::clicked, this, &MainWindow::chooseFiles);
     picker_ = new EmojiPicker(this);
     reactPicker_ = new EmojiPicker(this);
     reactPicker_->setCloseOnPick(true);
-    connect(emojiBtn_, &QAction::triggered, this, [this] { picker_->popupAt(composer_->mapToGlobal(QPoint(composer_->width(), 0))); });
+    connect(emojiBtn_, &QToolButton::clicked, this, [this] { picker_->popupAt(composer_->mapToGlobal(QPoint(composer_->width(), 0))); });
     connect(picker_, &EmojiPicker::emojiPicked, this, [this](const QString &g) { composer_->insert(g); composer_->setFocus(); emit composer_->textEdited(composer_->text()); });
     connect(reactPicker_, &EmojiPicker::emojiPicked, this, [this](const QString &g) { if (!reactEvent_.isEmpty()) core_->call("react", {{"event_id", reactEvent_}, {"key", g}}); });
     connect(composer_, &Composer::escapePressed, this, [this] { if (replyTo_.isEmpty() && editing_.isEmpty() && !pending_.isEmpty()) cancelAttachment(); else cancelContext(); });
