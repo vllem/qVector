@@ -386,6 +386,15 @@ void TimelineView::render()
             } else content = "<span style=\"color:" + muted + "\">Loading image...</span>";
             const QString fn = S(r, "file_name");
             if (!text.isEmpty() && text != "image" && text != fn) content += "<br>" + esc(text);
+        } else if (kind == "sticker") { /* a picture without a frame, smaller than a photo */
+            const QImage *img = picture(S(r, "image_path"));
+            if (img) {
+                const QString key = "stk:" + eid;
+                QImage scaled = img->scaled(QSize(160, 160) * dpr, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                scaled.setDevicePixelRatio(dpr);
+                addRes(doc, resHash_, QUrl(key), scaled);
+                content = "<img src=\"" + key + "\" width=" + QString::number(int(scaled.width() / dpr)) + " title=\"" + esc(text) + "\">";
+            } else content = "<span style=\"color:" + muted + "\">Loading sticker...</span>";
         } else if (kind == "gallery") { /* several pictures (or files) in one message: a grid of thumbnails, cropped to squares like Discord's */
             const QJsonArray items = r.value("gallery").toArray();
             QVector<QJsonObject> pics, others;
@@ -470,6 +479,27 @@ void TimelineView::render()
             if (kind == "text" && fb.isEmpty() && emojiOnly(text)) shown = "<span style=\"font-size:30pt\">" + esc(text) + "</span>";
             if (!fb.isEmpty() && kind != "undecryptable") { /* formatted text: sanitized HTML */
                 shown = fb;
+                for (const QJsonValue &ev : r.value("emoji").toArray()) { /* custom emoji: the downloaded picture at text height, else its shortcode */
+                    const QJsonObject e = ev.toObject();
+                    const QString mxc = S(e, "mxc");
+                    const QImage *eimg = picture(S(e, "path"));
+                    QString repl;
+                    if (eimg) {
+                        const QString key = "emo:" + mxc;
+                        QImage scaled = eimg->scaledToHeight(int(22 * dpr), Qt::SmoothTransformation);
+                        scaled.setDevicePixelRatio(dpr);
+                        addRes(doc, resHash_, QUrl(key), scaled);
+                        repl = "<img src=\"" + key + "\" height=22 style=\"vertical-align:middle\">";
+                    }
+                    const QRegularExpression re("<img[^>]*src=\"" + QRegularExpression::escape(mxc) + "\"[^>]*>");
+                    int at = 0;
+                    for (QRegularExpressionMatch m = re.match(shown, at); m.hasMatch(); m = re.match(shown, at)) {
+                        QString alt = repl;
+                        if (alt.isEmpty()) { const QRegularExpressionMatch am = QRegularExpression("alt=\"([^\"]*)\"").match(m.captured(0)); alt = am.hasMatch() ? am.captured(1) : QString(); }
+                        shown.replace(m.capturedStart(), m.capturedLength(), alt);
+                        at = m.capturedStart() + alt.size();
+                    }
+                }
                 shown.replace("<del>", "<s>").replace("</del>", "</s>"); /* Qt knows <s> */
                 if (kind == "emote") shown = "* " + esc(name) + " " + shown;
             }

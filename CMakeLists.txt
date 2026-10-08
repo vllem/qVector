@@ -50,7 +50,7 @@ if(VC_WEBENGINE)
 endif()
 
 set(VC_QT_SOURCES
-  qt/main.cpp qt/core.cpp qt/theme.cpp qt/avatar.cpp qt/videoplayer.cpp qt/audioplayer.cpp qt/loginpage.cpp qt/sidebar.cpp qt/emoji.cpp qt/emojipicker.cpp
+  qt/main.cpp qt/core.cpp qt/theme.cpp qt/avatar.cpp qt/videoplayer.cpp qt/audioplayer.cpp qt/loginpage.cpp qt/sidebar.cpp qt/emoji.cpp qt/emojipicker.cpp qt/packpicker.cpp
   qt/timelineview.cpp qt/notifier.cpp qt/memberlist.cpp qt/searchpanel.cpp qt/dialogs.cpp qt/conversations.cpp qt/mainwindow.cpp)
 add_executable(qvector ${VC_QT_SOURCES})
 target_include_directories(qvector PRIVATE ${CMAKE_SOURCE_DIR})

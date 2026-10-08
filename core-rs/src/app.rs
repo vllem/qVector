@@ -141,7 +141,11 @@ impl App {
             #[cfg(feature = "testkit")]
             "start_fake_server" => self.start_fake_server(),
             "select_room" => self.select_room(&s(args, "room_id")),
-            "send" => { let (t, r) = (s(args, "text"), s(args, "reply_to")); if !t.trim().is_empty() { self.on_timeline(move |_, tl| async move { let _ = ui::send_text(&tl, &t, Some(r.as_str())).await; }); } Value::Null }
+            "send" => { let (t, r) = (s(args, "text"), s(args, "reply_to")); if !t.trim().is_empty() { self.on_timeline(move |i, tl| async move {
+                let emoji = match i.client() { Some(c) if t.contains(':') => crate::emotes::emoji_map(&crate::emotes::emote_packs(&c, tl.room().room_id().as_str()).await), _ => Default::default() };
+                let _ = ui::send_text_with_emoji(&tl, &t, Some(r.as_str()), &emoji).await; }); } Value::Null }
+            "emote_packs" => self.send_emote_packs(&s(args, "room_id")),
+            "send_sticker" => { let (m, b, w, h, mime) = (s(args, "mxc"), s(args, "body"), args["width"].as_u64().unwrap_or(0) as u32, args["height"].as_u64().unwrap_or(0) as u32, s(args, "mime")); self.on_timeline(move |i, tl| async move { if let Err(e) = ui::send_sticker(&tl, &m, &b, w, h, &mime).await { i.notice(format!("Cannot send the sticker: {e}")); } }); Value::Null }
             "send_file" => { let p = PathBuf::from(s(args, "path").trim_start_matches("file://")); let cap = s(args, "caption"); self.on_timeline(move |i, tl| async move { if let Err(e) = ui::send_file(&tl, &p, Some(&cap)).await { i.notice(format!("Cannot send the file: {e}")); } }); Value::Null }
             "send_files" => { /* several files become one gallery message; `paths`: array of paths */
                 let ps: Vec<PathBuf> = args.get("paths").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).map(|p| PathBuf::from(p.trim_start_matches("file://"))).collect()).unwrap_or_default();
@@ -243,6 +247,25 @@ impl App {
 
     // ---- helpers to run work against the open room / the client
 
+    /// The custom emoji / sticker packs of the open room (and the user's own), with the pictures that are on disk; the rest are fetched and the list is sent again.
+    fn send_emote_packs(&self, room: &str) -> Value {
+        let i = self.inner.clone();
+        let room = room.to_string();
+        self.rt().spawn(async move {
+            let Some(c) = i.client() else { return };
+            let mut packs = crate::emotes::emote_packs(&c, &room).await;
+            for round in 0..2 {
+                for e in packs.iter_mut().flat_map(|p| p.emotes.iter_mut()) { e.path = i.avatars.path(&e.mxc); }
+                i.emit_json("emote_packs", &json!({"room_id": room, "packs": packs}));
+                if round == 1 { break; }
+                let wanted: Vec<String> = packs.iter().flat_map(|p| p.emotes.iter()).map(|e| e.mxc.clone()).filter(|m| i.avatars.wanted(m)).collect();
+                if wanted.is_empty() { break; }
+                for m in &wanted { i.avatars.fetch(&c, m, &i.avatar_dir()).await; }
+            }
+        });
+        Value::Null
+    }
+
     fn on_timeline<F, Fut>(&self, f: F) where F: FnOnce(Arc<Inner>, Arc<Timeline>) -> Fut + Send + 'static, Fut: std::future::Future<Output = ()> + Send + 'static {
         let i = self.inner.clone();
         self.rt().spawn(async move { if let Some(tl) = i.open_timeline_of().await { f(i.clone(), tl).await; } });
@@ -339,6 +362,7 @@ impl App {
         let hs = self.rt().block_on(crate::testkit::FakeHs::start());
         hs.invite_alice("Bob's club");
         hs.set_history(40);
+        hs.seed_emoji_pack();
         let plans = hs.add_room("Plans");
         hs.add_space("Rust club", &[plans.as_str(), "!announcements:hs"]);
         hs.add_room("Lounge");
@@ -411,6 +435,7 @@ impl App {
                     let known = i.user_mxc.lock().unwrap().clone();
                     for r in rows.iter_mut() { if let Some(Some(m)) = known.get(&format!("{id}|{}", r.sender_id)) { r.avatar_path = i.avatars.path(m); } }
                 }
+                for r in rows.iter_mut() { for e in r.emoji.iter_mut() { e.path = i.avatars.path(&e.mxc); } }
                 let previews_on = i.previews_on.load(Ordering::Relaxed);
                 if previews_on {
                     let known = i.previews.lock().unwrap();
@@ -423,6 +448,11 @@ impl App {
                 if !added.is_empty() { i.images.lock().unwrap().extend(added); continue; } /* show the pictures that just arrived */
                 {
                     let wanted: Vec<String> = { let known = i.user_mxc.lock().unwrap(); rows.iter().filter_map(|r| known.get(&format!("{id}|{}", r.sender_id)).cloned().flatten()).filter(|m| i.avatars.wanted(m)).take(4).collect() };
+                    for m in &wanted { i.avatars.fetch(&client, m, &i.avatar_dir()).await; }
+                    if !wanted.is_empty() { continue; }
+                }
+                {   /* the custom emoji shown in messages, a few per pass like the pictures of people */
+                    let wanted: Vec<String> = rows.iter().rev().flat_map(|r| r.emoji.iter()).map(|e| e.mxc.clone()).filter(|m| i.avatars.wanted(m)).take(6).collect();
                     for m in &wanted { i.avatars.fetch(&client, m, &i.avatar_dir()).await; }
                     if !wanted.is_empty() { continue; }
                 }

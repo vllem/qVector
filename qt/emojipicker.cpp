@@ -1,6 +1,7 @@
 #include "qt/emojipicker.h"
 #include "qt/theme.h"
 #include <QFontDatabase>
+#include <QPixmap>
 #include <QGuiApplication>
 #include <QScreen>
 #include <QHBoxLayout>
@@ -45,6 +46,17 @@ EmojiPicker::EmojiPicker(QWidget *parent) : QFrame(parent, Qt::Popup)
             row->addWidget(b);
             connect(b, &QToolButton::clicked, this, [this, i] { setCategory(i); });
         }
+        customBtn_ = new QToolButton; /* shows the first custom emoji; hidden when the room has none */
+        customBtn_->setToolTip("Custom emoji");
+        customBtn_->setCheckable(true);
+        customBtn_->setAutoRaise(true);
+        customBtn_->setFixedHeight(32);
+        customBtn_->setMinimumWidth(30);
+        customBtn_->setIconSize(QSize(22, 22));
+        customBtn_->hide();
+        cats_ << customBtn_;
+        row->addWidget(customBtn_);
+        connect(customBtn_, &QToolButton::clicked, this, [this] { setCategory(10); });
         row->addStretch(1);
         v->addWidget(search_);
         v->addLayout(row);
@@ -61,6 +73,7 @@ EmojiPicker::EmojiPicker(QWidget *parent) : QFrame(parent, Qt::Popup)
     connect(search_, &QLineEdit::textChanged, this, [this] { fill(); });
     connect(grid_, &QListWidget::itemClicked, this, [this](QListWidgetItem *it) {
         const QString g = it->data(Qt::UserRole).toString();
+        if (it->data(Qt::UserRole + 1).toBool()) { emit customPicked(g); if (closeOnPick_) hide(); return; } /* a custom emoji has no glyph to remember */
         rememberEmoji(g);
         emit emojiPicked(g);
         if (closeOnPick_) hide();
@@ -79,9 +92,24 @@ void EmojiPicker::popupAt(const QPoint &anchor)
     y = qBound(area.top(), y, area.bottom() - height());
     move(x, y);
     search_->clear();
-    setCategory(recentEmoji().isEmpty() ? 1 : 0);
+    setCategory(cat_ == 10 && !custom_.isEmpty() ? 10 : recentEmoji().isEmpty() ? 1 : 0);
     show();
     search_->setFocus();
+}
+
+void EmojiPicker::setCustom(const QJsonArray &packs)
+{
+    custom_.clear();
+    for (const QJsonValue &p : packs)
+        for (const QJsonValue &e : p.toObject()["emotes"].toArray()) if (e.toObject()["emoji"].toBool()) custom_ << e.toObject();
+    customBtn_->setVisible(!custom_.isEmpty());
+    QIcon icon;
+    for (const QJsonObject &e : custom_) { QPixmap pm; if (pm.load(e["path"].toString())) { icon = QIcon(pm); break; } }
+    customBtn_->setIcon(icon);
+    customBtn_->setText(icon.isNull() ? "+" : QString());
+    customBtn_->setToolButtonStyle(icon.isNull() ? Qt::ToolButtonTextOnly : Qt::ToolButtonIconOnly);
+    if (custom_.isEmpty() && cat_ == 10) cat_ = 1;
+    if (isVisible()) fill();
 }
 
 void EmojiPicker::setCategory(int i)
@@ -99,10 +127,22 @@ void EmojiPicker::fill()
     if (!emojiFamily().isEmpty()) f.setFamilies({emojiFamily(), f.family()}); /* an emoji font first, so every glyph comes out in colour */
     grid_->setFont(f);
     grid_->setTextElideMode(Qt::ElideNone);
-    grid_->setIconSize(QSize());
     grid_->setGridSize(QSize(42, 42));
     QList<Emoji> shown;
     const QString q = search_->text().trimmed();
+    auto addCustom = [&](const QJsonObject &e) {
+        QPixmap pm;
+        if (!pm.load(e["path"].toString())) return;
+        pm = pm.scaled(QSize(28, 28) * devicePixelRatioF(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        pm.setDevicePixelRatio(devicePixelRatioF());
+        auto *it = new QListWidgetItem(QIcon(pm), QString());
+        it->setToolTip(":" + e["shortcode"].toString() + ":");
+        it->setData(Qt::UserRole, e["shortcode"].toString());
+        it->setData(Qt::UserRole + 1, true);
+        grid_->addItem(it);
+    };
+    if (cat_ == 10 && q.isEmpty()) { grid_->setIconSize(QSize(28, 28)); for (const QJsonObject &e : custom_) addCustom(e); return; }
+    grid_->setIconSize(QSize()); /* glyphs are drawn as text, nothing is reserved for an icon */
     if (!q.isEmpty()) shown = searchEmoji(q, 200);
     else if (cat_ == 0) {
         const QStringList rec = recentEmoji();

@@ -44,6 +44,7 @@ struct State {
     extra_rooms: Vec<(String, String, bool, Vec<String>)>, /* (room id, name, joined, children): invites, rooms created at run time and spaces (a room with children) */
     uia_password: Option<String>, /* when set, cross-signing uploads need this password (user-interactive auth) */
     media: BTreeMap<String, Vec<u8>>, /* uploaded files by id */
+    emoji_pack: bool, /* the demo room has a custom emoji pack (media emoji_cat / emoji_wave are seeded with it) */
     presence: BTreeMap<String, String>, /* user local part -> presence state set by the user (bob is online unless set) */
 }
 
@@ -318,7 +319,11 @@ impl FakeHs {
         mount("GET", r"^/_matrix/client/v3/sync$", |st, who, _| {
             st.syncs += 1;
             let n = st.events.len();
-            let state_events = room_state(&["alice", "bob"]);
+            let mut state_events = room_state(&["alice", "bob"]);
+            if st.emoji_pack {
+                state_events.push(json!({"type": "im.ponies.room_emotes", "state_key": "cats", "sender": "@alice:hs", "event_id": "$emotes", "origin_server_ts": 7, "content": {"pack": {"display_name": "Cats"},
+                    "images": {"cat": {"url": "mxc://hs/emoji_cat", "info": {"w": 64, "h": 64, "mimetype": "image/png"}}, "wave": {"url": "mxc://hs/emoji_wave", "usage": ["sticker"], "info": {"w": 64, "h": 64, "mimetype": "image/png"}}}}}));
+            }
             let (user, dev) = split_who(who);
             let u = st.users.entry(user).or_default().devices.entry(dev).or_default();
             let td: Vec<Value> = u.to_device.drain(..).collect();
@@ -523,6 +528,12 @@ impl FakeHs {
             rooms.extend(space.3.iter().map(|c| describe(c)));
             json!({"rooms": rooms})
         }).await;
+        mount("GET", r"^/_matrix/client/v3/profile/[^/]+$", |_, _, req| {
+            let user = pct_decode(req.url.path()).rsplit('/').next().unwrap_or("").to_string();
+            let local = user.trim_start_matches('@').split(':').next().unwrap_or("").to_string();
+            if user.ends_with(":hs") && matches!(local.as_str(), "alice" | "bob") { json!({"displayname": local, "avatar_url": format!("mxc://hs/av_{local}")}) }
+            else { json!({"errcode": "M_NOT_FOUND", "error": "Profile not found"}) }
+        }).await;
         mount("GET", r"^/_matrix/client/v3/pushrules/?$", |st, who, _| push_rules(st, who).clone()).await;
         mount("PUT", r"^/_matrix/client/v3/pushrules/global/", change_push_rule).await;
         mount("DELETE", r"^/_matrix/client/v3/pushrules/global/", change_push_rule).await;
@@ -611,6 +622,12 @@ impl FakeHs {
     }
 
     /// These users (local parts, e.g. "bob") are typing in the room from the next sync on.
+    /// Dev aid: the demo room gets a custom emoji pack (`:cat:` and the sticker `wave`).
+    pub fn seed_emoji_pack(&self) {
+        let mut st = self.st.lock().unwrap();
+        st.emoji_pack = true;
+        for id in ["emoji_cat", "emoji_wave"] { st.media.insert(id.into(), include_bytes!("avatar_demo.png").to_vec()); }
+    }
     pub fn set_typing(&self, users: &[&str]) { self.st.lock().unwrap().typing = users.iter().map(|u| u.to_string()).collect(); }
 
     /// `user` (a local part, e.g. "bob") has read up to this event, from the next sync on.
@@ -660,6 +677,13 @@ pub async fn bob_says(hs: FakeHs, lines: Vec<String>) {
     for l in lines {
         let _ = room.send(RoomMessageEventContent::text_plain(l)).await;
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    }
+    if hs.st.lock().unwrap().emoji_pack {
+        let _ = room.send(RoomMessageEventContent::text_html("I like :cat: a lot", "I like <img data-mx-emoticon height=\"32\" src=\"mxc://hs/emoji_cat\" alt=\":cat:\" title=\":cat:\" /> a lot")).await;
+        let mut info = matrix_sdk::ruma::events::room::ImageInfo::new();
+        info.width = Some(64u32.into());
+        info.height = Some(64u32.into());
+        let _ = room.send(matrix_sdk::ruma::events::sticker::StickerEventContent::new("wave".into(), info, "mxc://hs/emoji_wave".into())).await;
     }
     hs.set_typing(&["bob"]); /* a UI under test then shows "bob is typing" */
     loop { tokio::time::sleep(std::time::Duration::from_secs(3600)).await; } /* keep the temp store alive while the UI runs */

@@ -171,4 +171,5 @@ pub mod capi;
 pub mod index;
 pub mod bookmarks;
 pub mod ui;
+pub mod emotes;
 pub use ui::{ui_messages, ui_rooms, UiMessage, UiRoom};

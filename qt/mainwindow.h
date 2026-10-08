@@ -7,6 +7,7 @@
 #include "qt/memberlist.h"
 #include "qt/searchpanel.h"
 #include "qt/emojipicker.h"
+#include "qt/packpicker.h"
 #include "qt/loginpage.h"
 #include "qt/notifier.h"
 #include "qt/sidebar.h"
@@ -41,9 +42,10 @@ class Composer : public QLineEdit {
 public:
     struct Candidate { QString id, label, insert; }; /* insert: what replaces the typed word (default: the label and a space) */
     explicit Composer(QWidget *parent = nullptr);
-    void setButtons(QToolButton *left, QToolButton *right); /* drawn inside the box, left and right */
+    void setButtons(QToolButton *left, QToolButton *right, QToolButton *beforeRight = nullptr); /* drawn inside the box: left, right and one next to the right one */
     ~Composer() override;
     std::function<QList<Candidate>(const QString &prefix)> candidates; /* people (and @room) matching what follows an '@' */
+    std::function<QList<Candidate>(const QString &prefix)> customEmoji; /* custom emoji matching what follows a ':' */
 signals:
     void imagePasted(const QImage &img);
     void filesPasted(const QStringList &paths);
@@ -54,7 +56,7 @@ protected:
     void focusOutEvent(QFocusEvent *e) override;
     void resizeEvent(QResizeEvent *e) override;
 private:
-    QToolButton *left_ = nullptr, *right_ = nullptr;
+    QToolButton *left_ = nullptr, *right_ = nullptr, *mid_ = nullptr;
     void updatePopup();
     void acceptCandidate();
     QListWidget *popup_;
@@ -149,8 +151,11 @@ private:
     QTemporaryDir *pasteDir_ = nullptr;
     QStackedWidget *timelines_;
     Composer *composer_;
-    QToolButton *attach_ = nullptr, *emojiBtn_ = nullptr;
+    QToolButton *attach_ = nullptr, *emojiBtn_ = nullptr, *stickerBtn_ = nullptr;
     EmojiPicker *picker_, *reactPicker_;
+    PackPicker *stickerPicker_ = nullptr;
+    QJsonArray emotePacks_; /* custom emoji and sticker packs of the open room (engine `emote_packs`) */
+    QString packsRoom_;
     MemberList *memberList_;
     SearchPanel *searchPanel_;
     QWidget *threadPanel_, *pinBar_;

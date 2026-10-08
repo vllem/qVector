@@ -1,4 +1,6 @@
 #include "qt/mainwindow.h"
+#include <QJsonDocument>
+#include "qt/packpicker.h"
 #include "qt/audioplayer.h"
 #include "qt/avatar.h"
 #include "qt/theme.h"
@@ -86,12 +88,14 @@ Composer::Composer(QWidget *parent) : QLineEdit(parent)
 
 Composer::~Composer() { delete popup_; }
 
-void Composer::setButtons(QToolButton *left, QToolButton *right)
+void Composer::setButtons(QToolButton *left, QToolButton *right, QToolButton *beforeRight)
 {
     left_ = left;
     right_ = right;
+    mid_ = beforeRight;
     for (QToolButton *b : {left, right}) b->setIconSize(QSize(20, 20));
-    setTextMargins(28, 0, 28, 0);
+    if (mid_) mid_->setIconSize(QSize(20, 20));
+    setTextMargins(28, 0, mid_ ? 58 : 28, 0);
 }
 
 void Composer::resizeEvent(QResizeEvent *e)
@@ -102,6 +106,7 @@ void Composer::resizeEvent(QResizeEvent *e)
     right_->setFixedSize(28, 28);
     left_->move(5, (height() - 28) / 2);
     right_->move(width() - 33, (height() - 28) / 2);
+    if (mid_) { mid_->setFixedSize(28, 28); mid_->move(width() - 63, (height() - 28) / 2); }
 }
 
 void Composer::focusOutEvent(QFocusEvent *e)
@@ -120,6 +125,7 @@ void Composer::updatePopup()
     if (t[start] == ':') { /* :smile -> emoji by name */
         const QString word = t.mid(start + 1, pos - start - 1);
         shown_.clear();
+        if (customEmoji && !word.isEmpty()) shown_ = customEmoji(word);
         if (word.size() >= 2) for (const Emoji &e : searchEmoji(word, 8)) shown_.append({QString(), e.glyph + "  " + e.name, e.glyph + " "});
     } else {
         if (!candidates) { popup_->hide(); tokenStart_ = -1; return; }
@@ -365,7 +371,20 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     emojiBtn_->setAutoRaise(true);
     emojiBtn_->setCursor(Qt::ArrowCursor);
     emojiBtn_->setToolTip("Emoji (you can also type :name)");
-    composer_->setButtons(attach_, emojiBtn_);
+    stickerBtn_ = new QToolButton(composer_);
+    stickerBtn_->setAutoRaise(true);
+    stickerBtn_->setCursor(Qt::ArrowCursor);
+    stickerBtn_->setToolTip("Stickers");
+    composer_->setButtons(attach_, emojiBtn_, stickerBtn_);
+    composer_->customEmoji = [this](const QString &word) {
+        QList<Composer::Candidate> out;
+        for (const QJsonValue &p : emotePacks_)
+            for (const QJsonValue &ev : p.toObject()["emotes"].toArray()) {
+                const QJsonObject e = ev.toObject();
+                if (e["emoji"].toBool() && S(e, "shortcode").contains(word, Qt::CaseInsensitive) && out.size() < 8) out.append({QString(), ":" + S(e, "shortcode") + ":", ":" + S(e, "shortcode") + ": "});
+            }
+        return out;
+    };
     compRow->addWidget(composer_, 1);
     contextBar_ = new QWidget;
     {
@@ -549,6 +568,15 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     reactPicker_ = new EmojiPicker(this);
     reactPicker_->setCloseOnPick(true);
     connect(emojiBtn_, &QToolButton::clicked, this, [this] { picker_->popupAt(composer_->mapToGlobal(QPoint(composer_->width(), 0))); });
+    stickerPicker_ = new PackPicker(this);
+    connect(stickerBtn_, &QToolButton::clicked, this, [this] {
+        core_->call("emote_packs", {{"room_id", current_}});
+        stickerPicker_->popupAt(composer_->mapToGlobal(QPoint(composer_->width(), 0)));
+    });
+    connect(stickerPicker_, &PackPicker::picked, this, [this](const QJsonObject &e) {
+        core_->call("send_sticker", {{"mxc", S(e, "mxc")}, {"body", S(e, "shortcode")}, {"width", e["width"].toInt()}, {"height", e["height"].toInt()}, {"mime", S(e, "mime")}});
+    });
+    connect(picker_, &EmojiPicker::customPicked, this, [this](const QString &code) { composer_->insert(":" + code + ": "); composer_->setFocus(); emit composer_->textEdited(composer_->text()); });
     connect(picker_, &EmojiPicker::emojiPicked, this, [this](const QString &g) { composer_->insert(g); composer_->setFocus(); emit composer_->textEdited(composer_->text()); });
     connect(reactPicker_, &EmojiPicker::emojiPicked, this, [this](const QString &g) { if (!reactEvent_.isEmpty()) core_->call("react", {{"event_id", reactEvent_}, {"key", g}}); });
     connect(composer_, &Composer::escapePressed, this, [this] { if (replyTo_.isEmpty() && editing_.isEmpty() && !pending_.isEmpty()) cancelAttachment(); else cancelContext(); });
@@ -731,6 +759,24 @@ void MainWindow::applyChrome()
         };
         attach_->setIcon(draw(false));
         emojiBtn_->setIcon(draw(true));
+        {   /* a square with a folded corner: stickers */
+            QPixmap pm(48, 48);
+            pm.fill(Qt::transparent);
+            QPainter p(&pm);
+            p.setRenderHint(QPainter::Antialiasing);
+            p.scale(2.0, 2.0);
+            p.setPen(QPen(pal.color(QPalette::WindowText), 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            p.setBrush(Qt::NoBrush);
+            QPainterPath sq;
+            sq.moveTo(4, 5.5); sq.quadTo(4, 4, 5.5, 4); sq.lineTo(18.5, 4); sq.quadTo(20, 4, 20, 5.5);
+            sq.lineTo(20, 13); sq.lineTo(13, 20); sq.lineTo(5.5, 20); sq.quadTo(4, 20, 4, 18.5); sq.closeSubpath();
+            p.drawPath(sq);
+            QPainterPath fold;
+            fold.moveTo(13, 20); fold.lineTo(13, 14.5); fold.quadTo(13, 13, 14.5, 13); fold.lineTo(20, 13);
+            p.drawPath(fold);
+            pm.setDevicePixelRatio(2.0);
+            stickerBtn_->setIcon(QIcon(pm));
+        }
     }
     const QString base = QApplication::style()->name();
     auto *cur = qobject_cast<QProxyStyle *>(tabs_->style());
@@ -783,7 +829,16 @@ void MainWindow::onEvent(const QString &name, const QJsonValue &p)
         updatePinBar();
     } else if (name == "details") {
         details_ = p.toObject();
+        if (S(details_, "id") == current_ && packsRoom_ != current_) { emotePacks_ = QJsonArray(); picker_->setCustom(emotePacks_); packsRoom_ = current_; core_->call("emote_packs", {{"room_id", current_}}); }
         if (S(details_, "id") == current_) { timeline_->setEncrypted(details_["encrypted"].toBool()); updateTopic(); if (memberList_->isVisible()) memberList_->refresh(details_); }
+    } else if (name == "emote_packs") {
+        const QJsonObject o = p.toObject();
+        if (S(o, "room_id") == current_) {
+            emotePacks_ = o["packs"].toArray();
+            packsRoom_ = current_;
+            picker_->setCustom(emotePacks_);
+            stickerPicker_->setPacks(emotePacks_);
+        }
     } else if (name == "presence") {
         memberList_->setPresence(p.toObject());
     } else if (name == "typing") {

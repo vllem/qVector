@@ -71,7 +71,12 @@ pub struct UiMessage {
     pub gallery: Vec<UiGalleryItem>,
     /// the sender's picture: a file the app downloaded (set by the app, empty until then)
     pub avatar_path: String,
+    /// custom emoji pictures inside `html` (`mxc://` address and, once the app has downloaded it, the file)
+    pub emoji: Vec<UiEmojiRef>,
 }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
+pub struct UiEmojiRef { pub mxc: String, pub path: String }
 
 /// The other person's picture in a direct chat: from the room's heroes, else from the member event of the person it was made with,
 /// else from their profile (asked once per person; bridged chats often lack the hero's picture).
@@ -475,7 +480,7 @@ fn describe(c: &TimelineItemContent) -> (String, String, String) {
     }
     if c.is_unable_to_decrypt() { return ("undecryptable".into(), "[encrypted message: no key yet]".into(), String::new()); }
     if let Some(p) = c.as_poll() { return ("poll".into(), p.results().question, String::new()); }
-    if c.is_sticker() { return ("other".into(), "[sticker]".into(), String::new()); }
+    if let Some(st) = c.as_sticker() { return ("sticker".into(), st.content().body.clone(), String::new()); }
     ("other".into(), String::new(), String::new())
 }
 
@@ -521,6 +526,13 @@ fn message_row(ev: &EventTimelineItem, me: &str, images: &HashMap<String, PathBu
             row.image_path = images.get(&id).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
         }
     }
+    if let Some(st) = content.as_sticker() {
+        let uint = |v: Option<matrix_sdk::ruma::UInt>| v.map(u64::from).unwrap_or(0) as u32;
+        row.image_w = uint(st.content().info.width);
+        row.image_h = uint(st.content().info.height);
+        row.image_path = images.get(&id).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    }
+    row.emoji = crate::emotes::emoji_sources(&row.html).into_iter().map(|mxc| UiEmojiRef { mxc, path: String::new() }).collect();
     row.shield = shield_of(ev);
     row.poll = poll_of(content, me);
     row.thread_replies = content.thread_summary().map(|t| t.num_replies as u32).unwrap_or(0);
@@ -715,6 +727,17 @@ pub async fn fetch_images(client: &Client, items: &[Arc<TimelineItem>], cache: &
     for item in items {
         let Some(ev) = item.as_event() else { continue };
         let Some(id) = ev.event_id().map(|e| e.to_string()) else { continue };
+        if let Some(st) = ev.content().as_sticker() { /* a sticker is a picture of its own */
+            if !have.contains_key(&id) && !added.contains_key(&id) {
+                let req = MediaRequestParameters { source: st.content().source.clone().into(), format: MediaFormat::File };
+                if let Ok(bytes) = client.media().get_media_content(&req, true).await {
+                    let safe: String = id.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+                    let path = cache.join(format!("{safe}.img"));
+                    if std::fs::write(&path, bytes).is_ok() { added.insert(id.clone(), path); }
+                }
+            }
+            continue;
+        }
         let Some(m) = ev.content().as_message() else { continue };
         /* (key, source, file name) of every picture of the message; a gallery's pictures are keyed "<event id>#<index>" */
         let wanted: Vec<(String, matrix_sdk::ruma::events::room::MediaSource, String)> = match m.msgtype() {
@@ -817,8 +840,16 @@ pub async fn retry_undecryptable(timeline: &Timeline) -> usize {
 }
 
 /// Send text (Markdown becomes formatted text) into the timeline's room, optionally as a reply.
-pub async fn send_text(timeline: &Timeline, text: &str, reply_to: Option<&str>) -> Result<(), String> {
-    let content = RoomMessageEventContentWithoutRelation::new(RoomMessageEventContent::text_markdown(text).msgtype);
+pub async fn send_text(timeline: &Timeline, text: &str, reply_to: Option<&str>) -> Result<(), String> { send_text_with_emoji(timeline, text, reply_to, &HashMap::new()).await }
+
+/// `send_text`, with `:shortcode:`s of the given custom emoji (shortcode -> `mxc://` address) sent as pictures.
+pub async fn send_text_with_emoji(timeline: &Timeline, text: &str, reply_to: Option<&str>, emoji: &HashMap<String, String>) -> Result<(), String> {
+    let mut msgtype = RoomMessageEventContent::text_markdown(text).msgtype;
+    if let MessageType::Text(t) = &mut msgtype {
+        let html = t.formatted.as_ref().map(|f| f.body.clone());
+        if let Some(h) = crate::emotes::with_custom_emoji(text, html.as_deref(), emoji) { t.formatted = Some(matrix_sdk::ruma::events::room::message::FormattedBody::html(h)); }
+    }
+    let content = RoomMessageEventContentWithoutRelation::new(msgtype);
     match reply_to.filter(|r| !r.is_empty()) {
         Some(id) => {
             let id: OwnedEventId = id.try_into().map_err(|e| format!("bad event id: {e}"))?;
@@ -830,6 +861,17 @@ pub async fn send_text(timeline: &Timeline, text: &str, reply_to: Option<&str>) 
 }
 
 /// Send a file (a picture when it looks like one) into the timeline's room; encrypted rooms get an encrypted upload.
+/// Send a sticker (a picture that is already on the server).
+pub async fn send_sticker(timeline: &Timeline, mxc: &str, body: &str, width: u32, height: u32, mime: &str) -> Result<(), String> {
+    use matrix_sdk::ruma::events::{room::ImageInfo, sticker::StickerEventContent, AnyMessageLikeEventContent};
+    let uri = <&matrix_sdk::ruma::MxcUri>::from(mxc);
+    if !uri.is_valid() { return Err(format!("not a media address: {mxc}")); }
+    let mut info = ImageInfo::new();
+    if width > 0 && height > 0 { info.width = Some(width.into()); info.height = Some(height.into()); }
+    if !mime.is_empty() { info.mimetype = Some(mime.to_string()); }
+    timeline.send(AnyMessageLikeEventContent::Sticker(StickerEventContent::new(body.to_string(), info, uri.to_owned()))).await.map(|_| ()).map_err(|e| e.to_string())
+}
+
 pub async fn send_file(timeline: &Timeline, path: &Path, caption: Option<&str>) -> Result<(), String> {
     use matrix_sdk::ruma::events::room::message::TextMessageEventContent;
     use matrix_sdk_ui::timeline::AttachmentConfig;
@@ -1500,6 +1542,30 @@ mod tests {
         assert_eq!(rooms[0].name, "hidden", "{rooms:#?}");
         assert!(space_rooms(&f.client, "not an id").await.is_err());
         assert_eq!(join_via(&f.client, "!hidden:hs", &["hs".to_string()]).await.unwrap(), "!hidden:hs");
+    }
+
+    #[tokio::test]
+    async fn custom_emoji_and_stickers_are_read_from_packs_sent_as_pictures_and_shown() {
+        let f = fixture().await;
+        let room = f.client.get_room(<&matrix_sdk::ruma::RoomId>::try_from(ROOM).unwrap()).unwrap();
+        room.send_state_event_raw("im.ponies.room_emotes", "cats", serde_json::json!({"pack": {"display_name": "Cats"}, "images": {"cat": {"url": "mxc://hs/cat"}, "wave": {"url": "mxc://hs/wave", "usage": ["sticker"], "info": {"w": 64, "h": 48}}}})).await.unwrap();
+        f.client.account().set_account_data_raw("im.ponies.user_emotes".into(), matrix_sdk::ruma::serde::Raw::new(&serde_json::json!({"images": {"mine": {"url": "mxc://hs/mine"}}})).unwrap().cast_unchecked()).await.unwrap();
+        let mut packs = Vec::new();
+        for _ in 0..40 { crate::sync_once(&f.client).await.unwrap(); packs = crate::emotes::emote_packs(&f.client, ROOM).await; if packs.len() == 2 { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+        let names: Vec<(&str, &str, usize)> = packs.iter().map(|p| (p.source.as_str(), p.name.as_str(), p.emotes.len())).collect();
+        assert_eq!(names, vec![("room", "Cats", 2), ("user", "My emoji", 1)], "{packs:#?}");
+        let map = crate::emotes::emoji_map(&packs);
+        assert_eq!(map.get("cat").map(String::as_str), Some("mxc://hs/cat"));
+        assert!(!map.contains_key("wave"), "a sticker-only picture is not an emoji");
+
+        send_text_with_emoji(&f.timeline, "hello :cat: and **bold** :mine:", None, &map).await.unwrap();
+        send_sticker(&f.timeline, "mxc://hs/wave", "wave", 64, 48, "image/png").await.unwrap();
+        assert!(send_sticker(&f.timeline, "not an mxc", "x", 0, 0, "").await.is_err());
+        let msgs = wait_for(&f, |m| m.len() == 2 && m.iter().all(|x| !x.pending)).await;
+        assert!(msgs[0].html.contains("src=\"mxc://hs/cat\"") && msgs[0].html.contains("<strong>bold</strong>") && msgs[0].html.contains("src=\"mxc://hs/mine\""), "{}", msgs[0].html);
+        assert_eq!(msgs[0].emoji.iter().map(|e| e.mxc.as_str()).collect::<Vec<_>>(), vec!["mxc://hs/cat", "mxc://hs/mine"]);
+        assert_eq!(msgs[0].body, "hello :cat: and **bold** :mine:", "the plain text keeps the shortcodes");
+        assert_eq!((msgs[1].kind.as_str(), msgs[1].body.as_str(), msgs[1].image_w, msgs[1].image_h), ("sticker", "wave", 64, 48), "{:#?}", msgs[1]);
     }
 
     #[tokio::test]
