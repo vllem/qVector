@@ -43,6 +43,7 @@ signals:
     void olderRequested();
     void loadReplyRequested(const QString &replyingEventId); /* a reply whose original is not loaded: fetch it */
     void openRequested(const QString &eventId);       /* open a picture/video/audio with the system player */
+    void embedRequested(const QString &kind, const QString &id, const QString &url); /* a YouTube / X card was clicked */
     void playRequested(const QString &eventId);       /* a video card was clicked: fetch it and call playFile */
     void replyRequested(const QString &eventId);
     void editRequested(const QString &eventId);

@@ -254,6 +254,7 @@ void TimelineView::onAnchor(const QUrl &u)
         if (!reply.isEmpty()) emit loadReplyRequested(reply);
         revealMessage(target);
     }
+    else if (s.startsWith("vc:embed/")) emit embedRequested(part(1), part(2), part(3)); /* vc:embed/<kind>/<id>/<page url> */
     else if (s.startsWith("vc:vid:")) emit playRequested(s.mid(7));
     else if (s.startsWith("https://matrix.to/#/") || s.startsWith("http://matrix.to/#/")) emit matrixLink(s);
     else if (s.startsWith("vc:poll/")) emit pollVote(part(1).mid(0), part(2)); /* vc:poll/<event>/<answer> */
@@ -546,6 +547,38 @@ void TimelineView::render()
                        "<td valign=top><b><a href=\"" + esc(url) + "\">" + esc(S(pv, "title").isEmpty() ? url : S(pv, "title")) + "</a></b>" +
                        (S(pv, "site").isEmpty() ? QString() : "<br><span style=\"color:" + muted + "\">" + esc(S(pv, "site")) + "</span>") +
                        (desc.isEmpty() ? QString() : "<br>" + esc(desc)) + "</td></tr></table>";
+        }
+
+        const QJsonObject em = r.value("embed").toObject(); /* a YouTube video or an X post, when cards are on */
+        if (!em.isEmpty()) {
+            const bool video = S(em, "kind") == "youtube";
+            const QString href = "vc:embed/" + S(em, "kind") + "/" + enc(S(em, "id")) + "/" + enc(S(em, "url"));
+            QString img;
+            if (const QImage *ti = picture(S(em, "thumb_path"))) {
+                const QString key = "em:" + eid;
+                QImage sc = ti->scaledToWidth(int(176 * dpr), Qt::SmoothTransformation);
+                sc.setDevicePixelRatio(dpr);
+                {   /* a round play button over the middle of the picture */
+                    QPainter pp(&sc);
+                    pp.setRenderHint(QPainter::Antialiasing);
+                    const QPointF c(sc.width() / 2.0, sc.height() / 2.0);
+                    const qreal rr = 20 * dpr;
+                    pp.setPen(Qt::NoPen);
+                    pp.setBrush(QColor(0, 0, 0, 160));
+                    pp.drawEllipse(c, rr, rr);
+                    pp.setBrush(Qt::white);
+                    pp.drawPolygon(QPolygonF({c + QPointF(-rr * 0.3, -rr * 0.45), c + QPointF(-rr * 0.3, rr * 0.45), c + QPointF(rr * 0.55, 0)}));
+                }
+                frameImage(sc, pal.color(QPalette::Base), dpr);
+                addRes(doc, resHash_, QUrl(key), sc);
+                img = "<td valign=top><a href=\"" + href + "\"><img src=\"" + key + "\" width=176></a></td>";
+            }
+            QString text = S(em, "text");
+            if (text.size() > 400) text = text.left(400) + "...";
+            content += "<br><table cellspacing=0 cellpadding=5 style=\"background-color:" + hex(pal.color(QPalette::AlternateBase)) + "\"><tr>" + img + "<td valign=top>" +
+                       (video ? "<b><a href=\"" + href + "\">" + esc(S(em, "title")) + "</a></b><br><span style=\"color:" + muted + "\">" + esc(S(em, "author")) + " on YouTube</span>"
+                              : "<b>" + esc(S(em, "author")) + "</b> on X<br>" + esc(text).replace("\n", "<br>") + "<br><span style=\"color:" + muted + "\"><a href=\"" + href + "\">" + esc(S(em, "byline").isEmpty() ? S(em, "url") : S(em, "byline")) + "</a></span>") +
+                       "</td></tr></table>";
         }
 
         const QString anchor = eid.isEmpty() ? QString() : "<a name=\"ev" + QString::number(qHash(eid)) + "\"></a>";

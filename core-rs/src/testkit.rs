@@ -177,6 +177,7 @@ impl FakeHs {
         let server = Arc::new(MockServer::start().await);
         let st = Arc::new(Mutex::new(State::default()));
         for u in ["alice", "bob"] { st.lock().unwrap().media.insert(format!("av_{u}"), include_bytes!("avatar_demo.png").to_vec()); }
+        st.lock().unwrap().media.insert("hqdefault.jpg".into(), include_bytes!("avatar_demo.png").to_vec()); /* the "video picture" of the embed tests */
         let hs = FakeHs { server: server.clone(), st: st.clone() };
         let mount = |m: &'static str, re: &'static str, f: fn(&mut State, &str, &Request) -> Value| {
             let st = st.clone();
@@ -534,6 +535,12 @@ impl FakeHs {
             if user.ends_with(":hs") && matches!(local.as_str(), "alice" | "bob") { json!({"displayname": local, "avatar_url": format!("mxc://hs/av_{local}")}) }
             else { json!({"errcode": "M_NOT_FOUND", "error": "Profile not found"}) }
         }).await;
+        mount("GET", r"^/youtube/oembed$", |_, _, req| {
+            if req.url.query().unwrap_or("").contains("dQw4w9WgXcQ") { json!({"title": "Never Gonna Give You Up (Official Video)", "author_name": "Rick Astley", "type": "video"}) }
+            else { json!({"errcode": "M_NOT_FOUND", "error": "no such video"}) }
+        }).await;
+        mount("GET", r"^/x/oembed$", |_, _, _| json!({"author_name": "jack", "html": "<blockquote class=\"twitter-tweet\"><p lang=\"en\" dir=\"ltr\">just setting up my twttr</p>&mdash; jack (@jack) <a href=\"https://twitter.com/jack/status/20\">March 21, 2006</a></blockquote>\n"})).await;
+        Mock::given(method("GET")).and(path_regex(r"^/ytimg/vi/[^/]+/hqdefault\.jpg$")).respond_with(Download(st.clone())).mount(&*server).await;
         mount("GET", r"^/_matrix/client/v3/pushrules/?$", |st, who, _| push_rules(st, who).clone()).await;
         mount("PUT", r"^/_matrix/client/v3/pushrules/global/", change_push_rule).await;
         mount("DELETE", r"^/_matrix/client/v3/pushrules/global/", change_push_rule).await;
@@ -607,7 +614,7 @@ impl FakeHs {
     }
 
     /// The files uploaded so far, in upload order.
-    pub fn uploaded(&self) -> Vec<Vec<u8>> { self.st.lock().unwrap().media.iter().filter(|(k, _)| !k.starts_with("av_")).map(|(_, v)| v.clone()).collect() } /* what the client uploaded (not the seeded avatars) */
+    pub fn uploaded(&self) -> Vec<Vec<u8>> { self.st.lock().unwrap().media.iter().filter(|(k, _)| !k.starts_with("av_") && !k.starts_with("emoji_") && k.as_str() != "hqdefault.jpg").map(|(_, v)| v.clone()).collect() } /* what the client uploaded (not the seeded avatars) */
 
     /// From now on the server asks for this password before accepting cross-signing keys.
     pub fn require_password(&self, pw: &str) { self.st.lock().unwrap().uia_password = Some(pw.into()); }
