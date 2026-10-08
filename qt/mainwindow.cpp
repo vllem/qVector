@@ -828,9 +828,8 @@ void MainWindow::send()
     const QString text = composer_->text();
     if (current_.isEmpty()) return;
     if (!pending_.isEmpty()) {
-        /* the typed text becomes the caption of the first file */
-        for (int i = 0; i < pending_.size(); i++)
-            core_->call("send_file", {{"path", pending_[i]}, {"caption", i == 0 ? text : QString()}});
+        /* several files go out as one gallery message; the typed text is its caption */
+        core_->call("send_files", {{"paths", QJsonArray::fromStringList(pending_)}, {"caption", text}});
         composer_->clear(); drafts_.remove(current_);
         cancelAttachment();
         timeline_->stickToBottom();
@@ -858,16 +857,16 @@ void MainWindow::stageFiles(const QStringList &paths)
 {
     if (current_.isEmpty() || paths.isEmpty()) return;
     cancelContext();
-    pending_ = paths;
+    for (const QString &p : paths) if (!pending_.contains(p)) pending_ << p; /* pasting or choosing more adds to the same message */
     QString what;
-    if (paths.size() == 1) {
-        const QFileInfo fi(paths[0]);
+    if (pending_.size() == 1) {
+        const QFileInfo fi(pending_[0]);
         what = fi.fileName() + " (" + QLocale().formattedDataSize(fi.size()) + ")";
-        QImage img(paths[0]);
+        QImage img(pending_[0]);
         if (!img.isNull()) attachThumb_->setPixmap(QPixmap::fromImage(img.scaled(48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
         else attachThumb_->clear();
     } else {
-        what = QString::number(paths.size()) + " files";
+        what = QString::number(pending_.size()) + " files as one message";
         attachThumb_->clear();
     }
     attachLabel_->setText("Ready to send " + what + " - type a caption if you like, Enter to send, Esc to cancel");

@@ -203,8 +203,8 @@ void TimelineView::onAnchor(const QUrl &u)
         if (hiddenLocal_ > 0) { shownLimit_ += 100; windowStart_.clear(); loadingMore_ = true; render(); }
         else { loadingMore_ = true; emit olderRequested(); }
     }
-    else if (s.startsWith("vc:img:") || s.startsWith("vc:open:")) emit openRequested(s.mid(s.indexOf(':', 3) + 1));
-    else if (s.startsWith("vc:save:")) emit saveRequested(s.mid(8));
+    else if (s.startsWith("vc:img:") || s.startsWith("vc:open:")) emit openRequested(QUrl::fromPercentEncoding(s.mid(s.indexOf(':', 3) + 1).toUtf8())); /* a gallery item is "<event>#<n>" */
+    else if (s.startsWith("vc:save:")) emit saveRequested(QUrl::fromPercentEncoding(s.mid(8).toUtf8()));
     else if (s.startsWith("vc:text:")) emit textRequested(s.mid(8));
     else if (s.startsWith("vc:thread:")) emit threadRequested(s.mid(10));
     else if (s.startsWith("vc:vid:")) emit playRequested(s.mid(7));
@@ -338,6 +338,40 @@ void TimelineView::render()
             } else content = "<span style=\"color:" + muted + "\">Loading image...</span>";
             const QString fn = S(r, "file_name");
             if (!text.isEmpty() && text != "image" && text != fn) content += "<br>" + esc(text);
+        } else if (kind == "gallery") { /* several pictures (or files) in one message: a grid of thumbnails, cropped to squares like Discord's */
+            const QJsonArray items = r.value("gallery").toArray();
+            QVector<QJsonObject> pics, others;
+            for (const QJsonValue &v : items) (S(v.toObject(), "kind") == "image" ? pics : others).append(v.toObject());
+            const int n = pics.size(), cols = n <= 1 ? 1 : (n == 2 || n == 4) ? 2 : 3, gap = 4, total = 480;
+            const int side = n == 1 ? total : (total - gap * (cols - 1)) / cols;
+            if (n) {
+                content = "<table cellspacing=" + QString::number(gap) + " cellpadding=0>";
+                for (int i = 0; i < n; i += cols) {
+                    content += "<tr>";
+                    for (int c = 0; c < cols; c++) {
+                        if (i + c >= n) { content += "<td></td>"; continue; }
+                        const QJsonObject it = pics[i + c];
+                        const QString href = "vc:img:" + esc(eid) + "%23" + QString::number(it.value("index").toInt());
+                        const QImage *img = picture(S(it, "image_path"));
+                        if (!img) { content += "<td width=" + QString::number(side) + " height=" + QString::number(side * 2 / 3) + " bgcolor=\"" + hex(pal.color(QPalette::AlternateBase)) + "\" align=center><span style=\"color:" + muted + "\">Loading...</span></td>"; continue; }
+                        const QString key = "gal:" + eid + "#" + QString::number(it.value("index").toInt());
+                        QImage t;
+                        if (n == 1) t = img->scaled(QSize(total, 320) * dpr, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                        else {
+                            const QImage big = img->scaled(QSize(side, side) * dpr, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+                            t = big.copy((big.width() - side * dpr) / 2, (big.height() - side * dpr) / 2, side * dpr, side * dpr);
+                        }
+                        t.setDevicePixelRatio(dpr);
+                        addRes(doc, resHash_, QUrl(key), t);
+                        content += "<td><a href=\"" + href + "\"><img src=\"" + key + "\" width=" + QString::number(int(t.width() / dpr)) + "></a></td>";
+                    }
+                    content += "</tr>";
+                }
+                content += "</table>";
+            }
+            for (const QJsonObject &it : others)
+                content += "<a href=\"vc:save:" + esc(eid) + "%23" + QString::number(it.value("index").toInt()) + "\">&#128206; " + esc(S(it, "name")) + "</a> <span style=\"color:" + muted + "\">" + esc(QLocale().formattedDataSize(it.value("size").toVariant().toLongLong())) + "</span><br>";
+            if (!text.isEmpty()) content += (content.isEmpty() ? "" : "<br>") + esc(text);
         } else if (kind == "video") {
             QImage card(QSize(320, 180) * dpr, QImage::Format_RGB32);
             card.fill(QColor(0x20, 0x20, 0x20));

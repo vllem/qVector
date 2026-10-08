@@ -136,7 +136,7 @@ int main(int argc, char **argv)
         if (verify) QTimer::singleShot(delay / 2, &w, [&] { w.verifyForDemo(); });
         if (!room.isEmpty()) QTimer::singleShot(delay / 2, &w, [&] { w.openRoomByTitle(room); });
         if (!thread.isEmpty()) QTimer::singleShot(delay / 2 + 500, &w, [&] { w.threadForDemo(thread); });
-        if (!sendFile.isEmpty()) QTimer::singleShot(delay / 2 + 4000, &w, [&] { core.call("send_file", {{"path", sendFile}}); });
+        if (!sendFile.isEmpty()) QTimer::singleShot(delay / 2 + 4000, &w, [&] { core.call("send_files", {{"paths", QJsonArray::fromStringList(sendFile.split(','))}, {"caption", "a gallery"}}); });
         if (members) QTimer::singleShot(delay / 2 + 500, &w, [&] { w.membersForDemo(); });
         if (!search.isEmpty()) QTimer::singleShot(delay / 2 + 500, &w, [&] { w.searchForDemo(search); });
         if (!dialog.isEmpty()) QTimer::singleShot(delay / 2 + 500, &w, [&] { w.dialogForDemo(dialog); });

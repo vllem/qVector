@@ -100,5 +100,5 @@ the alice/bob direct chat (`m.direct`).
 
 Done (engine tests + fake server only): see README. Not done / ideas: custom emoji and stickers, YouTube/X embeds (the C version had them: fetch oEmbed directly, WebEngine
 player), presence, per-room notification levels (push rules; the fake lacks them), exploring a space's rooms, identity-change banner and per-user trust state beyond the
-shield on messages, QR verification, resetting cross-signing, sign-out of other sessions, location messages, spoilers, image paste / drag-and-drop with a caption bar,
+shield on messages, QR verification, resetting cross-signing, sign-out of other sessions, location messages, spoilers, (image paste, drag-and-drop with a caption bar and multi-picture galleries are done),
 notification text with sender and preview (alerts only carry a count), packaging (AppImage/.deb), a real-server run of everything.
