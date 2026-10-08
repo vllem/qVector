@@ -28,64 +28,8 @@ QColor nameColor(const QString &seed, const QPalette &pal)
     return isDark(pal) ? QColor::fromHsl(hue, 150, 170) : QColor::fromHsl(hue, 170, 85);
 }
 
-Theme savedTheme()
-{
-    const QString v = QSettings("vector", "vector").value("theme", "system").toString();
-    return v == "dark" ? Theme::Dark : v == "scheme" ? Theme::Scheme : Theme::System;
-}
-void saveTheme(Theme t) { QSettings("vector", "vector").setValue("theme", t == Theme::Dark ? "dark" : t == Theme::Scheme ? "scheme" : "system"); }
-QString savedSchemePath() { return QSettings("vector", "vector").value("scheme_path").toString(); }
-void saveSchemePath(const QString &path) { QSettings("vector", "vector").setValue("scheme_path", path); }
-
-bool loadColorScheme(const QString &path, QPalette &out)
-{
-    if (!QFile::exists(path)) return false;
-    QSettings ini(path, QSettings::IniFormat);
-    auto get = [&](const char *group, const char *key, QColor &c) {
-        const QStringList parts = ini.value(QString("%1/%2").arg(group, key)).toStringList();
-        if (parts.size() < 3) return false;
-        c = QColor(parts[0].trimmed().toInt(), parts[1].trimmed().toInt(), parts[2].trimmed().toInt());
-        return c.isValid();
-    };
-    QColor winBg, winFg, viewBg, viewFg, viewAlt, viewInactive, viewLink, viewVisited, btnBg, btnFg, selBg, selFg, tipBg, tipFg;
-    if (!get("Colors:Window", "BackgroundNormal", winBg) || !get("Colors:Window", "ForegroundNormal", winFg)) return false;
-    if (!get("Colors:View", "BackgroundNormal", viewBg)) viewBg = winBg;
-    if (!get("Colors:View", "ForegroundNormal", viewFg)) viewFg = winFg;
-    if (!get("Colors:View", "BackgroundAlternate", viewAlt)) viewAlt = viewBg;
-    if (!get("Colors:View", "ForegroundInactive", viewInactive)) viewInactive = viewFg.darker(150);
-    if (!get("Colors:View", "ForegroundLink", viewLink)) viewLink = QColor(0x6a, 0xa8, 0xe8);
-    if (!get("Colors:View", "ForegroundVisited", viewVisited)) viewVisited = viewLink;
-    if (!get("Colors:Button", "BackgroundNormal", btnBg)) btnBg = winBg;
-    if (!get("Colors:Button", "ForegroundNormal", btnFg)) btnFg = winFg;
-    if (!get("Colors:Selection", "BackgroundNormal", selBg)) selBg = QColor(0x59, 0x68, 0x78);
-    if (!get("Colors:Selection", "ForegroundNormal", selFg)) selFg = Qt::white;
-    if (!get("Colors:Tooltip", "BackgroundNormal", tipBg)) tipBg = viewBg;
-    if (!get("Colors:Tooltip", "ForegroundNormal", tipFg)) tipFg = viewFg;
-    QPalette p;
-    p.setColor(QPalette::Window, winBg);
-    p.setColor(QPalette::WindowText, winFg);
-    p.setColor(QPalette::Base, viewBg);
-    p.setColor(QPalette::AlternateBase, viewAlt);
-    p.setColor(QPalette::Text, viewFg);
-    p.setColor(QPalette::PlaceholderText, viewInactive);
-    p.setColor(QPalette::Button, btnBg);
-    p.setColor(QPalette::ButtonText, btnFg);
-    p.setColor(QPalette::Highlight, selBg);
-    p.setColor(QPalette::HighlightedText, selFg);
-    p.setColor(QPalette::ToolTipBase, tipBg);
-    p.setColor(QPalette::ToolTipText, tipFg);
-    p.setColor(QPalette::Link, viewLink);
-    p.setColor(QPalette::LinkVisited, viewVisited);
-    p.setColor(QPalette::BrightText, Qt::white);
-    p.setColor(QPalette::Light, btnBg.lighter(130));
-    p.setColor(QPalette::Midlight, btnBg.lighter(115));
-    p.setColor(QPalette::Mid, btnBg.darker(130));
-    p.setColor(QPalette::Dark, btnBg.darker(170));
-    p.setColor(QPalette::Shadow, Qt::black);
-    for (QPalette::ColorRole r : {QPalette::WindowText, QPalette::Text, QPalette::ButtonText}) p.setColor(QPalette::Disabled, r, viewInactive);
-    out = p;
-    return true;
-}
+Theme savedTheme() { return QSettings("vector", "vector").value("theme", "system").toString() == "dark" ? Theme::Dark : Theme::System; }
+void saveTheme(Theme t) { QSettings("vector", "vector").setValue("theme", t == Theme::Dark ? "dark" : "system"); }
 
 static QPalette ripcordDark()
 {
@@ -118,13 +62,9 @@ void applyTheme(QApplication &app, Theme t)
     static QPalette *systemPalette = nullptr;
     static QString *systemStyle = nullptr;
     if (!systemPalette) { systemPalette = new QPalette(app.palette()); systemStyle = new QString(app.style()->objectName()); }
-    QPalette scheme;
     if (t == Theme::Dark) {
         app.setStyle(QStyleFactory::create("Fusion"));
         app.setPalette(ripcordDark());
-    } else if (t == Theme::Scheme && loadColorScheme(savedSchemePath(), scheme)) {
-        app.setStyle(QStyleFactory::create("Fusion"));
-        app.setPalette(scheme);
     } else {
         QStyle *s = QStyleFactory::create(*systemStyle);
         if (s) app.setStyle(s);

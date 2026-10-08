@@ -569,19 +569,6 @@ void MainWindow::buildMenus()
         timeline_->refresh();
         threadView_->refresh();
     });
-    view->addAction("Colour scheme (.colors)...", this, [this] {
-        const QString f = QFileDialog::getOpenFileName(this, "KDE colour scheme", savedSchemePath(), "Colour schemes (*.colors);;All files (*)");
-        if (f.isEmpty()) return;
-        QPalette probe;
-        if (!loadColorScheme(f, probe)) { QMessageBox::warning(this, "Colour scheme", "This file has no usable colours."); return; }
-        saveSchemePath(f);
-        saveTheme(Theme::Scheme);
-        QSignalBlocker b(actDark_);
-        actDark_->setChecked(false);
-        applyTheme(*qApp, Theme::Scheme);
-        timeline_->refresh();
-        threadView_->refresh();
-    });
     actNotify_ = view->addAction("Desktop notifications");
     actNotify_->setCheckable(true);
     actNotify_->setChecked(notify_);

@@ -12,16 +12,12 @@
 
 namespace vc {
 
-enum class Theme { System, Dark, Scheme };
+enum class Theme { System, Dark };
 
 /* Applies the chosen theme: System keeps the desktop's own style and palette, Dark is a Ripcord-like dark Fusion palette. */
 void applyTheme(QApplication &app, Theme t);
 Theme savedTheme();
 void saveTheme(Theme t);
-/* A KDE colour scheme file (*.colors) turned into a palette; false if the file has no usable colours. Theme::Scheme applies the saved one. */
-bool loadColorScheme(const QString &path, QPalette &out);
-QString savedSchemePath();
-void saveSchemePath(const QString &path);
 
 /* a colour for a user / room name that reads well on the current palette (light or dark) */
 QColor nameColor(const QString &seed, const QPalette &pal);
