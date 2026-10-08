@@ -13,6 +13,7 @@ public:
     explicit MemberList(QWidget *parent = nullptr);
     void setMe(const QString &userId) { me_ = userId; }
     void refresh(const QJsonObject &details);
+    void setPresence(const QJsonObject &states); /* user id -> "online" | "unavailable" | "offline" (the engine's `presence` event) */
 signals:
     void moderationRequested(const QString &action, const QString &userId); /* "kick", "ban", "unban", "role:admin" / "role:moderator" / "role:member" */
     void verifyRequested(const QString &userId);  /* "Verify...": compare emoji with this person */
@@ -20,6 +21,7 @@ signals:
 
 private:
     QString sig_, me_;
+    QJsonObject presence_, last_;
     bool canSetRoles_ = false;
 };
 

@@ -42,8 +42,17 @@ MemberList::MemberList(QWidget *parent) : QListWidget(parent)
     });
 }
 
+void MemberList::setPresence(const QJsonObject &states)
+{
+    if (states == presence_) return;
+    presence_ = states;
+    sig_.clear();
+    if (!last_.isEmpty()) refresh(last_);
+}
+
 void MemberList::refresh(const QJsonObject &d)
 {
+    last_ = d;
     canSetRoles_ = d["can_set_roles"].toBool();
     struct Row { QJsonObject m; bool banned; int rank; };
     QList<Row> rows;
@@ -51,7 +60,7 @@ void MemberList::refresh(const QJsonObject &d)
     for (const QJsonValue &v : d["members"].toArray()) rows.append({v.toObject(), false, rankOf(v.toObject()["role"].toString())});
     for (const QJsonValue &v : d["banned"].toArray()) rows.append({v.toObject(), true, 4});
     QString sig = d["id"].toString();
-    for (const Row &x : rows) sig += "|" + x.m["user_id"].toString() + ":" + x.m["name"].toString() + ":" + QString::number(x.rank) + QString::number(x.m["verified"].toBool()) + QString::number(x.m["can_kick"].toBool()) + x.m["avatar_path"].toString();
+    for (const Row &x : rows) sig += "|" + x.m["user_id"].toString() + ":" + x.m["name"].toString() + ":" + QString::number(x.rank) + QString::number(x.m["verified"].toBool()) + QString::number(x.m["can_kick"].toBool()) + x.m["avatar_path"].toString() + presence_[x.m["user_id"].toString()].toString();
     if (sig == sig_) return;
     sig_ = sig;
     clear();
@@ -76,8 +85,18 @@ void MemberList::refresh(const QJsonObject &d)
             QPainter pp(&pic);
             pp.drawPixmap(QPointF(0, 0), shieldPixmap(0, 11, devicePixelRatioF()));
         }
+        const QString state = presence_[id].toString();
+        if (!x.banned && (state == "online" || state == "unavailable")) { /* a coloured dot in the lower right corner of the picture */
+            QPainter pp(&pic);
+            pp.setRenderHint(QPainter::Antialiasing);
+            const qreal r = 4.5, c = 22 - r - 0.5;
+            pp.setPen(QPen(pal.color(QPalette::Base), 1.6));
+            pp.setBrush(state == "online" ? QColor("#2e9e4f") : QColor("#d89a1c"));
+            pp.drawEllipse(QPointF(c, c), r - 0.8, r - 0.8);
+        }
         auto *it = new QListWidgetItem(QIcon(pic), name);
         QString tip = id;
+        if (state == "online") tip += "\nOnline"; else if (state == "unavailable") tip += "\nAway";
         if (verified) tip += "\nVerified";
         if (!x.m["role"].toString().isEmpty()) tip += "\n" + x.m["role"].toString();
         it->setToolTip(tip);

@@ -657,6 +657,9 @@ void MainWindow::buildMenus()
     ch->addAction("Create poll...", this, [this] { if (!current_.isEmpty()) PollDialog(core_, this).exec(); });
     ch->addAction("Close tab", QKeySequence("Ctrl+W"), this, [this] { if (tabs_->currentIndex() >= 0) closeTab(tabs_->currentIndex()); });
     ch->addAction("Leave room", this, [this] { if (!current_.isEmpty() && QMessageBox::question(this, "Leave", "Leave " + roomTitle(current_) + "?") == QMessageBox::Yes) core_->call("leave_room", {{"room_id", current_}}); });
+    QMenu *status = tools->addMenu("My status");
+    for (const auto &o : {std::pair<const char *, const char *>{"online", "Online"}, {"unavailable", "Away"}, {"offline", "Appear offline"}})
+        status->addAction(o.second, this, [this, st = QString(o.first)] { core_->call("set_presence", {{"state", st}}); });
     tools->addAction("Preferences...", QKeySequence("Ctrl+,"), this, [this] { showPreferences(); });
     tools->addSeparator();
     tools->addAction("Saved messages...", QKeySequence("Ctrl+Shift+B"), this, [this] { showSaved(); });
@@ -776,6 +779,8 @@ void MainWindow::onEvent(const QString &name, const QJsonValue &p)
     } else if (name == "details") {
         details_ = p.toObject();
         if (S(details_, "id") == current_) { timeline_->setEncrypted(details_["encrypted"].toBool()); updateTopic(); if (memberList_->isVisible()) memberList_->refresh(details_); }
+    } else if (name == "presence") {
+        memberList_->setPresence(p.toObject());
     } else if (name == "typing") {
         QStringList names;
         for (const QJsonValue &v : p.toArray()) names << v.toString();

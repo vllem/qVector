@@ -165,6 +165,26 @@ pub async fn room_details(client: &Client, room_id: &str) -> Result<UiRoomDetail
     Ok(UiRoomDetails { id: room_id.into(), name, topic: room.topic().unwrap_or_default(), encrypted, can_edit, can_set_roles, can_pin, can_invite, members, banned })
 }
 
+/// Online status of people: user id -> "online", "unavailable" (away) or "offline". People the server will not tell about are left out
+/// (servers often have presence switched off); at most 150 are asked, all at once.
+pub async fn presence_of(client: &Client, users: &[String]) -> HashMap<String, String> {
+    use matrix_sdk::ruma::{api::client::presence::get_presence, presence::PresenceState, UserId};
+    let asks = users.iter().take(150).filter_map(|u| <&UserId>::try_from(u.as_str()).ok().map(|id| id.to_owned())).map(|id| async move {
+        let r = client.send(get_presence::v3::Request::new(id.clone())).await.ok()?;
+        let state = match r.presence { PresenceState::Online => "online", PresenceState::Unavailable => "unavailable", PresenceState::Offline => "offline", _ => return None };
+        Some((id.to_string(), state.to_string()))
+    });
+    futures_util::future::join_all(asks).await.into_iter().flatten().collect()
+}
+
+/// Tell the server how we are: "online", "unavailable" or "offline".
+pub async fn set_own_presence(client: &Client, state: &str) -> Result<(), String> {
+    use matrix_sdk::ruma::{api::client::presence::set_presence, presence::PresenceState};
+    let me = client.user_id().ok_or("not signed in")?.to_owned();
+    let st = match state { "online" => PresenceState::Online, "unavailable" => PresenceState::Unavailable, "offline" => PresenceState::Offline, o => return Err(format!("unknown status {o}")) };
+    client.send(set_presence::v3::Request::new(me, st)).await.map(|_| ()).map_err(|e| e.to_string())
+}
+
 /// A room that got new unread messages since the last look: what a desktop notification should say.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct UiAlert { pub room_id: String, pub title: String, pub new: u32, pub highlight: bool }
@@ -1436,6 +1456,17 @@ mod tests {
             assert_eq!(got, level);
         }
         assert!(set_room_notification_level(&f.client, &id, "loud").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn online_status_of_people_can_be_read_and_set() {
+        let f = fixture().await;
+        let got = presence_of(&f.client, &["@bob:hs".to_string(), "@alice:hs".to_string(), "@nobody:hs".to_string(), "garbage".to_string()]).await;
+        assert_eq!(got.get("@bob:hs").map(String::as_str), Some("online"), "{got:?}");
+        assert!(!got.contains_key("@nobody:hs") && !got.contains_key("garbage"), "{got:?}");
+        set_own_presence(&f.client, "unavailable").await.unwrap();
+        assert_eq!(presence_of(&f.client, &["@alice:hs".to_string()]).await.get("@alice:hs").map(String::as_str), Some("unavailable"));
+        assert!(set_own_presence(&f.client, "busy").await.is_err());
     }
 
     #[tokio::test]

@@ -101,6 +101,8 @@ impl Inner {
         let fill = |d: &mut ui::UiRoomDetails| { for m in d.members.iter_mut().chain(d.banned.iter_mut()) { m.avatar_path = self.avatars.path(&m.avatar_mxc); } };
         fill(&mut d);
         self.emit_json("details", &d);
+        let ids: Vec<String> = d.members.iter().map(|m| m.user_id.clone()).collect();
+        self.emit_json("presence", &ui::presence_of(client, &ids).await);
         let wanted: Vec<String> = d.members.iter().chain(d.banned.iter()).map(|m| m.avatar_mxc.clone()).filter(|m| self.avatars.wanted(m)).take(8).collect();
         if wanted.is_empty() { return; }
         for m in &wanted { self.avatars.fetch(client, m, &self.avatar_dir()).await; }
@@ -160,6 +162,7 @@ impl App {
             "leave_room" => { let id = s(args, "room_id"); self.client_action("Left the room", move |c| async move { ui::leave_room(&c, &id).await.map(|_| id) }) }
             "set_room_tag" => { let (id, k) = (s(args, "room_id"), s(args, "kind")); self.client_action("Room updated", move |c| async move { ui::set_room_tag(&c, &id, &k).await.map(|_| id) }) }
             "set_room_notify" => { let (id, l) = (s(args, "room_id"), s(args, "level")); self.client_action("Notification level changed", move |c| async move { ui::set_room_notification_level(&c, &id, &l).await.map(|_| id) }) }
+            "set_presence" => { let st = s(args, "state"); self.client_action("Status changed", move |c| async move { ui::set_own_presence(&c, &st).await.map(|_| String::new()) }) }
             "create_room" => {
                 let (n, t, e, p) = (s(args, "name"), s(args, "topic"), b(args, "encrypted"), b(args, "public"));
                 let invites: Vec<String> = args["invites"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();

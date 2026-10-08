@@ -44,6 +44,7 @@ struct State {
     extra_rooms: Vec<(String, String, bool, Vec<String>)>, /* (room id, name, joined, children): invites, rooms created at run time and spaces (a room with children) */
     uia_password: Option<String>, /* when set, cross-signing uploads need this password (user-interactive auth) */
     media: BTreeMap<String, Vec<u8>>, /* uploaded files by id */
+    presence: BTreeMap<String, String>, /* user local part -> presence state set by the user (bob is online unless set) */
 }
 
 #[derive(Clone)]
@@ -496,6 +497,19 @@ impl FakeHs {
             let id = parts[parts.len() - 2].replace("%21", "!").replace("%3A", ":").replace("%3a", ":");
             st.extra_rooms.retain(|r| r.0 != id);
             st.log.push(format!("leave {id}"));
+            json!({})
+        }).await;
+        mount("GET", r"^/_matrix/client/v3/presence/[^/]+/status$", |st, _, req| {
+            let user = pct_decode(req.url.path()).split("/presence/").nth(1).unwrap_or("").trim_end_matches("/status").to_string();
+            let local = user.trim_start_matches('@').split(':').next().unwrap_or("").to_string();
+            if user.ends_with(":hs") && matches!(local.as_str(), "alice" | "bob") {
+                json!({"presence": st.presence.get(&local).cloned().unwrap_or_else(|| "online".into()), "last_active_ago": 1000})
+            } else { json!({"errcode": "M_NOT_FOUND", "error": "unknown user"}) }
+        }).await;
+        mount("PUT", r"^/_matrix/client/v3/presence/[^/]+/status$", |st, _, req| {
+            let user = pct_decode(req.url.path()).split("/presence/").nth(1).unwrap_or("").trim_end_matches("/status").to_string();
+            let local = user.trim_start_matches('@').split(':').next().unwrap_or("").to_string();
+            st.presence.insert(local, body(req)["presence"].as_str().unwrap_or("online").to_string());
             json!({})
         }).await;
         mount("GET", r"^/_matrix/client/v3/pushrules/?$", |st, who, _| push_rules(st, who).clone()).await;
