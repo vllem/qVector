@@ -148,6 +148,7 @@ impl App {
             "react" => { let (e, k) = (s(args, "event_id"), s(args, "key")); self.on_timeline(move |_, tl| async move { let _ = ui::toggle_reaction(&tl, &e, &k).await; }); Value::Null }
             "edit" => { let (e, t) = (s(args, "event_id"), s(args, "text")); self.on_timeline(move |_, tl| async move { let _ = ui::edit_text(&tl, &e, &t).await; }); Value::Null }
             "redact" => { let e = s(args, "event_id"); self.on_timeline(move |_, tl| async move { let _ = ui::redact(&tl, &e).await; }); Value::Null }
+            "load_reply" => { let e = s(args, "event_id"); self.on_timeline(move |_, tl| async move { let _ = ui::load_reply(&tl, &e).await; }); Value::Null }
             "load_older" => { self.on_timeline(move |i, tl| async move { let reached = ui::load_older(&tl).await.unwrap_or(false); i.emit_json("older", &json!({"reached": reached})); }); Value::Null }
             "search_messages" => self.search_messages(&s(args, "query")),
             "search_all" => self.search_all(&s(args, "query")),

@@ -28,7 +28,7 @@ public:
     void reset();
     void setRows(const QJsonArray &rows);
     /* the link at the top: older messages can be loaded / are loading / there are none */
-    void setHistoryState(bool canLoadMore, bool loading) { canLoadMore_ = canLoadMore; loadingHistory_ = loading; }
+    void setHistoryState(bool canLoadMore, bool loading) { canLoadMore_ = canLoadMore; loadingHistory_ = loading; if (!loading) continueSeek(); }
     void setBookmarks(const QSet<QString> &ids) { bookmarks_ = ids; }
     void refresh(); /* redraws; a view that is not on screen only notes that it is out of date and redraws when shown */
     void stickToBottom() { stick_ = true; }
@@ -41,6 +41,7 @@ public:
 
 signals:
     void olderRequested();
+    void loadReplyRequested(const QString &replyingEventId); /* a reply whose original is not loaded: fetch it */
     void openRequested(const QString &eventId);       /* open a picture/video/audio with the system player */
     void playRequested(const QString &eventId);       /* a video card was clicked: fetch it and call playFile */
     void replyRequested(const QString &eventId);
@@ -78,6 +79,10 @@ private:
     QString me_, highlight_;
     bool encrypted_ = false, canLoadMore_ = false, loadingHistory_ = false;
     QJsonArray rows_;
+    QString seeking_; /* a message to scroll to once older history has brought it in */
+    int seekTries_ = 0;
+    bool seekPending_ = false;
+    void continueSeek();
     QTextBrowser *view_;
     bool stick_ = true, programmatic_ = false, stale_ = false, loadingMore_ = false;
     QString pendingReveal_, lastState_;

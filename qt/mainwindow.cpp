@@ -469,6 +469,7 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     connect(timeline_, &TimelineView::reactRequested, this, [this](const QString &id, const QString &key) { core_->call("react", {{"event_id", id}, {"key", key}}); });
     connect(timeline_, &TimelineView::reactPickerRequested, this, [this](const QString &id) { reactEvent_ = id; reactPicker_->popupAt(QCursor::pos() + QPoint(190, 0)); });
     connect(timeline_, &TimelineView::saveRequested, this, &MainWindow::saveAttachment);
+        connect(timeline_, &TimelineView::loadReplyRequested, this, [this](const QString &id) { core_->call("load_reply", QJsonObject{{"event_id", id}}); });
         connect(timeline_, &TimelineView::olderRequested, this, [this] { core_->call("load_older"); });
     connect(timeline_, &TimelineView::pinRequested, this, [this](const QString &id, bool pin) { core_->call("pin_message", {{"event_id", id}, {"pinned", pin}}); });
     connect(timeline_, &TimelineView::bookmarkRequested, this, [this](const QString &id) { core_->call("toggle_bookmark", {{"event_id", id}}); });

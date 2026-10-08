@@ -802,6 +802,12 @@ pub fn watch_typing(client: &Client, room_id: &str, on_change: impl Fn(Vec<Strin
 }
 
 /// Fetch older messages into the timeline. Returns true when the start of the room has been reached (nothing more to load).
+/// Fetch the message a reply answers when the timeline does not hold it (the row then updates with its sender and text).
+pub async fn load_reply(timeline: &Timeline, reply_event_id: &str) -> Result<(), String> {
+    let id = matrix_sdk::ruma::EventId::parse(reply_event_id).map_err(|e| e.to_string())?;
+    timeline.fetch_details_for_event(&id).await.map_err(|e| e.to_string())
+}
+
 pub async fn load_older(timeline: &Timeline) -> Result<bool, String> { timeline.paginate_backwards(30).await.map_err(|e| e.to_string()) }
 
 /// Tell the room we have read up to its newest message (so the server's unread counts and other people's receipts follow). True if a receipt was sent.
@@ -888,6 +894,17 @@ mod tests {
         let ev = f.timeline.items().await.iter().filter_map(|i| i.as_event().cloned()).nth(1).unwrap();
         assert_eq!(ev.content().in_reply_to().unwrap().event_id.to_string(), first);
         assert_eq!(ev.content().as_message().unwrap().mentions().map(|m| m.user_ids.iter().map(|u| u.to_string()).collect::<Vec<_>>()), Some(vec!["@bob:hs".to_string()]), "the author of the replied-to message is mentioned");
+    }
+
+    #[tokio::test]
+    async fn fetching_the_details_of_a_loaded_reply_is_harmless() {
+        let f = fixture().await;
+        tokio::spawn(crate::testkit::bob_says(f.hs.clone(), vec!["original".to_string()]));
+        let first = wait_for(&f, |m| m.len() == 1).await[0].id.clone();
+        send_text(&f.timeline, "answer", Some(&first)).await.unwrap();
+        let msgs = wait_for(&f, |m| m.len() == 2 && !m[1].pending).await;
+        load_reply(&f.timeline, &msgs[1].id).await.unwrap();
+        assert_eq!(wait_for(&f, |m| m.len() == 2 && m[1].reply.as_ref().is_some_and(|r| r.preview == "original")).await.len(), 2);
     }
 
     #[tokio::test]

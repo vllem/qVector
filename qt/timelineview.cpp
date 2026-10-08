@@ -187,6 +187,17 @@ void TimelineView::setRows(const QJsonArray &rows)
 {
     rows_ = rows;
     refresh();
+    if (!seeking_.isEmpty() && !row(seeking_).isEmpty()) { const QString id = seeking_; seeking_.clear(); seekPending_ = false; revealMessage(id); }
+}
+
+/* Going to a message that is older than what is loaded: load older history a page at a time until it appears (or the room has no more). */
+void TimelineView::continueSeek()
+{
+    if (seeking_.isEmpty()) return;
+    seekPending_ = false;
+    if (!row(seeking_).isEmpty()) { const QString id = seeking_; seeking_.clear(); revealMessage(id); return; }
+    if (canLoadMore_ && seekTries_++ < 40) { seekPending_ = true; loadingMore_ = true; emit olderRequested(); }
+    else seeking_.clear();
 }
 
 QJsonObject TimelineView::row(const QString &eventId) const
@@ -236,7 +247,11 @@ void TimelineView::onAnchor(const QUrl &u)
     else if (s.startsWith("vc:save:")) emit saveRequested(QUrl::fromPercentEncoding(s.mid(8).toUtf8()));
     else if (s.startsWith("vc:text:")) emit textRequested(s.mid(8));
     else if (s.startsWith("vc:thread:")) emit threadRequested(s.mid(10));
-    else if (s.startsWith("vc:goto:")) revealMessage(s.mid(8)); /* the message a reply answers */
+    else if (s.startsWith("vc:goto:")) { /* "<answered event>" or "<answered event>|<the reply>" when the original is not loaded */
+        const QStringList ids = s.mid(8).split('|');
+        if (ids.value(1).size()) emit loadReplyRequested(ids[1]);
+        revealMessage(ids[0]);
+    }
     else if (s.startsWith("vc:vid:")) emit playRequested(s.mid(7));
     else if (s.startsWith("https://matrix.to/#/") || s.startsWith("http://matrix.to/#/")) emit matrixLink(s);
     else if (s.startsWith("vc:poll/")) emit pollVote(part(1).mid(0), part(2)); /* vc:poll/<event>/<answer> */
@@ -465,7 +480,7 @@ void TimelineView::render()
             QString snip = S(reply, "preview").simplified();
             if (snip.size() > 90) snip = snip.left(90) + "...";
             const QString who = S(reply, "sender").isEmpty() ? QStringLiteral("a message") : S(reply, "sender");
-            content = "<a href=\"vc:goto:" + esc(S(reply, "event_id")) + "\"><i><span style=\"color:" + muted + "\">Replying to " + esc(who) + (snip.isEmpty() ? QString() : ": " + esc(snip)) + "</span></i></a><br>" + content;
+            content = "<a href=\"vc:goto:" + esc(S(reply, "event_id")) + (S(reply, "sender").isEmpty() ? "|" + esc(eid) : QString()) + "\"><i><span style=\"color:" + muted + "\">Replying to " + esc(who) + (snip.isEmpty() ? QString() : ": " + esc(snip)) + "</span></i></a><br>" + content;
         }
         const QJsonArray reactions = r.value("reactions").toArray();
         if (!eid.isEmpty() && !reactions.isEmpty()) {
@@ -767,7 +782,10 @@ void TimelineView::revealMessage(const QString &eventId)
 {
     int at = -1;
     for (int i = 0; i < rows_.size(); i++) if (S(rows_[i].toObject(), "id") == eventId) { at = i; break; }
-    if (at < 0) return; /* not loaded (older than what the room has fetched) */
+    if (at < 0) { /* older than what is loaded: bring in history until it shows up */
+        if (canLoadMore_ && !thread_ && !seekPending_) { seeking_ = eventId; seekTries_ = 0; seekPending_ = true; loadingMore_ = true; emit olderRequested(); }
+        return;
+    }
     stick_ = false;
     highlight_ = eventId;
     if (at < hiddenLocal_) { shownLimit_ = qMax(shownLimit_, size_t(rows_.size() - at)); windowStart_ = eventId; } /* still folded away above: show from there */
