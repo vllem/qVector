@@ -465,7 +465,7 @@ void TimelineView::render()
             QString snip = S(reply, "preview").simplified();
             if (snip.size() > 90) snip = snip.left(90) + "...";
             const QString who = S(reply, "sender").isEmpty() ? QStringLiteral("a message") : S(reply, "sender");
-            content = "<a href=\"vc:goto:" + esc(S(reply, "event_id")) + "\" style=\"color:" + muted + ";text-decoration:none\">Replying to " + esc(who) + (snip.isEmpty() ? QString() : ": " + esc(snip)) + "</a><br>" + content;
+            content = "<a href=\"vc:goto:" + esc(S(reply, "event_id")) + "\"><i>Replying to " + esc(who) + (snip.isEmpty() ? QString() : ": " + esc(snip)) + "</i></a><br>" + content;
         }
         const QJsonArray reactions = r.value("reactions").toArray();
         if (!eid.isEmpty() && !reactions.isEmpty()) {
