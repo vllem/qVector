@@ -192,19 +192,23 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     tabRow->setContentsMargins(0, 0, 0, 0);
     tabRow->setSpacing(0);
     tabs_ = new QTabBar;
-    tabs_->setTabsClosable(false); /* own flat close buttons, see addRoomTab */
+    tabs_->setTabsClosable(true);
     tabs_->setMovable(true);
     tabs_->setExpanding(false);
     tabs_->setUsesScrollButtons(true);
     tabs_->setElideMode(Qt::ElideRight);
     tabs_->setIconSize(QSize(16, 16));
     tabs_->setDrawBase(false);
-    tabs_->setStyleSheet(
-        "QTabBar::tab { padding: 5px 8px 5px 10px; margin: 0 1px 0 0; border: none; border-bottom: 3px solid transparent;"
-        " background: palette(window); color: palette(mid); }"
-        "QTabBar::tab:hover { background: palette(midlight); color: palette(window-text); }"
-        "QTabBar::tab:selected { background: palette(highlight); color: palette(highlighted-text); font-weight: bold;"
-        " border-bottom: 3px solid palette(highlighted-text); }");
+    {
+        /* dark text on a light accent, light text on a dark one: the theme's highlighted-text can be white on a pale green */
+        const QColor hl = QApplication::palette().color(QPalette::Highlight);
+        const QString on = hl.lightness() > 128 ? "#1a1a1a" : "#ffffff";
+        tabs_->setStyleSheet(QString(
+            "QTabBar::tab { padding: 5px 8px 5px 10px; margin: 0 1px 0 0; border: none; border-bottom: 3px solid transparent;"
+            " background: palette(window); color: palette(window-text); }"
+            "QTabBar::tab:hover { background: palette(midlight); }"
+            "QTabBar::tab:selected { background: palette(highlight); color: %1; font-weight: bold; border-bottom: 3px solid %1; }").arg(on));
+    }
     plus_ = new QToolButton;
     plus_->setText("+");
     plus_->setAutoRaise(true);
@@ -716,19 +720,7 @@ void MainWindow::openRoom(const QString &id)
     current_ = id;
     searchPanel_->setCurrentRoom(id);
     int idx = tabIndex(id);
-    if (idx < 0) {
-        idx = tabs_->addTab(roomTitle(id));
-        tabs_->setTabData(idx, id);
-        auto *x = new QToolButton;
-        x->setText(QString::fromUtf8("\u00d7"));
-        x->setAutoRaise(true);
-        x->setCursor(Qt::ArrowCursor);
-        x->setToolTip("Close tab");
-        x->setStyleSheet("QToolButton { border: none; border-radius: 3px; padding: 0 4px; font-size: 14px; }"
-                         "QToolButton:hover { background: palette(mid); }");
-        connect(x, &QToolButton::clicked, this, [this, id] { const int i = tabIndex(id); if (i >= 0) closeTab(i); });
-        tabs_->setTabButton(idx, QTabBar::RightSide, x);
-    }
+    if (idx < 0) { idx = tabs_->addTab(roomTitle(id)); tabs_->setTabData(idx, id); }
     { QSignalBlocker b(tabs_); tabs_->setCurrentIndex(idx); }
     timeline_->reset();
     timeline_->setHistoryState(true, false);
