@@ -8,8 +8,6 @@
 #include <QSettings>
 #include <QStandardPaths>
 #include <cmath>
-#include <QStyle>
-#include <QStyleFactory>
 
 namespace vc {
 
@@ -28,55 +26,20 @@ QColor nameColor(const QString &seed, const QPalette &pal)
     return isDark(pal) ? QColor::fromHsl(hue, 150, 170) : QColor::fromHsl(hue, 170, 85);
 }
 
-Theme savedTheme() { return QSettings("vector", "vector").value("theme", "system").toString() == "dark" ? Theme::Dark : Theme::System; }
-void saveTheme(Theme t) { QSettings("vector", "vector").setValue("theme", t == Theme::Dark ? "dark" : "system"); }
-
-static QPalette ripcordDark()
+QColor blend(const QColor &a, const QColor &b, double t)
 {
-    QPalette p;
-    const QColor window(0x32, 0x32, 0x32), base(0x2b, 0x2b, 0x2b), text(0xdc, 0xdc, 0xdc), button(0x44, 0x44, 0x44), hi(0x59, 0x68, 0x78);
-    p.setColor(QPalette::Window, window);
-    p.setColor(QPalette::WindowText, text);
-    p.setColor(QPalette::Base, base);
-    p.setColor(QPalette::AlternateBase, QColor(0x36, 0x36, 0x36));
-    p.setColor(QPalette::Text, text);
-    p.setColor(QPalette::Button, button);
-    p.setColor(QPalette::ButtonText, text);
-    p.setColor(QPalette::ToolTipBase, QColor(0x3a, 0x3a, 0x3a));
-    p.setColor(QPalette::ToolTipText, text);
-    p.setColor(QPalette::PlaceholderText, QColor(0x8d, 0x8d, 0x8d));
-    p.setColor(QPalette::Highlight, hi);
-    p.setColor(QPalette::HighlightedText, Qt::white);
-    p.setColor(QPalette::Link, QColor(0x6a, 0xa8, 0xe8));
-    p.setColor(QPalette::LinkVisited, QColor(0xa9, 0x8b, 0xe8));
-    p.setColor(QPalette::Mid, QColor(0x1f, 0x1f, 0x1f));
-    p.setColor(QPalette::Dark, QColor(0x1c, 0x1c, 0x1c));
-    p.setColor(QPalette::Light, QColor(0x50, 0x50, 0x50));
-    p.setColor(QPalette::Disabled, QPalette::Text, QColor(0x80, 0x80, 0x80));
-    p.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(0x80, 0x80, 0x80));
-    return p;
+    return QColor::fromRgbF(a.redF() + (b.redF() - a.redF()) * t, a.greenF() + (b.greenF() - a.greenF()) * t, a.blueF() + (b.blueF() - a.blueF()) * t);
 }
 
-void applyTheme(QApplication &app, Theme t)
+QColor errorColor(const QPalette &pal) { return isDark(pal) ? QColor::fromHsl(0, 190, 160) : QColor::fromHsl(0, 190, 75); }
+QColor okColor(const QPalette &pal) { return isDark(pal) ? QColor::fromHsl(125, 120, 150) : QColor::fromHsl(125, 150, 55); }
+
+QColor onHighlight(const QPalette &pal)
 {
-    static QPalette *systemPalette = nullptr;
-    static QString *systemStyle = nullptr;
-    if (!systemPalette) { systemPalette = new QPalette(app.palette()); systemStyle = new QString(app.style()->objectName()); }
-    if (t == Theme::Dark) {
-        app.setStyle(QStyleFactory::create("Fusion"));
-        app.setPalette(ripcordDark());
-    } else {
-        QStyle *s = QStyleFactory::create(*systemStyle);
-        if (s) app.setStyle(s);
-        app.setPalette(*systemPalette);
-    }
-    /* Widgets that already exist keep colours resolved from the old palette (item views, the text browser, line edits): let them inherit afresh. */
-    for (QWidget *w : app.allWidgets()) {
-        w->setPalette(QPalette());
-        w->style()->unpolish(w);
-        w->style()->polish(w);
-        w->update();
-    }
+    const QColor bg = pal.color(QPalette::Highlight), fg = pal.color(QPalette::HighlightedText);
+    if (qAbs(bg.lightness() - fg.lightness()) >= 110) return fg;
+    const QColor a = pal.color(QPalette::WindowText), b = pal.color(QPalette::Window);
+    return qAbs(bg.lightness() - a.lightness()) >= qAbs(bg.lightness() - b.lightness()) ? a : b;
 }
 
 static QString g_emojiFamily;

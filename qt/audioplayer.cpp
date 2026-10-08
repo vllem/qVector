@@ -1,5 +1,6 @@
 #include "audioplayer.h"
 
+#include "qt/theme.h"
 #include <QAudioBuffer>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -41,9 +42,9 @@ void WaveformView::paintEvent(QPaintEvent *)
 {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing, false);
-    const bool dark = palette().color(QPalette::Window).lightness() < 128;
-    const QColor playedTop("#ff5500"), playedLow("#ff9a66");
-    const QColor restTop = dark ? QColor("#b0b0b0") : QColor("#333333"), restLow = dark ? QColor("#5c5c5c") : QColor("#b8b8b8");
+    const QPalette &pal = palette();
+    const QColor playedTop = pal.color(QPalette::Highlight), playedLow = blend(playedTop, pal.color(QPalette::Window), 0.45);
+    const QColor restTop = blend(pal.color(QPalette::WindowText), pal.color(QPalette::Window), 0.2), restLow = blend(pal.color(QPalette::WindowText), pal.color(QPalette::Window), 0.65);
     const int barW = 2, gap = 1, step = barW + gap;
     const int n = qMax(1, width() / step);
     const double base = height() * 0.70; /* the baseline */

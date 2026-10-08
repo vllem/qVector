@@ -1,3 +1,4 @@
+#include "qt/theme.h"
 #include "qt/videoplayer.h"
 #include <QHBoxLayout>
 #include <QKeyEvent>
@@ -74,19 +75,19 @@ VideoPlayer::VideoPlayer(QWidget *parent) : QWidget(parent)
     setMinimumSize(0, 0);
     v->addWidget(video_, 1);
     errLabel_ = new QLabel(this);
-    errLabel_->setStyleSheet("color:#e06c6c;padding:4px 8px");
+    errLabel_->setStyleSheet("color:" + errorColor(palette()).name() + ";padding:4px 8px");
     errLabel_->setWordWrap(true);
     errLabel_->hide();
     v->addWidget(errLabel_);
 
     auto *controls = new QWidget(this);
     controls->setFixedHeight(kControlsHeight);
-    controls->setStyleSheet("QWidget { background: #202020; color: #e8e8e8; } QLabel { background: transparent; }"
+    controls->setStyleSheet("QWidget { background: palette(window); color: palette(window-text); } QLabel { background: transparent; }"
                             "QToolButton { background: transparent; border: none; border-radius: 3px; padding: 2px; }"
-                            "QToolButton:hover { background: #3a3a3a; }"
-                            "QSlider::groove:horizontal { height: 4px; background: #555; border-radius: 2px; }"
-                            "QSlider::sub-page:horizontal { background: #5aa0e6; border-radius: 2px; }"
-                            "QSlider::handle:horizontal { width: 10px; margin: -5px 0; background: #e8e8e8; border-radius: 5px; }");
+                            "QToolButton:hover { background: palette(midlight); }"
+                            "QSlider::groove:horizontal { height: 4px; background: palette(mid); border-radius: 2px; }"
+                            "QSlider::sub-page:horizontal { background: palette(highlight); border-radius: 2px; }"
+                            "QSlider::handle:horizontal { width: 10px; margin: -5px 0; background: palette(window-text); border-radius: 5px; }");
     auto *row = new QHBoxLayout(controls);
     row->setContentsMargins(8, 2, 8, 2);
     row->setSpacing(6);

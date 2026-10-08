@@ -117,7 +117,6 @@ int main(int argc, char **argv)
     ensureEmojiFont();
     app.setWindowIcon(vc::appIcon());
     app.setQuitOnLastWindowClosed(false); /* the tray icon may keep us running; closeEvent decides */
-    vc::applyTheme(app, vc::savedTheme());
     if (dataDir.isEmpty()) dataDir = qEnvironmentVariable("VECTOR_DATA", QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/account");
     QDir().mkpath(dataDir);
     QFile::setPermissions(dataDir, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);

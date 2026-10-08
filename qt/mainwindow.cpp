@@ -54,22 +54,20 @@ public:
             if (!sel && tab->selectedPosition != QStyleOptionTab::NextIsSelected) { /* inset separator between tabs */
                 p->fillRect(QRect(tab->rect.right(), tab->rect.top() + 6, 1, tab->rect.height() - 12), line_); /* same grey as the splitter */
             }
-            if (sel) p->fillRect(QRect(tab->rect.left(), tab->rect.bottom() - 2, tab->rect.width(), 3), QColor("#d2d2d2"));
+            if (sel) p->fillRect(QRect(tab->rect.left(), tab->rect.bottom() - 2, tab->rect.width(), 3), onHighlight(pal));
             return;
         }
         if (tab && el == CE_TabBarTabLabel && (tab->state & State_Selected)) {
             QStyleOptionTab o(*tab);
-            o.palette.setColor(QPalette::WindowText, onAccent(tab->palette));
-            o.palette.setColor(QPalette::ButtonText, onAccent(tab->palette));
+            o.palette.setColor(QPalette::WindowText, onHighlight(tab->palette));
+            o.palette.setColor(QPalette::ButtonText, onHighlight(tab->palette));
             QProxyStyle::drawControl(el, &o, p, w);
             return;
         }
         QProxyStyle::drawControl(el, opt, p, w);
     }
 private:
-    QColor line_ = QColor("#8c8c8c");
-    /* dark text on a light accent, light text on a dark one (a theme's highlighted-text can be white on pale green) */
-    static QColor onAccent(const QPalette &pal) { return pal.color(QPalette::Highlight).lightness() > 128 ? QColor("#1a1a1a") : QColor("#ffffff"); }
+    QColor line_ = QColor(Qt::gray);
 };
 }
 
@@ -258,7 +256,6 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     rv->addLayout(bar);
 
     banner_ = new QLabel;
-    banner_->setStyleSheet("background:#6b5a1f;color:white;padding:3px 8px");
     banner_->setWordWrap(true);
     banner_->hide();
     rv->addWidget(banner_);
@@ -560,15 +557,6 @@ void MainWindow::buildMenus()
     view->addAction("Member list", QKeySequence("Ctrl+M"), this, [this] { toggleMembers(); });
     view->addAction("Next tab", QKeySequence("Ctrl+Tab"), this, [this] { if (tabs_->count()) tabs_->setCurrentIndex((tabs_->currentIndex() + 1) % tabs_->count()); });
     view->addSeparator();
-    actDark_ = view->addAction("Dark theme");
-    actDark_->setCheckable(true);
-    actDark_->setChecked(savedTheme() == Theme::Dark);
-    connect(actDark_, &QAction::toggled, this, [this](bool on) {
-        saveTheme(on ? Theme::Dark : Theme::System);
-        applyTheme(*qApp, on ? Theme::Dark : Theme::System);
-        timeline_->refresh();
-        threadView_->refresh();
-    });
     actNotify_ = view->addAction("Desktop notifications");
     actNotify_->setCheckable(true);
     actNotify_->setChecked(notify_);
@@ -649,6 +637,7 @@ void MainWindow::applyChrome()
     statusLine_->setStyleSheet(QString("background: %1;").arg(line.name()));
     composer_->setStyleSheet(QString("QLineEdit { border: 1px solid %1; border-radius: 4px; padding: 6px 10px; background: palette(base); color: palette(text); font-size: 11pt; }"
                                      "QLineEdit:focus { border-color: palette(highlight); }").arg(line.name()));
+    banner_->setStyleSheet(QString("background:%1;color:%2;padding:3px 8px").arg(pal.color(QPalette::ToolTipBase).name(), pal.color(QPalette::ToolTipText).name()));
     const QString base = QApplication::style()->name();
     auto *cur = qobject_cast<QProxyStyle *>(tabs_->style());
     if (!cur || !cur->baseStyle() || cur->baseStyle()->name() != base) {
@@ -1120,7 +1109,6 @@ void MainWindow::showPreferences()
         }
         v->addWidget(box);
     };
-    group("Appearance", {actDark_});
     group("Notifications", {actNotify_});
     group("Privacy", {actTyping_, actPreviews_});
     group("Search", {actIndex_});

@@ -158,7 +158,7 @@ private:
     QPointer<RecoveryDialog> recoveryDlg_;
     QPointer<StartDmDialog> startDm_;
     QPointer<BrowseRoomsDialog> browse_;
-    QAction *actDark_ = nullptr, *actNotify_ = nullptr, *actTyping_ = nullptr, *actPreviews_ = nullptr, *actIndex_ = nullptr, *actTray_ = nullptr, *actCloseTray_ = nullptr;
+    QAction *actNotify_ = nullptr, *actTyping_ = nullptr, *actPreviews_ = nullptr, *actIndex_ = nullptr, *actTray_ = nullptr, *actCloseTray_ = nullptr;
     QJsonArray sessions_;
     QPointer<QDialog> prefsDlg_;
     QString pendingReveal_;

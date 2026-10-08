@@ -89,7 +89,7 @@ PollDialog::PollDialog(Core *core, QWidget *parent) : QDialog(parent)
     auto *several = new QCheckBox("Allow choosing several answers");
     v->addWidget(several);
     auto *error = new QLabel;
-    error->setStyleSheet("color:#e06c6c");
+    error->setStyleSheet("color:" + errorColor(qApp->palette()).name());
     v->addWidget(error);
     auto *row = new QHBoxLayout;
     auto *send = new QPushButton("Send poll");
@@ -170,8 +170,8 @@ void RecoveryDialog::setState(const QJsonObject &s)
 {
     const QString st = S(s, "state");
     go_->setEnabled(true);
-    if (st == "done") { status_->setStyleSheet("color:#6cc070"); status_->setText("Unlocked. Your old messages appear as their keys are restored."); go_->setEnabled(false); }
-    else if (st == "error") { status_->setStyleSheet("color:#e06c6c"); status_->setText(S(s, "message")); }
+    if (st == "done") { status_->setStyleSheet("color:" + okColor(qApp->palette()).name()); status_->setText("Unlocked. Your old messages appear as their keys are restored."); go_->setEnabled(false); }
+    else if (st == "error") { status_->setStyleSheet("color:" + errorColor(qApp->palette()).name()); status_->setText(S(s, "message")); }
     else if (st == "password") { status_->setStyleSheet(""); status_->setText("Your server wants your account password before it accepts the new keys."); password_->setVisible(true); password_->setFocus(); }
     else if (st == "created") {
         status_->setStyleSheet("");
@@ -281,11 +281,11 @@ void VerifyDialog::setState(const QJsonObject &s)
         if (st == "emoji") buttons({{"They match", [c] { c->call("confirm_verification"); }}, {"They don't match", [c] { c->call("cancel_verification"); }}}, true);
         else { text("Waiting for the other side to confirm...", muted); buttons({{"Cancel", [c] { c->call("cancel_verification"); }}}, false); }
     } else if (st == "done") {
-        text(own ? "Verified: the other session confirmed this one." : user + " is verified.", "color:#6cc070");
+        text(own ? "Verified: the other session confirmed this one." : user + " is verified.", "color:" + okColor(qApp->palette()).name());
         text(own ? "This session is now cross-signed, so your other sessions and contacts will trust it." : "Their messages from verified sessions now show no warning, and you are warned if their identity ever changes.", muted);
         buttons({{"Done", [this] { close(); }}}, true);
     } else if (st == "cancelled") {
-        text(S(s, "reason").isEmpty() ? "Verification cancelled." : S(s, "reason"), "color:#e06c6c");
+        text(S(s, "reason").isEmpty() ? "Verification cancelled." : S(s, "reason"), "color:" + errorColor(qApp->palette()).name());
         buttons({{"Close", [this] { close(); }}}, false);
     }
     show();

@@ -1,3 +1,4 @@
+#include "qt/theme.h"
 #include "qt/loginpage.h"
 #include <QFormLayout>
 #include <QFrame>
@@ -88,7 +89,7 @@ void LoginPage::refresh(const QString &screen, const QString &status, bool busy)
     (unlock ? loginStatus_ : unlockStatus_)->clear();
     l->setText(status);
     const bool error = !status.isEmpty() && !busy;
-    l->setStyleSheet(error ? "color:#e06c6c" : "");
+    l->setStyleSheet(error ? "color:" + errorColor(qApp->palette()).name() : QString());
     loginBtn_->setEnabled(!busy);
     loginBtn_->setText(busy ? "Signing in..." : "Sign in");
     unlockBtn_->setEnabled(!busy);

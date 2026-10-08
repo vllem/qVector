@@ -12,12 +12,12 @@
 
 namespace vc {
 
-enum class Theme { System, Dark };
-
-/* Applies the chosen theme: System keeps the desktop's own style and palette, Dark is a Ripcord-like dark Fusion palette. */
-void applyTheme(QApplication &app, Theme t);
-Theme savedTheme();
-void saveTheme(Theme t);
+/* Nothing here picks a look: the app always uses the desktop's own Qt style, palette and fonts (KDE, qt6ct, Kvantum, GTK...).
+   The helpers below derive the few colours Qt has no role for from that palette. */
+QColor blend(const QColor &a, const QColor &b, double t); /* t = 0 gives a, 1 gives b */
+QColor errorColor(const QPalette &pal);   /* red that reads on the palette's background */
+QColor okColor(const QPalette &pal);      /* green that reads on the palette's background */
+QColor onHighlight(const QPalette &pal);  /* text on the selection colour: the theme's highlighted-text, unless it would be unreadable */
 
 /* a colour for a user / room name that reads well on the current palette (light or dark) */
 QColor nameColor(const QString &seed, const QPalette &pal);
