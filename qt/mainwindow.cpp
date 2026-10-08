@@ -51,7 +51,7 @@ public:
             const QPalette &pal = tab->palette;
             p->fillRect(tab->rect, sel ? pal.color(QPalette::Highlight) : hover ? pal.color(QPalette::Midlight) : pal.color(QPalette::Window));
             if (!sel && tab->selectedPosition != QStyleOptionTab::NextIsSelected) { /* inset separator between tabs */
-                p->fillRect(QRect(tab->rect.right() - 2, tab->rect.top() + 6, 3, tab->rect.height() - 12), QColor("#8c8c8c")); /* same grey as the splitter */
+                p->fillRect(QRect(tab->rect.right(), tab->rect.top() + 6, 1, tab->rect.height() - 12), QColor("#8c8c8c")); /* same grey as the splitter */
             }
             if (sel) p->fillRect(QRect(tab->rect.left(), tab->rect.bottom() - 2, tab->rect.width(), 3), onAccent(pal));
             return;
