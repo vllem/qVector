@@ -4,6 +4,12 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QDesktopServices>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QFileInfo>
+#include <QLocale>
+#include <QPixmap>
+#include <QUrl>
 #include <QDir>
 #include <QFileDialog>
 #include <QFrame>
@@ -116,9 +122,18 @@ void Composer::keyPressEvent(QKeyEvent *e)
     }
     if (e->matches(QKeySequence::Paste)) {
         const QMimeData *md = QApplication::clipboard()->mimeData();
+        if (md && md->hasUrls()) {
+            QStringList files;
+            for (const QUrl &u : md->urls()) if (u.isLocalFile() && QFileInfo(u.toLocalFile()).isFile()) files << u.toLocalFile();
+            if (!files.isEmpty()) { emit filesPasted(files); return; }
+        }
         if (md && md->hasImage() && !md->hasText()) {
             QImage img = qvariant_cast<QImage>(md->imageData());
             if (!img.isNull()) { emit imagePasted(img); return; }
+        }
+        if (md && md->hasImage()) {
+            QImage img = qvariant_cast<QImage>(md->imageData());
+            if (!img.isNull() && text().isEmpty()) { emit imagePasted(img); return; }
         }
     }
     if (e->key() == Qt::Key_Escape) { emit escapePressed(); return; }
@@ -305,6 +320,25 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
         contextBar_->hide();
     }
     rv->addWidget(contextBar_);
+    attachBar_ = new QWidget;
+    {
+        auto *al = new QHBoxLayout(attachBar_);
+        al->setContentsMargins(8, 3, 6, 3);
+        attachThumb_ = new QLabel;
+        attachLabel_ = new QLabel;
+        auto *ax = new QToolButton;
+        ax->setText(QStringLiteral("\u2715"));
+        ax->setAutoRaise(true);
+        ax->setToolTip("Do not send (Esc)");
+        al->addWidget(attachThumb_);
+        al->addWidget(attachLabel_, 1);
+        al->addWidget(ax);
+        connect(ax, &QToolButton::clicked, this, [this] { cancelAttachment(); composer_->setFocus(); });
+        attachBar_->setAutoFillBackground(true);
+        attachBar_->hide();
+    }
+    rv->addWidget(attachBar_);
+    setAcceptDrops(true);
     rv->addLayout(compRow);
     split_->addWidget(right);
     memberList_ = new MemberList;
@@ -423,7 +457,9 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     connect(emojiBtn_, &QToolButton::clicked, this, [this] { picker_->popupAt(emojiBtn_->mapToGlobal(QPoint(emojiBtn_->width(), 0))); });
     connect(picker_, &EmojiPicker::emojiPicked, this, [this](const QString &g) { composer_->insert(g); composer_->setFocus(); emit composer_->textEdited(composer_->text()); });
     connect(reactPicker_, &EmojiPicker::emojiPicked, this, [this](const QString &g) { if (!reactEvent_.isEmpty()) core_->call("react", {{"event_id", reactEvent_}, {"key", g}}); });
-    connect(composer_, &Composer::escapePressed, this, [this] { cancelContext(); });
+    connect(composer_, &Composer::escapePressed, this, [this] { if (replyTo_.isEmpty() && editing_.isEmpty() && !pending_.isEmpty()) cancelAttachment(); else cancelContext(); });
+    connect(composer_, &Composer::imagePasted, this, &MainWindow::stageImage);
+    connect(composer_, &Composer::filesPasted, this, &MainWindow::stageFiles);
 
     connect(timeline_, &TimelineView::replyRequested, this, &MainWindow::startReply);
     connect(timeline_, &TimelineView::editRequested, this, &MainWindow::startEdit);
@@ -659,6 +695,7 @@ void MainWindow::onEvent(const QString &name, const QJsonValue &p)
 void MainWindow::openRoom(const QString &id)
 {
     if (id.isEmpty()) return;
+    cancelAttachment();
     if (!current_.isEmpty()) drafts_[current_] = composer_->text();
     cancelContext();
     if (id != current_) closeThread();
@@ -789,7 +826,17 @@ void MainWindow::startEdit(const QString &eventId)
 void MainWindow::send()
 {
     const QString text = composer_->text();
-    if (current_.isEmpty() || text.isEmpty()) return;
+    if (current_.isEmpty()) return;
+    if (!pending_.isEmpty()) {
+        /* the typed text becomes the caption of the first file */
+        for (int i = 0; i < pending_.size(); i++)
+            core_->call("send_file", {{"path", pending_[i]}, {"caption", i == 0 ? text : QString()}});
+        composer_->clear(); drafts_.remove(current_);
+        cancelAttachment();
+        timeline_->stickToBottom();
+        return;
+    }
+    if (text.isEmpty()) return;
     if (!editing_.isEmpty()) {
         core_->call("edit", {{"event_id", editing_}, {"text", text}});
         editing_.clear(); composer_->clear(); showContextBar(QString());
@@ -803,8 +850,57 @@ void MainWindow::send()
 void MainWindow::chooseFiles()
 {
     if (current_.isEmpty()) return;
-    const QStringList files = QFileDialog::getOpenFileNames(this, "Send files");
-    for (const QString &f : files) core_->call("send_file", {{"path", f}});
+    stageFiles(QFileDialog::getOpenFileNames(this, "Send files"));
+}
+
+/* Nothing is sent until Enter: the files wait in a bar above the message line, where a caption can be typed. */
+void MainWindow::stageFiles(const QStringList &paths)
+{
+    if (current_.isEmpty() || paths.isEmpty()) return;
+    cancelContext();
+    pending_ = paths;
+    QString what;
+    if (paths.size() == 1) {
+        const QFileInfo fi(paths[0]);
+        what = fi.fileName() + " (" + QLocale().formattedDataSize(fi.size()) + ")";
+        QImage img(paths[0]);
+        if (!img.isNull()) attachThumb_->setPixmap(QPixmap::fromImage(img.scaled(48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+        else attachThumb_->clear();
+    } else {
+        what = QString::number(paths.size()) + " files";
+        attachThumb_->clear();
+    }
+    attachLabel_->setText("Ready to send " + what + " - type a caption if you like, Enter to send, Esc to cancel");
+    attachBar_->show();
+    composer_->setFocus();
+}
+
+void MainWindow::stageImage(const QImage &img)
+{
+    if (!pasteDir_) pasteDir_ = new QTemporaryDir;
+    if (!pasteDir_->isValid()) { statusLeft_->setText("Cannot keep the picture: no temporary folder"); return; }
+    const QString path = pasteDir_->filePath("image-" + QDateTime::currentDateTime().toString("yyyyMMdd-hhmmss-zzz") + ".png");
+    if (!img.save(path, "PNG")) { statusLeft_->setText("Cannot keep the picture"); return; }
+    stageFiles({path});
+}
+
+void MainWindow::cancelAttachment()
+{
+    pending_.clear();
+    attachBar_->hide();
+}
+
+void MainWindow::dragEnterEvent(QDragEnterEvent *e)
+{
+    if (e->mimeData()->hasUrls() || e->mimeData()->hasImage()) e->acceptProposedAction();
+}
+
+void MainWindow::dropEvent(QDropEvent *e)
+{
+    QStringList files;
+    for (const QUrl &u : e->mimeData()->urls()) if (u.isLocalFile() && QFileInfo(u.toLocalFile()).isFile()) files << u.toLocalFile();
+    if (!files.isEmpty()) stageFiles(files);
+    else if (e->mimeData()->hasImage()) stageImage(qvariant_cast<QImage>(e->mimeData()->imageData()));
 }
 
 void MainWindow::saveAttachment(const QString &eventId)
@@ -1045,6 +1141,12 @@ void MainWindow::dialogForDemo(const QString &which)
     else if (which == "recovery") showRecovery(false);
     else if (which == "verify") showVerify(QJsonObject{{"state", "emoji"}, {"user", "@zach:example.org"}, {"emoji", QJsonArray{QJsonArray{"\U0001F436", "Dog"}, QJsonArray{"\U0001F431", "Cat"}, QJsonArray{"\U0001F981", "Lion"}, QJsonArray{"\U0001F40E", "Horse"}, QJsonArray{"\U0001F984", "Unicorn"}, QJsonArray{"\U0001F437", "Pig"}, QJsonArray{"\U0001F418", "Elephant"}}}, {"decimals", QJsonArray{123, 456, 789}}});
     else if (which == "settings") roomSettings();
+    else if (which == "paste") { /* dev aid: act as if a picture was pasted, to see the caption bar */
+        QImage img(320, 200, QImage::Format_RGB32);
+        img.fill(QColor("#3b7dd8"));
+        stageImage(img);
+        composer_->setText("a caption");
+    }
     else if (which == "text") {
         for (const QJsonValue &v : timeline_->rows()) if (v.toObject()["text_file"].toBool()) { core_->call("fetch_text", {{"event_id", S(v.toObject(), "id")}}); return; }
         QTimer::singleShot(1000, this, [this] { dialogForDemo("text"); }); /* the file may not have arrived yet */

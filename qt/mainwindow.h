@@ -15,6 +15,7 @@
 #include <QCloseEvent>
 #include <QHash>
 #include <QImage>
+#include <QTemporaryDir>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QLabel>
@@ -43,6 +44,7 @@ public:
     std::function<QList<Candidate>(const QString &prefix)> candidates; /* people (and @room) matching what follows an '@' */
 signals:
     void imagePasted(const QImage &img);
+    void filesPasted(const QStringList &paths);
     void escapePressed();
     void mentionPicked(const QString &userId, const QString &label);
 protected:
@@ -88,6 +90,9 @@ private:
     void startReply(const QString &eventId);
     void startEdit(const QString &eventId);
     void chooseFiles();
+    void stageFiles(const QStringList &paths);
+    void stageImage(const QImage &img);
+    void cancelAttachment();
     void saveAttachment(const QString &eventId);
     void toggleMembers();
     void toggleSearch();
@@ -110,6 +115,8 @@ private:
     QJsonObject roomRow(const QString &id) const;
     bool event(QEvent *e) override;
     void closeEvent(QCloseEvent *e) override;
+    void dragEnterEvent(QDragEnterEvent *e) override;
+    void dropEvent(QDropEvent *e) override;
 
     Core *core_;
     bool demo_;
@@ -124,6 +131,10 @@ private:
     TimelineView *timeline_;
     QWidget *empty_, *inviteBar_, *contextBar_;
     QLabel *contextLabel_;
+    QWidget *attachBar_;
+    QLabel *attachThumb_, *attachLabel_;
+    QStringList pending_;
+    QTemporaryDir *pasteDir_ = nullptr;
     QStackedWidget *timelines_;
     Composer *composer_;
     QToolButton *attach_, *emojiBtn_;
