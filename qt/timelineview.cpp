@@ -361,6 +361,13 @@ void TimelineView::render()
                             const QImage big = img->scaled(QSize(side, side) * dpr, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
                             t = big.copy((big.width() - side * dpr) / 2, (big.height() - side * dpr) / 2, side * dpr, side * dpr);
                         }
+                        { /* a thin frame around each thumbnail */
+                            QPainter fp(&t);
+                            fp.setPen(QPen(pal.color(QPalette::Mid), qMax(1.0, dpr)));
+                            fp.setBrush(Qt::NoBrush);
+                            const qreal h = qMax(1.0, dpr) / 2;
+                            fp.drawRect(QRectF(h, h, t.width() - 2 * h, t.height() - 2 * h));
+                        }
                         t.setDevicePixelRatio(dpr);
                         addRes(doc, resHash_, QUrl(key), t);
                         content += "<td><a href=\"" + href + "\"><img src=\"" + key + "\" width=" + QString::number(int(t.width() / dpr)) + "></a></td>";
