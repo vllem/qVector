@@ -247,10 +247,10 @@ void TimelineView::onAnchor(const QUrl &u)
     else if (s.startsWith("vc:save:")) emit saveRequested(QUrl::fromPercentEncoding(s.mid(8).toUtf8()));
     else if (s.startsWith("vc:text:")) emit textRequested(s.mid(8));
     else if (s.startsWith("vc:thread:")) emit threadRequested(s.mid(10));
-    else if (s.startsWith("vc:goto:")) { /* "<answered event>" or "<answered event>|<the reply>" when the original is not loaded */
-        const QStringList ids = s.mid(8).split('|');
-        if (ids.value(1).size()) emit loadReplyRequested(ids[1]);
-        revealMessage(ids[0]);
+    else if (s.startsWith("vc:goto/")) { /* vc:goto/<answered event>[/<the reply, when the original is not loaded>] */
+        const QString target = part(1), reply = part(2);
+        if (!reply.isEmpty()) emit loadReplyRequested(reply);
+        revealMessage(target);
     }
     else if (s.startsWith("vc:vid:")) emit playRequested(s.mid(7));
     else if (s.startsWith("https://matrix.to/#/") || s.startsWith("http://matrix.to/#/")) emit matrixLink(s);
@@ -480,7 +480,7 @@ void TimelineView::render()
             QString snip = S(reply, "preview").simplified();
             if (snip.size() > 90) snip = snip.left(90) + "...";
             const QString who = S(reply, "sender").isEmpty() ? QStringLiteral("a message") : S(reply, "sender");
-            content = "<a href=\"vc:goto:" + esc(S(reply, "event_id")) + (S(reply, "sender").isEmpty() ? "|" + esc(eid) : QString()) + "\"><i><span style=\"color:" + muted + "\">Replying to " + esc(who) + (snip.isEmpty() ? QString() : ": " + esc(snip)) + "</span></i></a><br>" + content;
+            content = "<a href=\"vc:goto/" + QString::fromLatin1(QUrl::toPercentEncoding(S(reply, "event_id"))) + (S(reply, "sender").isEmpty() ? "/" + QString::fromLatin1(QUrl::toPercentEncoding(eid)) : QString()) + "\"><i><span style=\"color:" + muted + "\">Replying to " + esc(who) + (snip.isEmpty() ? QString() : ": " + esc(snip)) + "</span></i></a><br>" + content;
         }
         const QJsonArray reactions = r.value("reactions").toArray();
         if (!eid.isEmpty() && !reactions.isEmpty()) {

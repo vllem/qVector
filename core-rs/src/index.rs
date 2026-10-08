@@ -98,14 +98,14 @@ impl MessageIndex {
 
 /// Page back through a room's history (up to `pages` pages of 30 events) and index what is readable. Uses its own timeline, so the one on
 /// screen is not disturbed. Returns true when the start of the room was reached.
-pub async fn crawl_room(room: &matrix_sdk::Room, index: &std::sync::Mutex<MessageIndex>, pages: usize) -> Result<bool, String> {
+pub async fn crawl_room(room: &matrix_sdk::Room, index: Option<&std::sync::Mutex<MessageIndex>>, pages: usize) -> Result<bool, String> {
     let timeline = crate::ui::open_timeline(room).await?;
     let room_id = room.room_id().to_string();
     let mut reached = false;
     for _ in 0..pages {
         reached = timeline.paginate_backwards(30).await.map_err(|e| e.to_string())?;
         let items: Vec<_> = timeline.items().await.iter().cloned().collect();
-        index.lock().map_err(|_| "index lock poisoned")?.add_items(&room_id, &items);
+        if let Some(index) = index { index.lock().map_err(|_| "index lock poisoned")?.add_items(&room_id, &items); }
         if reached { break; }
     }
     Ok(reached)
@@ -138,7 +138,7 @@ mod tests {
         let idx_dir = dir.path().join("index");
         let index = std::sync::Mutex::new(MessageIndex::open(&idx_dir, "secret").unwrap());
         let mut reached = false;
-        for _ in 0..3 { if crawl_room(&room, &index, 1).await.unwrap() { reached = true; break; } }
+        for _ in 0..3 { if crawl_room(&room, Some(&index), 1).await.unwrap() { reached = true; break; } }
         assert!(reached);
         {
             let items: Vec<_> = timeline.items().await.iter().cloned().collect();

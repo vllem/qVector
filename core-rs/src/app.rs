@@ -611,11 +611,15 @@ async fn start_session(i: Arc<Inner>, client: Client, secret: String) {
     i.tasks.lock().unwrap().sync = Some(handle);
 }
 
+/// Pages of 30 events fetched per room in the background: about 1000 messages deep.
+const PREFETCH_PAGES: usize = 34;
+
 /// Sync, then tell the UI about the room list, alerts and the session's trust state; also feeds the message index.
 async fn sync_loop(i: Arc<Inner>, client: Client) {
     let mut last_status = String::new();
     let (mut last_save, mut crawled) = (std::time::Instant::now(), HashSet::<String>::new());
     let mut seen_unread = None;
+    let prefetching = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut keys_restored = false;
     let spaces = matrix_sdk_ui::spaces::SpaceService::new(client.clone()).await;
     loop {
@@ -624,13 +628,20 @@ async fn sync_loop(i: Arc<Inner>, client: Client) {
         for m in rooms.iter().map(|r| r.avatar_mxc.clone()).filter(|m| i.avatars.wanted(m)).take(3).collect::<Vec<_>>() { i.avatars.fetch(&client, &m, &i.avatar_dir()).await; }
         for r in rooms.iter_mut() { r.avatar_path = i.avatars.path(&r.avatar_mxc); }
         let index = i.index.lock().unwrap().clone();
-        if let Some(index) = &index {
-            if last_save.elapsed() > Duration::from_secs(20) { last_save = std::time::Instant::now(); let _ = index.lock().map(|mut x| x.save()); }
-            /* history of rooms not looked at yet: a few pages per pass, one room at a time, so the app stays light */
+        /* Keep about a thousand messages of every room on the computer (the SDK's event cache is on disk): one room at a time in the background, so
+           replies, searches and scrolling back find their messages without the network. */
+        if !prefetching.load(Ordering::Relaxed) {
             if let Some(r) = rooms.iter().find(|r| !r.invite && !crawled.contains(&r.id)) {
                 crawled.insert(r.id.clone());
-                if let Some(room) = <&matrix_sdk::ruma::RoomId>::try_from(r.id.as_str()).ok().and_then(|id| client.get_room(id)) { let _ = crate::index::crawl_room(&room, index, 5).await; }
+                if let Some(room) = <&matrix_sdk::ruma::RoomId>::try_from(r.id.as_str()).ok().and_then(|id| client.get_room(id)) {
+                    prefetching.store(true, Ordering::Relaxed);
+                    let (flag, index) = (prefetching.clone(), index.clone());
+                    tokio::spawn(async move { let _ = crate::index::crawl_room(&room, index.as_deref(), PREFETCH_PAGES).await; flag.store(false, Ordering::Relaxed); });
+                }
             }
+        }
+        if let Some(index) = &index {
+            if last_save.elapsed() > Duration::from_secs(20) { last_save = std::time::Instant::now(); let _ = index.lock().map(|mut x| x.save()); }
         }
         i.emit_json("rooms", &rooms);
         let open = i.open_timeline_of().await.map(|t| t.room().room_id().to_string());
