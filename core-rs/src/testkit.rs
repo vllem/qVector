@@ -512,6 +512,17 @@ impl FakeHs {
             st.presence.insert(local, body(req)["presence"].as_str().unwrap_or("online").to_string());
             json!({})
         }).await;
+        mount("GET", r"^/_matrix/client/v1/rooms/[^/]+/hierarchy", |st, _, req| {
+            let id = pct_decode(req.url.path()).split("/rooms/").nth(1).unwrap_or("").trim_end_matches("/hierarchy").to_string();
+            let Some(space) = st.extra_rooms.iter().find(|r| r.0 == id && !r.3.is_empty()).cloned() else { return json!({"errcode": "M_NOT_FOUND", "error": "unknown space"}); };
+            let describe = |rid: &str| {
+                let name = st.extra_rooms.iter().find(|r| r.0 == rid).map(|r| r.1.clone()).unwrap_or_else(|| rid.trim_start_matches('!').split(':').next().unwrap_or("").to_string());
+                json!({"room_id": rid, "name": name, "num_joined_members": 3, "world_readable": false, "guest_can_join": false, "join_rule": "public", "children_state": []})
+            };
+            let mut rooms = vec![json!({"room_id": id, "name": space.1, "room_type": "m.space", "num_joined_members": 1, "world_readable": false, "guest_can_join": false, "children_state": []})];
+            rooms.extend(space.3.iter().map(|c| describe(c)));
+            json!({"rooms": rooms})
+        }).await;
         mount("GET", r"^/_matrix/client/v3/pushrules/?$", |st, who, _| push_rules(st, who).clone()).await;
         mount("PUT", r"^/_matrix/client/v3/pushrules/global/", change_push_rule).await;
         mount("DELETE", r"^/_matrix/client/v3/pushrules/global/", change_push_rule).await;

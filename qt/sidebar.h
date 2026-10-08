@@ -21,6 +21,7 @@ protected:
 signals:
     void roomActivated(const QString &roomId);
     void leaveRequested(const QString &roomId);
+    void exploreRequested(const QString &spaceId); /* "Explore rooms..." on a space's section header */
     void notifyRequested(const QString &roomId, const QString &level); /* "default", "all", "mentions" or "mute" */
     void tagRequested(const QString &roomId, const QString &kind); /* "favourite", "low_priority" or "none" */
 

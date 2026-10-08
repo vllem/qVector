@@ -40,12 +40,13 @@ public:
 class BrowseRoomsDialog : public QDialog {
     Q_OBJECT
 public:
-    BrowseRoomsDialog(Core *core, QWidget *parent);
+    BrowseRoomsDialog(Core *core, QWidget *parent, const QString &spaceId = QString()); /* a space id lists that space's rooms (engine event "space_rooms") instead of the public directory */
     void setRooms(const QJsonArray &rooms);
 private:
     void search();
     void joinSelected();
     Core *core_;
+    QString spaceId_;
     QLineEdit *term_, *server_;
     QListWidget *list_;
     QLabel *status_;

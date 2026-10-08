@@ -72,7 +72,16 @@ Sidebar::Sidebar(QWidget *parent) : QTreeWidget(parent)
         QTreeWidgetItem *it = itemAt(pos);
         if (!it) return;
         const QString room = it->data(0, RoleRoom).toString();
-        if (room.isEmpty()) return;
+        if (room.isEmpty()) {
+            const QString sec = it->data(0, RoleSection).toString();
+            QString space;
+            for (const QJsonValue &v : rooms_) if (v.toObject()["section"].toString() == sec && !v.toObject()["space_id"].toString().isEmpty()) { space = v.toObject()["space_id"].toString(); break; }
+            if (space.isEmpty()) return;
+            QMenu hm(this);
+            hm.addAction("Explore rooms...", this, [this, space] { emit exploreRequested(space); });
+            hm.exec(viewport()->mapToGlobal(pos));
+            return;
+        }
         QMenu menu(this);
         const auto info = rows_.constFind(room);
         if (info != rows_.constEnd() && !info->invite) {

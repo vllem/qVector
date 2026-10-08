@@ -170,7 +170,8 @@ impl App {
             }
             "search_users" => { let (i, term) = (i.clone(), s(args, "term")); self.rt().spawn(async move { if let Some(c) = i.client() { match ui::search_users(&c, &term).await { Ok(u) => i.emit_json("users", &u), Err(e) => i.notice(format!("User search failed: {e}")) } } }); Value::Null }
             "public_rooms" => { let (i, term, server) = (i.clone(), s(args, "term"), s(args, "server")); self.rt().spawn(async move { if let Some(c) = i.client() { match ui::public_directory(&c, &term, &server).await { Ok(r) => i.emit_json("directory", &r), Err(e) => { i.emit("directory", "[]"); i.notice(format!("Room directory failed: {e}")); } } } }); Value::Null }
-            "join_room" => { let a = s(args, "address"); self.client_action("Joined the room", move |c| async move { ui::join_by_address(&c, &a).await }) }
+            "join_room" => { let a = s(args, "address"); let via: Vec<String> = args["via"].as_array().map(|v| v.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default(); self.client_action("Joined the room", move |c| async move { ui::join_via(&c, &a, &via).await }) }
+            "space_rooms" => { let (i, id) = (i.clone(), s(args, "space_id")); self.rt().spawn(async move { if let Some(c) = i.client() { match ui::space_rooms(&c, &id).await { Ok(r) => i.emit_json("space_rooms", &r), Err(e) => { i.emit("space_rooms", "[]"); i.notice(format!("Cannot list the space: {e}")); } } } }); Value::Null }
             "forward" => {
                 let (id, rooms): (String, Vec<String>) = (s(args, "event_id"), args["room_ids"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default());
                 self.on_timeline(move |i, tl| async move { if let Some(c) = i.client() { i.notice(match ui::forward_message(&c, &tl, &id, &rooms).await { Ok(n) => format!("Forwarded to {n} room(s)"), Err(e) => format!("Could not forward: {e}") }); } });
@@ -339,7 +340,7 @@ impl App {
         hs.invite_alice("Bob's club");
         hs.set_history(40);
         let plans = hs.add_room("Plans");
-        hs.add_space("Rust club", &[plans.as_str()]);
+        hs.add_space("Rust club", &[plans.as_str(), "!announcements:hs"]);
         hs.add_room("Lounge");
         *self.inner.data_dir.lock().unwrap() = std::env::temp_dir().join(format!("vector-demo-{}", std::process::id())); /* never the real saved session */
         let lines = ["Hello alice, this room is end-to-end encrypted.", "You are reading it through matrix-sdk.", "Reply below!"].map(String::from).to_vec();

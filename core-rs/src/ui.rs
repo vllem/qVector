@@ -19,7 +19,7 @@ use serde::Serialize;
 
 /// One row of the room list as the UI draws it.
 #[derive(Debug, Clone, PartialEq, Serialize, Default)]
-pub struct UiRoom { pub id: String, pub title: String, pub section: String, pub unread: u32, pub highlight: bool, pub invite: bool, pub favourite: bool, pub low_priority: bool, pub notify: String, pub avatar_mxc: String, pub avatar_path: String }
+pub struct UiRoom { pub space_id: String, pub id: String, pub title: String, pub section: String, pub unread: u32, pub highlight: bool, pub invite: bool, pub favourite: bool, pub low_priority: bool, pub notify: String, pub avatar_mxc: String, pub avatar_path: String }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct UiReaction { pub key: String, pub count: u32, pub mine: bool }
@@ -320,10 +320,41 @@ pub async fn public_directory(client: &Client, term: &str, server: &str) -> Resu
     Ok(r.chunk.into_iter().map(|c| UiPublicRoom { room_id: c.room_id.to_string(), name: c.name.clone().unwrap_or_default(), alias: c.canonical_alias.map(|a| a.to_string()).unwrap_or_default(), topic: c.topic.unwrap_or_default(), members: u64::from(c.num_joined_members) }).collect())
 }
 
-/// Join a room by id or address (#room:server).
-pub async fn join_by_address(client: &Client, address: &str) -> Result<String, String> {
+/// The rooms of a space as the server lists them (also the ones we have not joined): what "explore this space" shows. Rooms that are
+/// themselves spaces and the space itself are left out. `alias` carries the room id when there is no address, and `joined` says whether we are in.
+pub async fn space_rooms(client: &Client, space_id: &str) -> Result<Vec<UiSpaceRoom>, String> {
+    use matrix_sdk::ruma::api::client::space::get_hierarchy::v1::Request;
+    let rid = <&matrix_sdk::ruma::RoomId>::try_from(space_id).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    let mut from: Option<String> = None;
+    for _ in 0..10 { /* pages of the hierarchy */
+        let mut req = Request::new(rid.to_owned());
+        req.from = from.clone();
+        req.max_depth = Some(1u32.into());
+        let r = client.send(req).await.map_err(|e| e.to_string())?;
+        for c in r.rooms {
+            let sm = c.summary;
+            if sm.room_id == rid || sm.room_type.as_ref().map(|t| t.to_string() == "m.space").unwrap_or(false) { continue; }
+            let joined = client.get_room(&sm.room_id).map(|x| x.state() == matrix_sdk::RoomState::Joined).unwrap_or(false);
+            out.push(UiSpaceRoom { room_id: sm.room_id.to_string(), name: sm.name.unwrap_or_default(), alias: sm.canonical_alias.map(|a| a.to_string()).unwrap_or_default(), topic: sm.topic.unwrap_or_default(), members: u64::from(sm.num_joined_members), joined });
+        }
+        from = r.next_batch;
+        if from.is_none() { break; }
+    }
+    out.sort_by(|a, b| (a.joined, a.name.to_lowercase()).cmp(&(b.joined, b.name.to_lowercase())));
+    Ok(out)
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct UiSpaceRoom { pub room_id: String, pub name: String, pub alias: String, pub topic: String, pub members: u64, pub joined: bool }
+
+/// Join a room by id or address (#room:server); a room id needs the servers to try (`via`) when it is not on ours.
+pub async fn join_by_address(client: &Client, address: &str) -> Result<String, String> { join_via(client, address, &[]).await }
+
+pub async fn join_via(client: &Client, address: &str, via: &[String]) -> Result<String, String> {
     let id = <&matrix_sdk::ruma::RoomOrAliasId>::try_from(address.trim()).map_err(|e| format!("not a room id or address: {e}"))?;
-    client.join_room_by_id_or_alias(id, &[]).await.map(|r| r.room_id().to_string()).map_err(|e| e.to_string())
+    let via: Vec<matrix_sdk::ruma::OwnedServerName> = via.iter().filter_map(|v| <&matrix_sdk::ruma::ServerName>::try_from(v.as_str()).ok().map(|s| s.to_owned())).collect();
+    client.join_room_by_id_or_alias(id, &via).await.map(|r| r.room_id().to_string()).map_err(|e| e.to_string())
 }
 
 /// Send a copy of a message (text, notice, emote; pictures and files by their original content) to other rooms. Returns how many were sent.
@@ -393,7 +424,7 @@ pub async fn ui_rooms_with_spaces(client: &Client, spaces: &matrix_sdk_ui::space
     let mut rooms = ui_rooms(client).await;
     for r in rooms.iter_mut().filter(|r| !r.invite && r.section != "Direct Messages") {
         let Ok(rid) = <&matrix_sdk::ruma::RoomId>::try_from(r.id.as_str()) else { continue };
-        if let Some(parent) = spaces.joined_parents_of_child(rid).await.into_iter().next() { r.section = parent.display_name; }
+        if let Some(parent) = spaces.joined_parents_of_child(rid).await.into_iter().next() { r.section = parent.display_name; r.space_id = parent.room_id.to_string(); }
     }
     for r in rooms.iter_mut().filter(|r| !r.invite) {
         if r.favourite { r.section = "Favourites".into(); } else if r.low_priority { r.section = "Low priority".into(); }
@@ -1456,6 +1487,19 @@ mod tests {
             assert_eq!(got, level);
         }
         assert!(set_room_notification_level(&f.client, &id, "loud").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn the_rooms_of_a_space_can_be_explored_and_an_unjoined_one_joined() {
+        let f = fixture().await;
+        let space = f.hs.add_space("Rust club", &[ROOM, "!hidden:hs"]);
+        crate::sync_once(&f.client).await.unwrap();
+        let rooms = space_rooms(&f.client, &space).await.unwrap_or_else(|e| panic!("{e}; {:#?}", f.hs.log().iter().filter(|l| l.contains("UNHANDLED")).collect::<Vec<_>>()));
+        let names: Vec<(&str, bool)> = rooms.iter().map(|r| (r.room_id.as_str(), r.joined)).collect();
+        assert_eq!(names, vec![("!hidden:hs", false), (ROOM, true)], "unjoined rooms first: {rooms:#?}");
+        assert_eq!(rooms[0].name, "hidden", "{rooms:#?}");
+        assert!(space_rooms(&f.client, "not an id").await.is_err());
+        assert_eq!(join_via(&f.client, "!hidden:hs", &["hs".to_string()]).await.unwrap(), "!hidden:hs");
     }
 
     #[tokio::test]

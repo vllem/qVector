@@ -7,6 +7,7 @@
 #include <QMessageBox>
 #include <QRegularExpression>
 #include <QTextBrowser>
+#include <QTimer>
 #include <QVBoxLayout>
 
 namespace vc {
@@ -122,9 +123,9 @@ CreateRoomDialog::CreateRoomDialog(Core *core, QWidget *parent) : QDialog(parent
 
 /* ---------- browse the public rooms ---------- */
 
-BrowseRoomsDialog::BrowseRoomsDialog(Core *core, QWidget *parent) : QDialog(parent), core_(core)
+BrowseRoomsDialog::BrowseRoomsDialog(Core *core, QWidget *parent, const QString &spaceId) : QDialog(parent), core_(core), spaceId_(spaceId)
 {
-    setWindowTitle("Browse public rooms");
+    setWindowTitle(spaceId.isEmpty() ? "Browse public rooms" : "Rooms in this space");
     resize(560, 460);
     auto *v = new QVBoxLayout(this);
     auto *row = new QHBoxLayout;
@@ -148,6 +149,7 @@ BrowseRoomsDialog::BrowseRoomsDialog(Core *core, QWidget *parent) : QDialog(pare
     bottom->addWidget(status_, 1);
     bottom->addWidget(join_);
     v->addLayout(bottom);
+    if (!spaceId.isEmpty()) { term_->hide(); server_->hide(); find->setText("Refresh"); find->setMaximumWidth(110); row->insertStretch(0, 1); }
     connect(find, &QPushButton::clicked, this, [this] { search(); });
     connect(term_, &QLineEdit::returnPressed, this, [this] { search(); });
     connect(server_, &QLineEdit::returnPressed, this, [this] { search(); });
@@ -160,6 +162,7 @@ BrowseRoomsDialog::BrowseRoomsDialog(Core *core, QWidget *parent) : QDialog(pare
 void BrowseRoomsDialog::search()
 {
     status_->setText("Searching...");
+    if (!spaceId_.isEmpty()) { core_->call("space_rooms", {{"space_id", spaceId_}}); return; }
     core_->call("public_rooms", {{"term", term_->text().trimmed()}, {"server", server_->text().trimmed()}});
 }
 
@@ -167,8 +170,12 @@ void BrowseRoomsDialog::joinSelected()
 {
     QListWidgetItem *it = list_->currentItem();
     if (!it) return;
-    core_->call("join_room", {{"address", it->data(Qt::UserRole).toString()}});
+    if (it->data(Qt::UserRole + 2).toBool()) return; /* already in */
+    QJsonObject args{{"address", it->data(Qt::UserRole).toString()}};
+    if (!spaceId_.isEmpty()) args["via"] = QJsonArray{spaceId_.section(':', 1)}; /* the server of the space knows its rooms */
+    core_->call("join_room", args);
     status_->setText("Joining " + it->data(Qt::UserRole + 1).toString() + "...");
+    if (!spaceId_.isEmpty()) QTimer::singleShot(2500, this, [this] { search(); });
 }
 
 void BrowseRoomsDialog::setRooms(const QJsonArray &rooms)
@@ -179,7 +186,9 @@ void BrowseRoomsDialog::setRooms(const QJsonArray &rooms)
         const QJsonObject d = v.toObject();
         const QString title = !S(d, "name").isEmpty() ? S(d, "name") : !S(d, "alias").isEmpty() ? S(d, "alias") : S(d, "room_id");
         auto *it = new QListWidgetItem(QIcon(profilePixmap(QString(), S(d, "room_id"), title, 32, devicePixelRatioF(), pal)),
-                                       QString("%1  -  %2 members\n%3").arg(title).arg(d["members"].toInt()).arg(S(d, "topic").simplified().left(120)));
+                                       QString("%1  -  %2 members%3\n%4").arg(title).arg(d["members"].toInt()).arg(d["joined"].toBool() ? "  -  joined" : QString()).arg(S(d, "topic").simplified().left(120)));
+        it->setData(Qt::UserRole + 2, d["joined"].toBool());
+        if (d["joined"].toBool()) it->setForeground(pal.color(QPalette::PlaceholderText));
         it->setData(Qt::UserRole, !S(d, "alias").isEmpty() ? S(d, "alias") : S(d, "room_id")); /* an alias also works for rooms we cannot see into yet */
         it->setData(Qt::UserRole + 1, title);
         list_->addItem(it);

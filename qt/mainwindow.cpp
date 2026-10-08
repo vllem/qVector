@@ -504,6 +504,11 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
 
     connect(core_, &Core::event, this, &MainWindow::onEvent);
     connect(sidebar_, &Sidebar::roomActivated, this, [this](const QString &id) { openRoom(id); });
+    connect(sidebar_, &Sidebar::exploreRequested, this, [this](const QString &space) {
+        explore_ = new BrowseRoomsDialog(core_, this, space);
+        explore_->setAttribute(Qt::WA_DeleteOnClose);
+        explore_->show();
+    });
     connect(sidebar_, &Sidebar::notifyRequested, this, [this](const QString &id, const QString &level) { core_->call("set_room_notify", {{"room_id", id}, {"level", level}}); });
     connect(sidebar_, &Sidebar::tagRequested, this, [this](const QString &id, const QString &kind) { core_->call("set_room_tag", {{"room_id", id}, {"kind", kind}}); });
     connect(sidebar_, &Sidebar::leaveRequested, this, [this](const QString &id) {
@@ -795,6 +800,8 @@ void MainWindow::onEvent(const QString &name, const QJsonValue &p)
         updateStatus();
     } else if (name == "users") {
         if (startDm_) startDm_->setUsers(p.toArray());
+    } else if (name == "space_rooms") {
+        if (explore_) explore_->setRooms(p.toArray());
     } else if (name == "directory") {
         if (browse_) browse_->setRooms(p.toArray());
     } else if (name == "edit_history") {
@@ -1298,6 +1305,9 @@ void MainWindow::dialogForDemo(const QString &which)
     else if (which == "recovery") showRecovery(false);
     else if (which == "verify") showVerify(QJsonObject{{"state", "emoji"}, {"user", "@zach:example.org"}, {"emoji", QJsonArray{QJsonArray{"\U0001F436", "Dog"}, QJsonArray{"\U0001F431", "Cat"}, QJsonArray{"\U0001F981", "Lion"}, QJsonArray{"\U0001F40E", "Horse"}, QJsonArray{"\U0001F984", "Unicorn"}, QJsonArray{"\U0001F437", "Pig"}, QJsonArray{"\U0001F418", "Elephant"}}}, {"decimals", QJsonArray{123, 456, 789}}});
     else if (which == "settings") roomSettings();
+    else if (which == "explore") {
+        for (const QJsonValue &v : rooms_) if (!S(v.toObject(), "space_id").isEmpty()) { emit sidebar_->exploreRequested(S(v.toObject(), "space_id")); break; }
+    }
     else if (which == "paste") { /* dev aid: act as if a picture was pasted, to see the caption bar */
         QImage img(320, 200, QImage::Format_RGB32);
         img.fill(QColor("#3b7dd8"));
