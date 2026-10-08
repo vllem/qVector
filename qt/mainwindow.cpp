@@ -53,7 +53,7 @@ public:
             if (!sel && tab->selectedPosition != QStyleOptionTab::NextIsSelected) { /* inset separator between tabs */
                 p->fillRect(QRect(tab->rect.right(), tab->rect.top() + 6, 1, tab->rect.height() - 12), QColor("#8c8c8c")); /* same grey as the splitter */
             }
-            if (sel) p->fillRect(QRect(tab->rect.left(), tab->rect.bottom() - 2, tab->rect.width(), 3), onAccent(pal));
+            if (sel) p->fillRect(QRect(tab->rect.left(), tab->rect.bottom() - 2, tab->rect.width(), 3), QColor("#d2d2d2"));
             return;
         }
         if (tab && el == CE_TabBarTabLabel && (tab->state & State_Selected)) {
