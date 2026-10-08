@@ -128,11 +128,6 @@ void Sidebar::refresh(const QJsonArray &rooms, const QString &current, const QSt
 
     const int scroll = verticalScrollBar()->value();
     clear();
-    auto *ws = new QTreeWidgetItem(this, QStringList(workspace));
-    QFont bf = font();
-    bf.setBold(true);
-    ws->setFont(0, bf);
-    ws->setFlags(Qt::ItemIsEnabled);
     const QPalette pal = palette();
     const QBrush headBg(pal.color(QPalette::Window).darker(isDark(pal) ? 125 : 108));
     const qreal dpr = devicePixelRatioF();
