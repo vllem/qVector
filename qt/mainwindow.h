@@ -143,7 +143,7 @@ private:
     QTemporaryDir *pasteDir_ = nullptr;
     QStackedWidget *timelines_;
     Composer *composer_;
-    QToolButton *attach_, *emojiBtn_;
+    QAction *attach_ = nullptr, *emojiBtn_ = nullptr;
     EmojiPicker *picker_, *reactPicker_;
     MemberList *memberList_;
     SearchPanel *searchPanel_;

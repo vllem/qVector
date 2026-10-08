@@ -34,6 +34,7 @@
 #include <QProxyStyle>
 #include <QStyleOptionTab>
 #include <QPainter>
+#include <QPainterPath>
 
 namespace vc {
 
@@ -337,18 +338,12 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     composer_->setPlaceholderText("Send a message");
     composer_->setMinimumHeight(48);
 
-    attach_ = new QToolButton;
-    attach_->setIcon(QIcon::fromTheme("mail-attachment"));
-    if (attach_->icon().isNull()) attach_->setText("Attach");
-    attach_->setAutoRaise(true);
+    /* Attach on the left and emoji on the right, both inside the box; the icons are drawn in applyChrome in the palette's text colour. */
+    attach_ = composer_->addAction(QIcon(), QLineEdit::LeadingPosition);
     attach_->setToolTip("Send a file or image");
-    emojiBtn_ = new QToolButton;
-    emojiBtn_->setText(QStringLiteral("\u263A\uFE0E"));
-    emojiBtn_->setAutoRaise(true);
+    emojiBtn_ = composer_->addAction(QIcon(), QLineEdit::TrailingPosition);
     emojiBtn_->setToolTip("Emoji (you can also type :name)");
     compRow->addWidget(composer_, 1);
-    compRow->addWidget(emojiBtn_);
-    compRow->addWidget(attach_);
     contextBar_ = new QWidget;
     {
         auto *cl = new QHBoxLayout(contextBar_);
@@ -498,11 +493,11 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     }
     connect(composer_, &QLineEdit::returnPressed, this, &MainWindow::send);
     connect(composer_, &QLineEdit::textEdited, this, [this](const QString &t) { if (!current_.isEmpty()) if (sendTyping_) core_->call("typing", {{"typing", !t.isEmpty()}}); });
-    connect(attach_, &QToolButton::clicked, this, &MainWindow::chooseFiles);
+    connect(attach_, &QAction::triggered, this, &MainWindow::chooseFiles);
     picker_ = new EmojiPicker(this);
     reactPicker_ = new EmojiPicker(this);
     reactPicker_->setCloseOnPick(true);
-    connect(emojiBtn_, &QToolButton::clicked, this, [this] { picker_->popupAt(emojiBtn_->mapToGlobal(QPoint(emojiBtn_->width(), 0))); });
+    connect(emojiBtn_, &QAction::triggered, this, [this] { picker_->popupAt(composer_->mapToGlobal(QPoint(composer_->width(), 0))); });
     connect(picker_, &EmojiPicker::emojiPicked, this, [this](const QString &g) { composer_->insert(g); composer_->setFocus(); emit composer_->textEdited(composer_->text()); });
     connect(reactPicker_, &EmojiPicker::emojiPicked, this, [this](const QString &g) { if (!reactEvent_.isEmpty()) core_->call("react", {{"event_id", reactEvent_}, {"key", g}}); });
     connect(composer_, &Composer::escapePressed, this, [this] { if (replyTo_.isEmpty() && editing_.isEmpty() && !pending_.isEmpty()) cancelAttachment(); else cancelContext(); });
@@ -648,6 +643,40 @@ void MainWindow::applyChrome()
     composer_->setStyleSheet(QString("QLineEdit { border: 1px solid %1; border-radius: 4px; padding: 6px 10px; background: palette(base); color: palette(text); font-size: 11pt; }"
                                      "QLineEdit:focus { border-color: palette(highlight); }").arg(line.name()));
     banner_->setStyleSheet(QString("background:%1;color:%2;padding:3px 8px").arg(pal.color(QPalette::ToolTipBase).name(), pal.color(QPalette::ToolTipText).name()));
+    {
+        auto draw = [&](bool smiley) {
+            const int px = 48;
+            QPixmap pm(px, px);
+            pm.fill(Qt::transparent);
+            QPainter p(&pm);
+            p.setRenderHint(QPainter::Antialiasing);
+            p.scale(px / 24.0, px / 24.0);
+            p.setPen(Qt::NoPen);
+            p.setBrush(pal.color(QPalette::WindowText));
+            QPainterPath ring;
+            ring.setFillRule(Qt::OddEvenFill);
+            ring.addEllipse(QPointF(12, 12), 10, 10);
+            ring.addEllipse(QPointF(12, 12), 8.5, 8.5);
+            p.drawPath(ring);
+            if (smiley) {
+                p.drawEllipse(QPointF(8.5, 9.5), 1.5, 1.5);
+                p.drawEllipse(QPointF(15.5, 9.5), 1.5, 1.5);
+                QPainterPath m;
+                m.moveTo(17, 14);
+                m.lineTo(7, 14);
+                m.cubicTo(7, 16.2, 9.25, 18, 12, 18);
+                m.cubicTo(14.75, 18, 17, 16.2, 17, 14);
+                p.drawPath(m);
+            } else {
+                p.drawRect(QRectF(11, 7, 2, 10));
+                p.drawRect(QRectF(7, 11, 10, 2));
+            }
+            pm.setDevicePixelRatio(2.0);
+            return QIcon(pm);
+        };
+        attach_->setIcon(draw(false));
+        emojiBtn_->setIcon(draw(true));
+    }
     const QString base = QApplication::style()->name();
     auto *cur = qobject_cast<QProxyStyle *>(tabs_->style());
     if (!cur || !cur->baseStyle() || cur->baseStyle()->name() != base) {
