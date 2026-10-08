@@ -101,9 +101,28 @@ const QImage *TimelineView::picture(const QString &path)
     return img.isNull() ? nullptr : &img;
 }
 
-/* a thin frame painted into a picture (device pixels) */
-static void frameImage(QImage &img, const QColor &c, qreal dpr)
+/* a thin frame painted into a picture (device pixels). Its colour is the
+ * inverse of the picture's average colour (sampled on a coarse grid), pushed to
+ * black or white when that would blend into the picture or the timeline background */
+static void frameImage(QImage &img, const QColor &bg, qreal dpr)
 {
+    if (img.isNull()) return;
+    qint64 r = 0, g = 0, b = 0, n = 0;
+    const int sx = qMax(1, img.width() / 16), sy = qMax(1, img.height() / 16);
+    for (int y = 0; y < img.height(); y += sy)
+        for (int x = 0; x < img.width(); x += sx) {
+            const QColor px = img.pixelColor(x, y);
+            if (px.alpha() < 128) continue;
+            r += px.red(); g += px.green(); b += px.blue(); n++;
+        }
+    const QColor avg = n ? QColor(int(r / n), int(g / n), int(b / n)) : bg;
+    QColor c(255 - avg.red(), 255 - avg.green(), 255 - avg.blue());
+    auto lum = [](const QColor &k) { return qGray(k.rgb()); };
+    auto gap = [&](const QColor &k) { return qMin(qAbs(lum(k) - lum(avg)), qAbs(lum(k) - lum(bg))); };
+    if (gap(c) < 64) {
+        const QColor dark(0, 0, 0), light(255, 255, 255);
+        c = gap(dark) > gap(light) ? dark : light;
+    }
     QPainter fp(&img);
     fp.setPen(QPen(c, qMax(1.0, dpr)));
     fp.setBrush(Qt::NoBrush);
@@ -342,7 +361,7 @@ void TimelineView::render()
             if (img) {
                 const QString key = "img:" + eid;
                 QImage scaled = img->scaled(QSize(480, 320) * dpr, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-                frameImage(scaled, pal.color(QPalette::Mid), dpr);
+                frameImage(scaled, pal.color(QPalette::Base), dpr);
                 scaled.setDevicePixelRatio(dpr);
                 addRes(doc, resHash_, QUrl(key), scaled);
                 content = "<a href=\"vc:img:" + esc(eid) + "\"><img src=\"" + key + "\" width=" + QString::number(int(scaled.width() / dpr)) + "></a>";
@@ -372,7 +391,7 @@ void TimelineView::render()
                             const QImage big = img->scaled(QSize(side, side) * dpr, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
                             t = big.copy((big.width() - side * dpr) / 2, (big.height() - side * dpr) / 2, side * dpr, side * dpr);
                         }
-                        frameImage(t, pal.color(QPalette::Mid), dpr);
+                        frameImage(t, pal.color(QPalette::Base), dpr);
                         t.setDevicePixelRatio(dpr);
                         addRes(doc, resHash_, QUrl(key), t);
                         content += "<td><a href=\"" + href + "\"><img src=\"" + key + "\" width=" + QString::number(int(t.width() / dpr)) + "></a></td>";
@@ -409,7 +428,7 @@ void TimelineView::render()
                 p.drawPolygon(tri);
             }
             p.end();
-            if (!playingThis) frameImage(card, pal.color(QPalette::Mid), dpr);
+            if (!playingThis) frameImage(card, pal.color(QPalette::Base), dpr);
             card.setDevicePixelRatio(dpr);
             const QString key = "vid:" + eid;
             addRes(doc, resHash_, QUrl(key), card);
@@ -467,7 +486,7 @@ void TimelineView::render()
             if (const QImage *pi = picture(S(pv, "image_path"))) {
                 const QString key = "pv:" + eid;
                 QImage sc = pi->scaledToWidth(int(96 * dpr), Qt::SmoothTransformation);
-                frameImage(sc, pal.color(QPalette::Mid), dpr);
+                frameImage(sc, pal.color(QPalette::Base), dpr);
                 sc.setDevicePixelRatio(dpr);
                 addRes(doc, resHash_, QUrl(key), sc);
                 img = "<td valign=top><img src=\"" + key + "\" width=96></td>";
