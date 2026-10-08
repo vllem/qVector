@@ -54,7 +54,6 @@ public:
             if (!sel && tab->selectedPosition != QStyleOptionTab::NextIsSelected) { /* inset separator between tabs */
                 p->fillRect(QRect(tab->rect.right(), tab->rect.top() + 6, 1, tab->rect.height() - 12), line_); /* same grey as the splitter */
             }
-            if (sel) p->fillRect(QRect(tab->rect.left(), tab->rect.bottom() - 2, tab->rect.width(), 3), onHighlight(pal));
             return;
         }
         if (tab && el == CE_TabBarTabLabel && (tab->state & State_Selected)) {
