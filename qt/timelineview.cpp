@@ -71,7 +71,8 @@ static QString trimmedUrl(QString url)
 
 static QString linkify(const QString &text)
 {
-    static const QRegularExpression re(R"((https?://[^\s<>"]+))");
+    /* a scheme URL, "www.host...", or "host.tld/path" without a scheme (then https is assumed) */
+    static const QRegularExpression re(R"((?<![\w@./-])((?:https?://|www\.|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/)[^\s<>"]+))");
     QString out;
     int last = 0;
     auto it = re.globalMatch(text);
@@ -80,7 +81,8 @@ static QString linkify(const QString &text)
         QString url = trimmedUrl(m.captured(1));
         const QString tail = m.captured(1).mid(url.size());
         out += esc(text.mid(last, m.capturedStart() - last));
-        out += "<a href=\"" + esc(url) + "\">" + esc(url) + "</a>" + esc(tail);
+        const QString href = url.startsWith("http://") || url.startsWith("https://") ? url : "https://" + url;
+        out += "<a href=\"" + esc(href) + "\">" + esc(url) + "</a>" + esc(tail);
         last = m.capturedEnd();
     }
     out += esc(text.mid(last));
