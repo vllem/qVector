@@ -22,7 +22,7 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build
       - name: Smoke test (every window and dialog, offscreen)
-        run: scripts/ui_smoke.sh build/vector
+        run: scripts/ui_smoke.sh build/qvector
 
   macos:
     runs-on: macos-14

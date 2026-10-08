@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
-Name=Vector
+Name=qVector
 Comment=Matrix chat client
-Exec=vector
-Icon=vector
+Exec=qvector
+Icon=qvector
 Terminal=false
 Categories=Network;Chat;InstantMessaging;
-StartupWMClass=vector
+StartupWMClass=qvector

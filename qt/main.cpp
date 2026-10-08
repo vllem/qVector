@@ -86,8 +86,8 @@ int main(int argc, char **argv)
     QApplication app(argc, argv);
     QApplication::setApplicationName("vector");
     QApplication::setOrganizationName("vector");
-    QApplication::setApplicationDisplayName("Vector");
-    QApplication::setDesktopFileName("vector");
+    QApplication::setApplicationDisplayName("qVector");
+    QApplication::setDesktopFileName("qvector");
     bool demo = false, members = false;
     QString shot, room, dataDir, dialog, search, thread, server, user, password;
     bool verify = false, confirm = false;

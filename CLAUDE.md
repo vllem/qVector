@@ -1,8 +1,11 @@
-# Vector: notes for the next engineer (human or LLM)
+# qVector: notes for the next engineer (human or LLM)
 
 A Matrix desktop client: a **Rust engine** (`core-rs/`, crate `vector-core`, on matrix-sdk 0.19.1) with a **Qt6 Widgets (C++17) front end** (`qt/`) laid out like
 Ripcord. Desktop/Linux only (macOS/Windows sources exist, nobody has run them). Read `README.md` for the user-facing feature list and build steps; this file is
 what is *not* obvious.
+
+Naming: the project is called **qVector** (window title, executable `qvector`, desktop file, packaging). Deliberately unchanged: the Qt application/organization name `vector`
+(so the saved session under `~/.local/share/vector/vector/account` and the QSettings keep working), the crate `vector-core`, the `vcr_*` C ABI and `vector_app.h`.
 
 History: this repository was split out of the original all-C99 Vector client (kept in its own repository, the user's `VectorChat` folder). The C core was replaced
 by matrix-sdk; an intermediate QML/QtBridge front end was tried and dropped (the user found it ugly: "use the old Qt look"); what is here is the old Widgets UI ported
@@ -34,8 +37,8 @@ core-rs/src/ui.rs    UI-facing functions on top of matrix-sdk (rooms, messages, 
 cmake -S . -B build && cmake --build build -j8                  # dev: cargo dev profile in the repo's target/, Qt from the system (6.8)
 cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release && cmake --build build-release -j8
 cargo test -p vector-core --lib --features testkit              # 46 tests, ~5 min; a parallel-load flake in the reply/shield tests is known (UTD retry window)
-scripts/ui_smoke.sh build/vector                                # every window/dialog offscreen
-QT_QPA_PLATFORM=offscreen XDG_CONFIG_HOME=$(mktemp -d) ./build/vector --demo --data $(mktemp -d) --room bob --screenshot out.png
+scripts/ui_smoke.sh build/qvector                                # every window/dialog offscreen
+QT_QPA_PLATFORM=offscreen XDG_CONFIG_HOME=$(mktemp -d) ./build/qvector --demo --data $(mktemp -d) --room bob --screenshot out.png
 ```
 
 * **Do not set LD_LIBRARY_PATH to ~/Qt** (a Qt 6.10 install used by the dropped QtBridge experiment): the Widgets app uses the system Qt 6.8.

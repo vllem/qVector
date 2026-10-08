@@ -130,7 +130,7 @@ static QString S(const QJsonObject &o, const char *k) { return o.value(QLatin1St
 
 MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
 {
-    setWindowTitle("Vector");
+    setWindowTitle("qVector");
     resize(1100, 740);
     notify_ = QSettings("vector", "vector").value("notifications", true).toBool();
     notifier_ = new Notifier(this);
@@ -139,9 +139,9 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     if (QSystemTrayIcon::isSystemTrayAvailable()) {
         tray_ = new QSystemTrayIcon(this);
         tray_->setIcon(QIcon(trayPixmap(0, 64)));
-        tray_->setToolTip("Vector");
+        tray_->setToolTip("qVector");
         auto *tm = new QMenu(this);
-        tm->addAction("Show Vector", this, [this] { showNormal(); raise(); activateWindow(); });
+        tm->addAction("Show qVector", this, [this] { showNormal(); raise(); activateWindow(); });
         tm->addSeparator();
         tm->addAction("Quit", this, [] { qApp->quit(); });
         tray_->setContextMenu(tm);
@@ -546,7 +546,7 @@ void MainWindow::buildMenus()
     tools->addAction("Verify this session...", this, [this] { core_->call("request_verification"); });
     tools->addAction("Enter recovery key...", this, [this] { showRecovery(false); });
     tools->addAction("Set up recovery...", this, [this] { showRecovery(true); });
-    help->addAction("About Vector", this, [this] { showAbout(this); });
+    help->addAction("About qVector", this, [this] { showAbout(this); });
 }
 
 void MainWindow::showMain(bool main) { root_->setCurrentIndex(main ? 1 : 0); menuBar()->setVisible(main); statusBar()->setVisible(main); }
@@ -716,7 +716,7 @@ void MainWindow::updateTitle()
 {
     int unread = 0;
     for (const QJsonValue &v : rooms_) { const QJsonObject r = v.toObject(); if (!r["invite"].toBool()) unread += r["unread"].toInt(); }
-    const QString t = current_.isEmpty() ? QString("Vector") : roomTitle(current_) + " - Vector";
+    const QString t = current_.isEmpty() ? QString("qVector") : roomTitle(current_) + " - qVector";
     setWindowTitle(unread > 0 ? QString("(%1) ").arg(unread) + t : t);
     if (tray_) tray_->setIcon(QIcon(trayPixmap(unread, 64)));
 }

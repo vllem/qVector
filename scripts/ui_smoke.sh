@@ -1,8 +1,8 @@
 #!/bin/sh
 # Opens the main window and every dialog of the demo workspace (a fake homeserver, no network) on an offscreen display and fails on a crash or a timeout.
-# usage: ui_smoke.sh path/to/vector
+# usage: ui_smoke.sh path/to/qvector
 bin="$1"
-[ -x "$bin" ] || { echo "usage: $0 path/to/vector" >&2; exit 2; }
+[ -x "$bin" ] || { echo "usage: $0 path/to/qvector" >&2; exit 2; }
 out="${TMPDIR:-/tmp}/vc_ui_smoke.$$"
 trap 'rm -rf "$out"' EXIT
 mkdir -p "$out/cfg"

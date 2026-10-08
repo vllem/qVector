@@ -249,7 +249,7 @@ void VerifyDialog::setState(const QJsonObject &s)
                  : user + " wants to verify each other. You will compare a few emoji, ideally over a call or in person. Only accept if you expected this.", muted);
         buttons({{"Accept", [c] { c->call("accept_verification"); }}, {"Decline", [c] { c->call("cancel_verification"); }}}, true);
     } else if (st == "waiting") {
-        text(own ? "Waiting for your other session to accept. Open Element or another Vector on it and accept the verification request."
+        text(own ? "Waiting for your other session to accept. Open Element or another qVector on it and accept the verification request."
                  : "Waiting for " + user + " to accept the request in their client...", muted);
         buttons({{"Cancel", [c] { c->call("cancel_verification"); }}}, false);
     } else if (st == "emoji" || st == "confirmed") {
@@ -410,8 +410,8 @@ RoomSettingsDialog::RoomSettingsDialog(Core *core, const QJsonObject &d, QWidget
 
 void showAbout(QWidget *parent)
 {
-    QMessageBox::about(parent, "About Vector",
-                       "<b>Vector</b><br>A Matrix client: Qt6 interface over a Rust core (matrix-sdk).<br>"
+    QMessageBox::about(parent, "About qVector",
+                       "<b>qVector</b><br>A Matrix client: Qt6 interface over a Rust core (matrix-sdk).<br>"
                        "End-to-end encryption, key backup, cross-signing and device verification are built in.");
 }
 

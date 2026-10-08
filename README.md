@@ -1,6 +1,6 @@
-# Vector
+# qVector
 
-A [Matrix](https://matrix.org) desktop client: a Qt6 Widgets interface laid out like [Ripcord](https://cancel.fm/ripcord/) (menu bar, a sidebar of
+**qVector** is a [Matrix](https://matrix.org) desktop client: a Qt6 Widgets interface laid out like [Ripcord](https://cancel.fm/ripcord/) (menu bar, a sidebar of
 workspaces / direct messages / channels with unread badges, a tab strip of open rooms, a dense IRC-style timeline) on a Rust core built on
 [matrix-sdk](https://github.com/matrix-org/matrix-rust-sdk) (end-to-end encryption by vodozemac / matrix-sdk-crypto).
 
@@ -34,7 +34,7 @@ Requirements: a Rust toolchain (>= 1.96, [rustup](https://rustup.rs)), CMake >= 
 ```sh
 sudo apt install build-essential cmake pkg-config qt6-base-dev qt6-multimedia-dev qt6-image-formats-plugins   # + qt6-webengine-dev
 cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release && cmake --build build-release -j"$(nproc)"
-./build-release/vector
+./build-release/qvector
 ```
 
 The first build compiles matrix-sdk (about 15 minutes in release mode). Development builds (`cmake -S . -B build && cmake --build build`) use cargo's dev profile
@@ -43,8 +43,8 @@ and the repository's `target/` directory.
 Try the interface without an account or network (a fake homeserver with a few rooms and people):
 
 ```sh
-./build-release/vector --demo
-QT_QPA_PLATFORM=offscreen ./build-release/vector --demo --room bob --screenshot out.png     # without opening a window on your desktop
+./build-release/qvector --demo
+QT_QPA_PLATFORM=offscreen ./build-release/qvector --demo --room bob --screenshot out.png     # without opening a window on your desktop
 ```
 
 Dev aids: `--room NAME`, `--members`, `--search TEXT`, `--thread TEXT`, `--dialog poll|saved|prefs|verify|recovery|settings`, `--delay MS`, `--data DIR`,
@@ -54,12 +54,12 @@ Dev aids: `--room NAME`, `--members`, `--search TEXT`, `--thread TEXT`, `--dialo
 
 ```sh
 cargo test -p vector-core --lib --features testkit      # the engine against the fake homeserver, several devices (about 5 minutes)
-scripts/ui_smoke.sh build/vector                        # every window and dialog, offscreen
+scripts/ui_smoke.sh build/qvector                        # every window and dialog, offscreen
 ```
 
 ## Where things are
 
-Your session is stored in `~/.local/share/vector/account` (the SDK's sqlite store and the session, sealed with a random key file or your passphrase); the
+Your session is stored in `~/.local/share/vector/vector/account` (the SDK's sqlite store and the session, sealed with a random key file or your passphrase); the
 local message index, saved messages and downloaded media are there too. Treat that directory like a password store. `scripts/gen_emoji.py` regenerates the
 picker's data (`qt/emoji_data.h`), `scripts/gen_emoji_json.py` the engine's (`core-rs/src/emoji.json`).
 

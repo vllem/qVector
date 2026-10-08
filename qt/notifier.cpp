@@ -32,7 +32,7 @@ void Notifier::show(const QString &roomId, const QString &title, const QString &
     hints.insert("urgency", QVariant::fromValue<uchar>(highlight ? 2 : 1));
     hints.insert("desktop-entry", "vector");
     uint replaces = byRoom_.value(roomId, 0);
-    QDBusReply<uint> r = iface.call("Notify", "Vector", replaces, "mail-unread", title, body, QStringList{"default", "Open"}, hints, highlight ? 0 : 8000);
+    QDBusReply<uint> r = iface.call("Notify", "qVector", replaces, "mail-unread", title, body, QStringList{"default", "Open"}, hints, highlight ? 0 : 8000);
     if (!r.isValid()) { fprintf(stderr, "notify: %s\n", r.error().message().toUtf8().constData()); return; }
     rooms_.insert(r.value(), roomId);
     byRoom_.insert(roomId, r.value());
