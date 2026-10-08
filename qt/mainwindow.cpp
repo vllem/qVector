@@ -200,10 +200,11 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     tabs_->setIconSize(QSize(16, 16));
     tabs_->setDrawBase(false);
     tabs_->setStyleSheet(
-        "QTabBar::tab { padding: 5px 8px 5px 10px; margin: 0; border: none; border-bottom: 2px solid transparent;"
-        " background: transparent; }"
-        "QTabBar::tab:hover { background: palette(midlight); }"
-        "QTabBar::tab:selected { background: palette(base); border-bottom: 2px solid palette(highlight); }");
+        "QTabBar::tab { padding: 5px 8px 5px 10px; margin: 0 1px 0 0; border: none; border-bottom: 3px solid transparent;"
+        " background: palette(window); color: palette(mid); }"
+        "QTabBar::tab:hover { background: palette(midlight); color: palette(window-text); }"
+        "QTabBar::tab:selected { background: palette(highlight); color: palette(highlighted-text); font-weight: bold;"
+        " border-bottom: 3px solid palette(highlighted-text); }");
     plus_ = new QToolButton;
     plus_->setText("+");
     plus_->setAutoRaise(true);
