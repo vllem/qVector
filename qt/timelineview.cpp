@@ -101,6 +101,16 @@ const QImage *TimelineView::picture(const QString &path)
     return img.isNull() ? nullptr : &img;
 }
 
+/* a thin frame painted into a picture (device pixels) */
+static void frameImage(QImage &img, const QColor &c, qreal dpr)
+{
+    QPainter fp(&img);
+    fp.setPen(QPen(c, qMax(1.0, dpr)));
+    fp.setBrush(Qt::NoBrush);
+    const qreal h = qMax(1.0, dpr) / 2;
+    fp.drawRect(QRectF(h, h, img.width() - 2 * h, img.height() - 2 * h));
+}
+
 static QHash<QUrl, QImage> *g_resStore = nullptr; /* the pictures of the render in progress: a new document gets them all */
 
 /* adds a picture to the document and folds its pixels into a running hash, so a redraw can tell whether anything visible changed */
@@ -332,6 +342,7 @@ void TimelineView::render()
             if (img) {
                 const QString key = "img:" + eid;
                 QImage scaled = img->scaled(QSize(480, 320) * dpr, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                frameImage(scaled, pal.color(QPalette::Mid), dpr);
                 scaled.setDevicePixelRatio(dpr);
                 addRes(doc, resHash_, QUrl(key), scaled);
                 content = "<a href=\"vc:img:" + esc(eid) + "\"><img src=\"" + key + "\" width=" + QString::number(int(scaled.width() / dpr)) + "></a>";
@@ -361,13 +372,7 @@ void TimelineView::render()
                             const QImage big = img->scaled(QSize(side, side) * dpr, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
                             t = big.copy((big.width() - side * dpr) / 2, (big.height() - side * dpr) / 2, side * dpr, side * dpr);
                         }
-                        { /* a thin frame around each thumbnail */
-                            QPainter fp(&t);
-                            fp.setPen(QPen(pal.color(QPalette::Mid), qMax(1.0, dpr)));
-                            fp.setBrush(Qt::NoBrush);
-                            const qreal h = qMax(1.0, dpr) / 2;
-                            fp.drawRect(QRectF(h, h, t.width() - 2 * h, t.height() - 2 * h));
-                        }
+                        frameImage(t, pal.color(QPalette::Mid), dpr);
                         t.setDevicePixelRatio(dpr);
                         addRes(doc, resHash_, QUrl(key), t);
                         content += "<td><a href=\"" + href + "\"><img src=\"" + key + "\" width=" + QString::number(int(t.width() / dpr)) + "></a></td>";
@@ -404,6 +409,7 @@ void TimelineView::render()
                 p.drawPolygon(tri);
             }
             p.end();
+            if (!playingThis) frameImage(card, pal.color(QPalette::Mid), dpr);
             card.setDevicePixelRatio(dpr);
             const QString key = "vid:" + eid;
             addRes(doc, resHash_, QUrl(key), card);
@@ -461,6 +467,7 @@ void TimelineView::render()
             if (const QImage *pi = picture(S(pv, "image_path"))) {
                 const QString key = "pv:" + eid;
                 QImage sc = pi->scaledToWidth(int(96 * dpr), Qt::SmoothTransformation);
+                frameImage(sc, pal.color(QPalette::Mid), dpr);
                 sc.setDevicePixelRatio(dpr);
                 addRes(doc, resHash_, QUrl(key), sc);
                 img = "<td valign=top><img src=\"" + key + "\" width=96></td>";
