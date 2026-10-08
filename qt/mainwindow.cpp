@@ -31,7 +31,42 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include <QProxyStyle>
+#include <QStyleOptionTab>
+#include <QPainter>
+
 namespace vc {
+
+namespace {
+/* Flat rectangular tabs drawn on top of the platform style, so the close button, hover and drag behaviour stay native
+   (a style sheet would replace all of that). The selected tab is filled with the accent colour. */
+class FlatTabStyle : public QProxyStyle {
+public:
+    explicit FlatTabStyle(const QString &base) : QProxyStyle(base) {}
+    void drawControl(ControlElement el, const QStyleOption *opt, QPainter *p, const QWidget *w) const override
+    {
+        const auto *tab = qstyleoption_cast<const QStyleOptionTab *>(opt);
+        if (tab && el == CE_TabBarTabShape) {
+            const bool sel = tab->state & State_Selected, hover = tab->state & State_MouseOver;
+            const QPalette &pal = tab->palette;
+            p->fillRect(tab->rect.adjusted(0, 0, -1, 0), sel ? pal.color(QPalette::Highlight) : hover ? pal.color(QPalette::Midlight) : pal.color(QPalette::Window));
+            if (sel) p->fillRect(QRect(tab->rect.left(), tab->rect.bottom() - 2, tab->rect.width() - 1, 3), onAccent(pal));
+            return;
+        }
+        if (tab && el == CE_TabBarTabLabel && (tab->state & State_Selected)) {
+            QStyleOptionTab o(*tab);
+            o.palette.setColor(QPalette::WindowText, onAccent(tab->palette));
+            o.palette.setColor(QPalette::ButtonText, onAccent(tab->palette));
+            QProxyStyle::drawControl(el, &o, p, w);
+            return;
+        }
+        QProxyStyle::drawControl(el, opt, p, w);
+    }
+private:
+    /* dark text on a light accent, light text on a dark one (a theme's highlighted-text can be white on pale green) */
+    static QColor onAccent(const QPalette &pal) { return pal.color(QPalette::Highlight).lightness() > 128 ? QColor("#1a1a1a") : QColor("#ffffff"); }
+};
+}
 
 Composer::Composer(QWidget *parent) : QLineEdit(parent)
 {
@@ -199,16 +234,7 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     tabs_->setElideMode(Qt::ElideRight);
     tabs_->setIconSize(QSize(16, 16));
     tabs_->setDrawBase(false);
-    {
-        /* dark text on a light accent, light text on a dark one: the theme's highlighted-text can be white on a pale green */
-        const QColor hl = QApplication::palette().color(QPalette::Highlight);
-        const QString on = hl.lightness() > 128 ? "#1a1a1a" : "#ffffff";
-        tabs_->setStyleSheet(QString(
-            "QTabBar::tab { padding: 5px 8px 5px 10px; margin: 0 1px 0 0; border: none; border-bottom: 3px solid transparent;"
-            " background: palette(window); color: palette(window-text); }"
-            "QTabBar::tab:hover { background: palette(midlight); }"
-            "QTabBar::tab:selected { background: palette(highlight); color: %1; font-weight: bold; border-bottom: 3px solid %1; }").arg(on));
-    }
+    { auto *st = new FlatTabStyle(QApplication::style()->name()); st->setParent(tabs_); tabs_->setStyle(st); }
     plus_ = new QToolButton;
     plus_->setText("+");
     plus_->setAutoRaise(true);
