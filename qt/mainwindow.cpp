@@ -241,6 +241,9 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     tabRow->addWidget(tabs_, 1);
     tabRow->addWidget(plus_);
     rv->addLayout(tabRow);
+    tabLine_ = new QFrame; /* divider between the tabs and the topic / pinned message */
+    tabLine_->setFixedHeight(1);
+    rv->addWidget(tabLine_);
 
     auto *bar = new QHBoxLayout;
     bar->setContentsMargins(6, 3, 8, 3);
@@ -281,6 +284,10 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
         connect(pinNext_, &QPushButton::clicked, this, [this] { pinIndex_++; updatePinBar(); });
         connect(pinOff_, &QPushButton::clicked, this, [this] { if (pinIndex_ >= 0 && pinIndex_ < pinned_.size()) core_->call("pin_message", {{"event_id", pinned_[pinIndex_]["id"].toString()}, {"pinned", false}}); });
     }
+    pinLine_ = new QFrame;
+    pinLine_->setFixedHeight(1);
+    pinLine_->hide();
+    rv->addWidget(pinLine_);
     rv->addWidget(pinBar_);
 
     inviteBar_ = new QWidget;
@@ -634,6 +641,7 @@ void MainWindow::applyChrome()
                                          0.4 * pal.color(QPalette::WindowText).blueF() + 0.6 * pal.color(QPalette::Window).blueF());
     split_->setStyleSheet(QString("QSplitter::handle { background: %1; image: none; }").arg(line.name()));
     statusLine_->setStyleSheet(QString("background: %1;").arg(line.name()));
+    for (QFrame *f : {tabLine_, pinLine_}) f->setStyleSheet(QString("background: %1;").arg(line.name()));
     composer_->setStyleSheet(QString("QLineEdit { border: 1px solid %1; border-radius: 4px; padding: 6px 10px; background: palette(base); color: palette(text); font-size: 11pt; }"
                                      "QLineEdit:focus { border-color: palette(highlight); }").arg(line.name()));
     banner_->setStyleSheet(QString("background:%1;color:%2;padding:3px 8px").arg(pal.color(QPalette::ToolTipBase).name(), pal.color(QPalette::ToolTipText).name()));
@@ -1024,6 +1032,7 @@ void MainWindow::updatePinBar()
 {
     pinIndex_ = qBound(0, pinIndex_, qMax(0, int(pinned_.size()) - 1));
     pinBar_->setVisible(!pinned_.isEmpty());
+    pinLine_->setVisible(!pinned_.isEmpty());
     if (pinned_.isEmpty()) return;
     const QJsonObject r = pinned_[pinIndex_];
     QString t = S(r, "body").simplified();

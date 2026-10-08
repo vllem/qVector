@@ -127,6 +127,8 @@ private:
     QSplitter *split_;
     QTabBar *tabs_;
     QFrame *statusLine_ = nullptr;
+    QFrame *tabLine_ = nullptr;
+    QFrame *pinLine_ = nullptr;
     void applyChrome(); /* divider/composer colours and tab style follow the current palette and style (system Qt themes) */
     QToolButton *plus_;
     QLabel *topic_, *banner_, *statusLeft_, *statusRight_, *typingLabel_;
