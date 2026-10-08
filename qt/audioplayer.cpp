@@ -35,30 +35,35 @@ void WaveformView::setPeaks(const QVector<float> &peaks, bool final)
     update();
 }
 
+/* SoundCloud's look: thin bars (2 px, 1 px apart), most of the height above a baseline and a shorter, fainter reflection below it; the played part
+   is orange, the rest grey. */
 void WaveformView::paintEvent(QPaintEvent *)
 {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing, false);
-    const QPalette &pal = palette();
-    const QColor played = pal.color(QPalette::Highlight), rest = pal.color(QPalette::Mid);
-    const int barW = 3, gap = 1, step = barW + gap;
+    const bool dark = palette().color(QPalette::Window).lightness() < 128;
+    const QColor playedTop("#ff5500"), playedLow("#ff9a66");
+    const QColor restTop = dark ? QColor("#b0b0b0") : QColor("#333333"), restLow = dark ? QColor("#5c5c5c") : QColor("#b8b8b8");
+    const int barW = 2, gap = 1, step = barW + gap;
     const int n = qMax(1, width() / step);
-    const double mid = height() / 2.0;
+    const double base = height() * 0.70; /* the baseline */
+    const double up = base - 2, down = (height() - base) - 1;
     const int px = int(progress_ * width());
     for (int i = 0; i < n; i++) {
-        float v = 0.04f; /* a thin line while the file is still being read */
+        float v = 0.03f; /* a thin line while the file is still being read */
         if (!peaks_.isEmpty()) {
-            /* the loudest slice that falls into this bar */
             const int a = int(double(i) * peaks_.size() / n), b = qMax(a + 1, int(double(i + 1) * peaks_.size() / n));
             v = 0;
             for (int k = a; k < b && k < peaks_.size(); k++) v = qMax(v, peaks_[k]);
-            v = qMax(0.04f, v);
+            v = qMax(0.03f, v);
         }
-        const double h = v * (height() - 6) / 2.0;
         const int x = i * step;
-        p.fillRect(QRectF(x, mid - h, barW, h * 2), x + barW <= px ? played : rest);
+        const bool done = x + barW <= px;
+        const double hu = qMax(1.0, v * up), hl = qMax(1.0, v * down * 0.75);
+        p.fillRect(QRectF(x, base - hu, barW, hu), done ? playedTop : restTop);
+        p.fillRect(QRectF(x, base + 1, barW, hl), done ? playedLow : restLow);
     }
-    if (!final_) { p.setPen(pal.color(QPalette::PlaceholderText)); p.drawText(rect().adjusted(0, 0, -6, -4), Qt::AlignRight | Qt::AlignBottom, "analysing..."); }
+    if (!final_) { p.setPen(palette().color(QPalette::PlaceholderText)); p.drawText(rect().adjusted(0, 0, -6, -2), Qt::AlignRight | Qt::AlignBottom, "analysing..."); }
 }
 
 void WaveformView::mousePressEvent(QMouseEvent *e) { if (e->button() == Qt::LeftButton) emit seekRequested(qBound(0.0, e->position().x() / width(), 1.0)); }
@@ -72,6 +77,7 @@ AudioPlayer::AudioPlayer(const QString &path, const QString &title, QWidget *par
     auto *name = new QLabel(title, this);
     QFont f = name->font(); f.setBold(true); name->setFont(f);
     wave_ = new WaveformView(this);
+    wave_->setMinimumHeight(110);
     status_ = new QLabel(this);
     status_->setEnabled(false);
     v->addWidget(name);
@@ -111,7 +117,7 @@ AudioPlayer::AudioPlayer(const QString &path, const QString &title, QWidget *par
     connect(decoder_, &QAudioDecoder::bufferReady, this, &AudioPlayer::onBuffer);
     connect(decoder_, &QAudioDecoder::finished, this, [this] {
         float top = 0; for (float x : peaks_) top = qMax(top, x);
-        if (top > 0) for (float &x : peaks_) x = std::sqrt(x / top); /* louder detail for quiet files, and a calmer shape (sqrt) */
+        if (top > 0) for (float &x : peaks_) x = std::pow(x / top, 0.8f); /* the loudest bar reaches the top; quiet parts stay visible */
         wave_->setPeaks(peaks_, true);
     });
     connect(decoder_, qOverload<QAudioDecoder::Error>(&QAudioDecoder::error), this, [this](QAudioDecoder::Error) { wave_->setPeaks(peaks_, true); });
