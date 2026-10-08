@@ -67,6 +67,8 @@ pub struct UiMessage {
     /// pinned in the room (set by the app from the room's state)
     pub pinned: bool,
     pub poll: Option<UiPoll>,
+    /// a gallery (several pictures or files sent as one message, MSC4274): its items in order; `body` is the caption
+    pub gallery: Vec<UiGalleryItem>,
     /// the sender's picture: a file the app downloaded (set by the app, empty until then)
     pub avatar_path: String,
 }
@@ -273,6 +275,10 @@ pub async fn forward_message(client: &Client, timeline: &Timeline, event_id: &st
     Ok(sent)
 }
 
+/// One picture or file of a gallery message. It is addressed as `<event id>#<index>` wherever an event id is taken (save, open).
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct UiGalleryItem { pub index: u32, pub name: String, pub kind: String, pub size: u64, pub image_path: String, pub image_w: u32, pub image_h: u32 }
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct UiRevision { pub time: String, pub ts: u64, pub text: String }
 
@@ -366,6 +372,7 @@ fn describe(c: &TimelineItemContent) -> (String, String, String) {
             MessageType::Audio(a) => ("audio", a.filename()),
             MessageType::File(f) => ("file", f.filename()),
             MessageType::Location(_) => ("location", ""),
+            MessageType::Gallery(_) => ("gallery", ""),
             _ => ("other", ""),
         };
         return (kind.into(), m.body().to_string(), name.into());
@@ -408,6 +415,11 @@ fn message_row(ev: &EventTimelineItem, me: &str, images: &HashMap<String, PathBu
             row.size = f.info.as_ref().and_then(|i| i.size).map(u64::from).unwrap_or(0);
             row.text_file = text_like(&mime, f.filename());
         }
+        if let MessageType::Gallery(g) = m.msgtype() {
+            row.gallery = g.itemtypes.iter().enumerate().map(|(n, it)| gallery_item(n, it, images.get(&format!("{id}#{n}")))).collect();
+            /* the body of a gallery is its caption (or, without one, a list of the file names): show only a real caption */
+            if g.itemtypes.iter().map(|it| it.body()).collect::<Vec<_>>().join(", ") == row.body || row.body.trim().is_empty() { row.body.clear(); }
+        }
         if let MessageType::Image(i) = m.msgtype() {
             if let Some(info) = &i.info { row.image_w = info.width.map(|w| u64::from(w) as u32).unwrap_or(0); row.image_h = info.height.map(|h| u64::from(h) as u32).unwrap_or(0); }
             row.image_path = images.get(&id).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
@@ -429,6 +441,30 @@ fn message_row(ev: &EventTimelineItem, me: &str, images: &HashMap<String, PathBu
         }
     }
     Some(row)
+}
+
+fn gallery_item(index: usize, it: &matrix_sdk::ruma::events::room::message::GalleryItemType, image: Option<&PathBuf>) -> UiGalleryItem {
+    use matrix_sdk::ruma::events::room::message::GalleryItemType as G;
+    let uint = |v: Option<matrix_sdk::ruma::UInt>| v.map(u64::from).unwrap_or(0);
+    let mut item = UiGalleryItem { index: index as u32, name: it.body().to_string(), ..Default::default() };
+    match it {
+        G::Image(i) => {
+            item.kind = "image".into(); item.name = i.filename().to_string();
+            if let Some(info) = &i.info { item.image_w = uint(info.width) as u32; item.image_h = uint(info.height) as u32; item.size = uint(info.size); }
+            item.image_path = image.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        }
+        G::Video(v) => { item.kind = "video".into(); item.name = v.filename().to_string(); item.size = uint(v.info.as_ref().and_then(|i| i.size)); }
+        G::Audio(a) => { item.kind = "audio".into(); item.name = a.filename().to_string(); item.size = uint(a.info.as_ref().and_then(|i| i.size)); }
+        G::File(f) => { item.kind = "file".into(); item.name = f.filename().to_string(); item.size = uint(f.info.as_ref().and_then(|i| i.size)); }
+        _ => item.kind = "other".into(),
+    }
+    item
+}
+
+/// The source of the attachment of a gallery item.
+fn gallery_source(it: &matrix_sdk::ruma::events::room::message::GalleryItemType) -> Option<matrix_sdk::ruma::events::room::MediaSource> {
+    use matrix_sdk::ruma::events::room::message::GalleryItemType as G;
+    match it { G::Image(c) => Some(c.source.clone()), G::Video(c) => Some(c.source.clone()), G::Audio(c) => Some(c.source.clone()), G::File(c) => Some(c.source.clone()), _ => None }
 }
 
 /// The messages of a timeline in order (decrypted; what cannot be read shows as a placeholder). `images`: event id -> cached picture file.
@@ -583,15 +619,25 @@ pub async fn fetch_images(client: &Client, items: &[Arc<TimelineItem>], cache: &
     for item in items {
         let Some(ev) = item.as_event() else { continue };
         let Some(id) = ev.event_id().map(|e| e.to_string()) else { continue };
-        if have.contains_key(&id) { continue; }
         let Some(m) = ev.content().as_message() else { continue };
-        let MessageType::Image(img) = m.msgtype() else { continue };
-        let req = MediaRequestParameters { source: img.source.clone(), format: MediaFormat::File };
-        if let Ok(bytes) = client.media().get_media_content(&req, true).await {
-            let ext = img.filename().rsplit('.').next().filter(|e| e.len() <= 5 && !e.contains('/')).unwrap_or("img");
-            let safe: String = id.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-            let path = cache.join(format!("{safe}.{ext}"));
-            if std::fs::write(&path, bytes).is_ok() { added.insert(id, path); }
+        /* (key, source, file name) of every picture of the message; a gallery's pictures are keyed "<event id>#<index>" */
+        let wanted: Vec<(String, matrix_sdk::ruma::events::room::MediaSource, String)> = match m.msgtype() {
+            MessageType::Image(img) => vec![(id.clone(), img.source.clone(), img.filename().to_string())],
+            MessageType::Gallery(g) => g.itemtypes.iter().enumerate().filter_map(|(n, it)| match it {
+                matrix_sdk::ruma::events::room::message::GalleryItemType::Image(img) => Some((format!("{id}#{n}"), img.source.clone(), img.filename().to_string())),
+                _ => None,
+            }).collect(),
+            _ => continue,
+        };
+        for (key, source, name) in wanted {
+            if have.contains_key(&key) || added.contains_key(&key) { continue; }
+            let req = MediaRequestParameters { source, format: MediaFormat::File };
+            if let Ok(bytes) = client.media().get_media_content(&req, true).await {
+                let ext = name.rsplit('.').next().filter(|e| e.len() <= 5 && !e.contains('/')).unwrap_or("img");
+                let safe: String = key.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+                let path = cache.join(format!("{safe}.{ext}"));
+                if std::fs::write(&path, bytes).is_ok() { added.insert(key, path); }
+            }
         }
     }
     added
@@ -632,10 +678,12 @@ pub async fn read_text_file(client: &Client, timeline: &Timeline, event_id: &str
 
 /// Download (and decrypt) the file, picture, video or audio of the message `event_id` and write it to `dest`; returns the size.
 pub async fn save_attachment(client: &Client, timeline: &Timeline, event_id: &str, dest: &Path) -> Result<u64, String> {
+    let (event_id, item) = match event_id.split_once('#') { Some((e, n)) => (e, Some(n.parse::<usize>().map_err(|_| "bad gallery item number")?)), None => (event_id, None) };
     let items = timeline.items().await;
     let ev = items.iter().filter_map(|i| i.as_event()).find(|e| e.event_id().map(|i| i.as_str()) == Some(event_id)).ok_or("that message is not in the timeline")?;
     let m = ev.content().as_message().ok_or("that message has no attachment")?;
     let source = match m.msgtype() {
+        MessageType::Gallery(g) => item.and_then(|n| g.itemtypes.get(n)).and_then(gallery_source).ok_or("that gallery item does not exist")?,
         MessageType::Image(c) => c.source.clone(),
         MessageType::Video(c) => c.source.clone(),
         MessageType::Audio(c) => c.source.clone(),
@@ -651,11 +699,13 @@ pub async fn save_attachment(client: &Client, timeline: &Timeline, event_id: &st
 /// Other kinds of file are refused: they are saved by the user, never opened by the app.
 pub async fn media_copy(client: &Client, timeline: &Timeline, event_id: &str, dir: &Path) -> Result<PathBuf, String> {
     let items: Vec<_> = timeline.items().await.iter().cloned().collect();
-    let m = ui_messages(&items, "").into_iter().find(|m| m.id == event_id).ok_or("that message is not in the timeline")?;
+    let (base, item) = match event_id.split_once('#') { Some((e, n)) => (e, n.parse::<usize>().ok()), None => (event_id, None) };
+    let mut m = ui_messages(&items, "").into_iter().find(|m| m.id == base).ok_or("that message is not in the timeline")?;
+    if let Some(g) = item.and_then(|n| m.gallery.get(n)) { m.kind = g.kind.clone(); m.file_name = g.name.clone(); }
     if !matches!(m.kind.as_str(), "image" | "video" | "audio") { return Err("only pictures, videos and audio are opened from here; save other files instead".into()); }
     let stem: String = m.file_name.rsplit('/').next().unwrap_or("").chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' }).collect();
     let stem = stem.trim_start_matches('.');
-    let id: String = event_id.chars().filter(|c| c.is_ascii_alphanumeric()).take(12).collect();
+    let id: String = event_id.chars().filter(|c| c.is_ascii_alphanumeric()).take(12).collect::<String>() + item.map(|n| format!("n{n}")).unwrap_or_default().as_str();
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let dest = dir.join(format!("{id}-{}", if stem.is_empty() { "media" } else { stem }));
     save_attachment(client, timeline, event_id, &dest).await?;
@@ -687,18 +737,43 @@ pub async fn send_text(timeline: &Timeline, text: &str, reply_to: Option<&str>) 
 pub async fn send_file(timeline: &Timeline, path: &Path, caption: Option<&str>) -> Result<(), String> {
     use matrix_sdk::ruma::events::room::message::TextMessageEventContent;
     use matrix_sdk_ui::timeline::AttachmentConfig;
+    let mut config = AttachmentConfig::default();
+    if let Some(c) = caption.filter(|c| !c.is_empty()) { config.caption = Some(TextMessageEventContent::markdown(c)); }
+    timeline.send_attachment(path.to_path_buf(), mime_of(path), config).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn mime_of(path: &Path) -> mime::Mime {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-    let mime = match ext.as_str() {
+    match ext.as_str() {
         "png" => mime::IMAGE_PNG, "jpg" | "jpeg" => mime::IMAGE_JPEG, "gif" => mime::IMAGE_GIF, "webp" => "image/webp".parse().unwrap(),
         "mp4" => "video/mp4".parse().unwrap(), "mp3" => "audio/mpeg".parse().unwrap(),
         "json" => "application/json".parse().unwrap(), "xml" => "application/xml".parse().unwrap(), "html" | "htm" => "text/html".parse().unwrap(),
         "csv" => "text/csv".parse().unwrap(), "md" | "markdown" => "text/markdown".parse().unwrap(),
         e if text_like("", &format!("x.{e}")) => mime::TEXT_PLAIN,
         _ => mime::APPLICATION_OCTET_STREAM,
-    };
-    let mut config = AttachmentConfig::default();
-    if let Some(c) = caption.filter(|c| !c.is_empty()) { config.caption = Some(TextMessageEventContent::markdown(c)); }
-    timeline.send_attachment(path.to_path_buf(), mime, config).await.map_err(|e| e.to_string())?;
+    }
+}
+
+/// Send several files as ONE message (a media gallery, MSC4274: `dm.filament.gallery`, the way Element X shows several pictures at once);
+/// `caption` (Markdown) belongs to the whole message. One file is sent as an ordinary attachment, as clients that do not know galleries show nothing useful for them.
+pub async fn send_gallery(timeline: &Timeline, paths: &[PathBuf], caption: Option<&str>) -> Result<(), String> {
+    use matrix_sdk::attachment::{AttachmentInfo, BaseFileInfo, BaseImageInfo};
+    use matrix_sdk::ruma::events::room::message::TextMessageEventContent;
+    use matrix_sdk_ui::timeline::{GalleryConfig, GalleryItemInfo};
+    match paths {
+        [] => return Err("no files to send".into()),
+        [one] => return send_file(timeline, one, caption).await,
+        _ => {}
+    }
+    let mut config = GalleryConfig::new();
+    for p in paths {
+        let mime = mime_of(p);
+        let attachment_info = if mime.type_() == mime::IMAGE { AttachmentInfo::Image(BaseImageInfo::default()) } else { AttachmentInfo::File(BaseFileInfo::default()) };
+        config = config.add_item(GalleryItemInfo { source: p.clone().into(), content_type: mime, attachment_info, caption: None, thumbnail: None });
+    }
+    config = config.caption(caption.filter(|c| !c.is_empty()).map(TextMessageEventContent::markdown));
+    timeline.send_gallery(config).await.map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -850,6 +925,48 @@ mod tests {
         assert_eq!(std::fs::read(got.values().next().unwrap()).unwrap(), PNG, "downloaded and decrypted to the original bytes");
         let again = ui_messages_with(&items, "@alice:hs", &got);
         assert!(again[0].image_path.ends_with(".png"));
+    }
+
+    #[tokio::test]
+    async fn several_pictures_are_one_gallery_message_that_comes_back_item_by_item() {
+        let f = fixture().await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut files = Vec::new();
+        for (n, name) in ["a.png", "b.png", "c.png"].iter().enumerate() {
+            let mut bytes = PNG.to_vec(); bytes.extend_from_slice(&[n as u8; 4]); /* trailing bytes: the three files differ */
+            let p = dir.path().join(name); std::fs::write(&p, &bytes).unwrap(); files.push(p);
+        }
+        send_gallery(&f.timeline, &files, Some("three dots")).await.unwrap_or_else(|e| panic!("{e}; unhandled: {:#?}", f.hs.log().iter().filter(|l| l.contains("UNHANDLED")).collect::<Vec<_>>()));
+        let msgs = wait_for(&f, |m| m.len() == 1 && m[0].kind == "gallery" && !m[0].pending).await;
+        assert_eq!(msgs[0].body, "three dots");
+        assert_eq!(msgs[0].gallery.iter().map(|g| (g.name.as_str(), g.kind.as_str())).collect::<Vec<_>>(), vec![("a.png", "image"), ("b.png", "image"), ("c.png", "image")]);
+        assert_eq!(f.hs.room_events().iter().filter(|e| e["type"] == "m.room.encrypted").count(), 1, "one event for all three");
+        assert_eq!(f.hs.uploaded().len(), 3);
+        let items: Vec<_> = f.timeline.items().await.iter().cloned().collect();
+        let got = fetch_images(&f.client, &items, &dir.path().join("cache"), &HashMap::new()).await;
+        assert_eq!(got.len(), 3);
+        let id = msgs[0].id.clone();
+        for (n, p) in files.iter().enumerate() {
+            assert_eq!(std::fs::read(&got[&format!("{id}#{n}")]).unwrap(), std::fs::read(p).unwrap(), "item {n}");
+        }
+        let rows = ui_messages_with(&items, "@alice:hs", &got);
+        assert!(rows[0].gallery.iter().all(|g| g.image_path.ends_with(".png")));
+        let dest = dir.path().join("saved.png");
+        save_attachment(&f.client, &f.timeline, &format!("{id}#1"), &dest).await.unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), std::fs::read(&files[1]).unwrap(), "item 1 saved on its own");
+        assert!(save_attachment(&f.client, &f.timeline, &format!("{id}#7"), &dest).await.is_err());
+        let opened = media_copy(&f.client, &f.timeline, &format!("{id}#2"), &dir.path().join("open")).await.unwrap();
+        assert_eq!(std::fs::read(opened).unwrap(), std::fs::read(&files[2]).unwrap());
+    }
+
+    #[tokio::test]
+    async fn one_file_is_not_a_gallery() {
+        let f = fixture().await;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("one.png"); std::fs::write(&p, PNG).unwrap();
+        send_gallery(&f.timeline, &[p], None).await.unwrap();
+        wait_for(&f, |m| m.len() == 1 && m[0].kind == "image" && !m[0].pending).await;
+        assert!(send_gallery(&f.timeline, &[], None).await.is_err());
     }
 
     #[tokio::test]

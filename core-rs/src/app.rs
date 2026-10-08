@@ -141,6 +141,10 @@ impl App {
             "select_room" => self.select_room(&s(args, "room_id")),
             "send" => { let (t, r) = (s(args, "text"), s(args, "reply_to")); if !t.trim().is_empty() { self.on_timeline(move |_, tl| async move { let _ = ui::send_text(&tl, &t, Some(r.as_str())).await; }); } Value::Null }
             "send_file" => { let p = PathBuf::from(s(args, "path").trim_start_matches("file://")); let cap = s(args, "caption"); self.on_timeline(move |i, tl| async move { if let Err(e) = ui::send_file(&tl, &p, Some(&cap)).await { i.notice(format!("Cannot send the file: {e}")); } }); Value::Null }
+            "send_files" => { /* several files become one gallery message; `paths`: array of paths */
+                let ps: Vec<PathBuf> = args.get("paths").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).map(|p| PathBuf::from(p.trim_start_matches("file://"))).collect()).unwrap_or_default();
+                let cap = s(args, "caption");
+                self.on_timeline(move |i, tl| async move { if let Err(e) = ui::send_gallery(&tl, &ps, Some(&cap)).await { i.notice(format!("Cannot send the files: {e}")); } }); Value::Null }
             "react" => { let (e, k) = (s(args, "event_id"), s(args, "key")); self.on_timeline(move |_, tl| async move { let _ = ui::toggle_reaction(&tl, &e, &k).await; }); Value::Null }
             "edit" => { let (e, t) = (s(args, "event_id"), s(args, "text")); self.on_timeline(move |_, tl| async move { let _ = ui::edit_text(&tl, &e, &t).await; }); Value::Null }
             "redact" => { let e = s(args, "event_id"); self.on_timeline(move |_, tl| async move { let _ = ui::redact(&tl, &e).await; }); Value::Null }
