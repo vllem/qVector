@@ -621,6 +621,7 @@ async fn sync_loop(i: Arc<Inner>, client: Client) {
     let mut seen_unread = None;
     let prefetching = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut keys_restored = false;
+    i.avatars.use_dir(&i.avatar_dir());
     let spaces = matrix_sdk_ui::spaces::SpaceService::new(client.clone()).await;
     loop {
         let _ = client.sync_once(SyncSettings::default().timeout(Duration::from_secs(0))).await;
