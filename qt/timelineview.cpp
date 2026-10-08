@@ -205,6 +205,7 @@ void TimelineView::onAnchor(const QUrl &u)
     }
     else if (s.startsWith("vc:img:") || s.startsWith("vc:open:")) emit openRequested(s.mid(s.indexOf(':', 3) + 1));
     else if (s.startsWith("vc:save:")) emit saveRequested(s.mid(8));
+    else if (s.startsWith("vc:text:")) emit textRequested(s.mid(8));
     else if (s.startsWith("vc:thread:")) emit threadRequested(s.mid(10));
     else if (s.startsWith("vc:vid:")) emit playRequested(s.mid(7));
     else if (s.startsWith("https://matrix.to/#/") || s.startsWith("http://matrix.to/#/")) emit matrixLink(s);
@@ -369,6 +370,10 @@ void TimelineView::render()
         } else if (kind == "file" || kind == "audio") {
             const QString t = (kind == "file" ? "File: " : "Audio: ") + (S(r, "file_name").isEmpty() ? text : S(r, "file_name"));
             content = pending || eid.isEmpty() ? esc(t) : "<a href=\"vc:save:" + esc(eid) + "\">" + esc(t) + "</a>" + (kind == "audio" ? " &nbsp;<a href=\"vc:open:" + esc(eid) + "\">Play</a>" : QString());
+            const qint64 sz = qint64(r.value("size").toDouble());
+            if (kind == "file" && sz > 0) content += " <span style=\"color:" + muted + "\">(" + (sz < 1024 ? QString::number(sz) + " B" : sz < 1024 * 1024 ? QString::number((sz + 1023) / 1024) + " KB" : QString::number(double(sz) / (1024 * 1024), 'f', 1) + " MB") + ")</span>";
+            if (kind == "file" && B(r, "text_file") && !pending && !eid.isEmpty()) /* a text file can be read here: a button under it */
+                content += "<br><a href=\"vc:text:" + esc(eid) + "\" style=\"text-decoration:none\"><span style=\"background-color:" + hex(pal.color(QPalette::Button)) + ";color:" + hex(pal.color(QPalette::ButtonText)) + "\">&nbsp;&nbsp;Open file&nbsp;&nbsp;</span></a>";
         } else if (kind == "location") {
             content = esc(text);
         } else {

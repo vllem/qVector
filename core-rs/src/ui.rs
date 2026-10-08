@@ -53,6 +53,9 @@ pub struct UiMessage {
     pub image_w: u32,
     pub image_h: u32,
     pub file_name: String,
+    /// a file whose contents can be shown as text (by its type or name): the UI offers "Open file"
+    pub text_file: bool,
+    pub size: u64,
     /// display names of other people whose newest read receipt is on this message
     pub seen_by: Vec<String>,
     /// replies in the thread that starts at this message (0: no thread)
@@ -400,6 +403,11 @@ fn message_row(ev: &EventTimelineItem, me: &str, images: &HashMap<String, PathBu
     if let Some(m) = content.as_message() {
         row.html = html_of(m.msgtype());
         row.edited = m.is_edited();
+        if let MessageType::File(f) = m.msgtype() {
+            let mime = f.info.as_ref().and_then(|i| i.mimetype.clone()).unwrap_or_default();
+            row.size = f.info.as_ref().and_then(|i| i.size).map(u64::from).unwrap_or(0);
+            row.text_file = text_like(&mime, f.filename());
+        }
         if let MessageType::Image(i) = m.msgtype() {
             if let Some(info) = &i.info { row.image_w = info.width.map(|w| u64::from(w) as u32).unwrap_or(0); row.image_h = info.height.map(|h| u64::from(h) as u32).unwrap_or(0); }
             row.image_path = images.get(&id).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
@@ -589,6 +597,39 @@ pub async fn fetch_images(client: &Client, items: &[Arc<TimelineItem>], cache: &
     added
 }
 
+/// Does a file of this type / name hold text a person can read? (Text types, source code, data and config formats.)
+pub fn text_like(mime: &str, name: &str) -> bool {
+    let m = mime.to_ascii_lowercase();
+    if m.starts_with("text/") || m.contains("json") || m.contains("xml") || m.contains("yaml") || m.contains("toml") || m.contains("javascript") || m.contains("x-sh") || m.contains("x-shellscript") || m.contains("sql") || m.contains("csv") { return true; }
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    name.contains('.') && matches!(ext.as_str(),
+        "txt" | "text" | "md" | "markdown" | "rst" | "log" | "csv" | "tsv" | "json" | "jsonl" | "xml" | "html" | "htm" | "css" | "js" | "mjs" | "ts" | "tsx" | "jsx" | "yaml" | "yml" | "toml" | "ini" | "cfg" | "conf" | "env"
+        | "sh" | "bash" | "zsh" | "fish" | "bat" | "ps1" | "py" | "rs" | "c" | "h" | "cc" | "cpp" | "hpp" | "cs" | "java" | "kt" | "go" | "rb" | "php" | "pl" | "lua" | "swift" | "sql" | "diff" | "patch" | "tex" | "bib" | "srt" | "vtt" | "gitignore" | "dockerfile" | "makefile" | "cmake" | "gradle" | "properties" | "lock")
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct UiTextFile { pub event_id: String, pub name: String, pub size: u64, pub text: String, pub truncated: bool }
+
+/// Download a text file of a message and return what to show: at most `max_chars` characters (the rest is cut and `truncated` says so).
+/// Files that are not text (binary data) or are too large to be worth previewing are refused with a reason.
+pub async fn read_text_file(client: &Client, timeline: &Timeline, event_id: &str, max_chars: usize) -> Result<UiTextFile, String> {
+    const MAX_DOWNLOAD: u64 = 16 * 1024 * 1024;
+    let items: Vec<_> = timeline.items().await.iter().cloned().collect();
+    let m = ui_messages(&items, "").into_iter().find(|m| m.id == event_id).ok_or("that message is not in the timeline")?;
+    if m.kind != "file" { return Err("only files are opened as text".into()); }
+    if m.size > MAX_DOWNLOAD { return Err(format!("this file is {} MB: too large to preview, save it instead", m.size / (1024 * 1024))); }
+    let dest = std::env::temp_dir().join(format!("qvector-text-{}-{}", std::process::id(), event_id.chars().filter(|c| c.is_ascii_alphanumeric()).take(16).collect::<String>()));
+    let n = save_attachment(client, timeline, event_id, &dest).await;
+    let bytes = std::fs::read(&dest); /* read back: save_attachment writes the decrypted bytes */
+    let _ = std::fs::remove_file(&dest);
+    let (n, bytes) = (n?, bytes.map_err(|e| e.to_string())?);
+    if bytes.iter().take(8000).any(|b| *b == 0) { return Err("this file looks binary, not text: save it instead".into()); }
+    let all = String::from_utf8_lossy(&bytes);
+    let truncated = all.chars().count() > max_chars;
+    let text: String = if truncated { all.chars().take(max_chars).collect() } else { all.into_owned() };
+    Ok(UiTextFile { event_id: event_id.to_string(), name: m.file_name, size: n, text, truncated })
+}
+
 /// Download (and decrypt) the file, picture, video or audio of the message `event_id` and write it to `dest`; returns the size.
 pub async fn save_attachment(client: &Client, timeline: &Timeline, event_id: &str, dest: &Path) -> Result<u64, String> {
     let items = timeline.items().await;
@@ -650,6 +691,9 @@ pub async fn send_file(timeline: &Timeline, path: &Path, caption: Option<&str>) 
     let mime = match ext.as_str() {
         "png" => mime::IMAGE_PNG, "jpg" | "jpeg" => mime::IMAGE_JPEG, "gif" => mime::IMAGE_GIF, "webp" => "image/webp".parse().unwrap(),
         "mp4" => "video/mp4".parse().unwrap(), "mp3" => "audio/mpeg".parse().unwrap(),
+        "json" => "application/json".parse().unwrap(), "xml" => "application/xml".parse().unwrap(), "html" | "htm" => "text/html".parse().unwrap(),
+        "csv" => "text/csv".parse().unwrap(), "md" | "markdown" => "text/markdown".parse().unwrap(),
+        e if text_like("", &format!("x.{e}")) => mime::TEXT_PLAIN,
         _ => mime::APPLICATION_OCTET_STREAM,
     };
     let mut config = AttachmentConfig::default();
@@ -1222,5 +1266,31 @@ mod tests {
         let mut h = Vec::new();
         for _ in 0..60 { h = edit_history(&f.timeline, &id).await.unwrap(); if h.len() >= 2 { break; } crate::sync_once(&f.client).await.unwrap(); tokio::time::sleep(std::time::Duration::from_millis(100)).await; }
         assert_eq!(h.iter().map(|r| r.text.as_str()).collect::<Vec<_>>(), vec!["first version", "second version"], "{h:?}");
+    }
+
+    #[test]
+    fn text_files_are_recognised_by_type_or_name() {
+        assert!(text_like("text/plain", "notes") && text_like("application/json", "x") && text_like("", "main.rs") && text_like("", "README.md") && text_like("", "run.SH"));
+        assert!(!text_like("application/pdf", "a.pdf") && !text_like("image/png", "a.png") && !text_like("", "archive.zip") && !text_like("", "txt"), "a name that is only an extension is not one");
+    }
+
+    #[tokio::test]
+    async fn a_text_file_can_be_read_in_the_app_but_binary_data_and_huge_text_are_handled() {
+        let f = fixture().await;
+        let dir = tempfile::tempdir().unwrap();
+        let (txt, bin, big) = (dir.path().join("notes.txt"), dir.path().join("blob.bin"), dir.path().join("big.log"));
+        std::fs::write(&txt, "line one\nline two \u{e4}\u{f6}\u{fc}\n").unwrap();
+        std::fs::write(&bin, [0u8, 159, 146, 150, 0, 1, 2]).unwrap();
+        std::fs::write(&big, "x".repeat(5000)).unwrap();
+        for p in [&txt, &bin, &big] { send_file(&f.timeline, p, None).await.unwrap(); }
+        let m = wait_for(&f, |m| m.len() == 3 && m.iter().all(|x| !x.pending)).await;
+        let by = |n: &str| m.iter().find(|x| x.file_name == n).unwrap().clone();
+        assert!(by("notes.txt").text_file && by("big.log").text_file && !by("blob.bin").text_file, "{m:#?}");
+        let t = read_text_file(&f.client, &f.timeline, &by("notes.txt").id, 1000).await.unwrap();
+        assert_eq!((t.text.as_str(), t.truncated, t.name.as_str()), ("line one\nline two \u{e4}\u{f6}\u{fc}\n", false, "notes.txt"));
+        assert!(read_text_file(&f.client, &f.timeline, &by("blob.bin").id, 1000).await.unwrap_err().contains("binary"));
+        let b = read_text_file(&f.client, &f.timeline, &by("big.log").id, 100).await.unwrap();
+        assert!(b.truncated && b.text.chars().count() == 100 && b.size == 5000, "{b:?}");
+        assert!(read_text_file(&f.client, &f.timeline, "$nope", 100).await.is_err());
     }
 }

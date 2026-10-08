@@ -438,6 +438,7 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     connect(timeline_, &TimelineView::bookmarkRequested, this, [this](const QString &id) { core_->call("toggle_bookmark", {{"event_id", id}}); });
     connect(timeline_, &TimelineView::pollVote, this, [this](const QString &id, const QString &answer) { core_->call("vote_poll", {{"poll_id", id}, {"answers", QJsonArray{answer}}}); });
     connect(timeline_, &TimelineView::pollEnd, this, [this](const QString &id) { core_->call("end_poll", {{"poll_id", id}}); });
+    connect(timeline_, &TimelineView::textRequested, this, [this](const QString &id) { core_->call("fetch_text", {{"event_id", id}}); });
     connect(timeline_, &TimelineView::threadRequested, this, &MainWindow::openThread);
     connect(timeline_, &TimelineView::forwardRequested, this, [this](const QString &id) { auto *d = new ForwardDialog(core_, rooms_, id, this); d->setAttribute(Qt::WA_DeleteOnClose); d->show(); });
     connect(timeline_, &TimelineView::historyRequested, this, [this](const QString &id) { core_->call("edit_history", {{"event_id", id}}); });
@@ -635,6 +636,13 @@ void MainWindow::onEvent(const QString &name, const QJsonValue &p)
     } else if (name == "thread") {
         threadView_->setMe(user_);
         threadView_->setRows(p.toArray());
+    } else if (name == "text_file") {
+        const QJsonObject t = p.toObject();
+        auto *v = new TextViewer(S(t, "name"), S(t, "text"), qint64(t["size"].toDouble()), t["truncated"].toBool(), this);
+        v->setAttribute(Qt::WA_DeleteOnClose);
+        const QString id = S(t, "event_id");
+        connect(v, &TextViewer::saveRequested, this, [this, id] { saveAttachment(id); });
+        v->show();
     } else if (name == "media_file") {
         timeline_->playFile(S(p.toObject(), "event_id"), S(p.toObject(), "path"));
     } else if (name == "open_file") {
@@ -1037,6 +1045,10 @@ void MainWindow::dialogForDemo(const QString &which)
     else if (which == "recovery") showRecovery(false);
     else if (which == "verify") showVerify(QJsonObject{{"state", "emoji"}, {"user", "@zach:example.org"}, {"emoji", QJsonArray{QJsonArray{"\U0001F436", "Dog"}, QJsonArray{"\U0001F431", "Cat"}, QJsonArray{"\U0001F981", "Lion"}, QJsonArray{"\U0001F40E", "Horse"}, QJsonArray{"\U0001F984", "Unicorn"}, QJsonArray{"\U0001F437", "Pig"}, QJsonArray{"\U0001F418", "Elephant"}}}, {"decimals", QJsonArray{123, 456, 789}}});
     else if (which == "settings") roomSettings();
+    else if (which == "text") {
+        for (const QJsonValue &v : timeline_->rows()) if (v.toObject()["text_file"].toBool()) { core_->call("fetch_text", {{"event_id", S(v.toObject(), "id")}}); return; }
+        QTimer::singleShot(1000, this, [this] { dialogForDemo("text"); }); /* the file may not have arrived yet */
+    }
 }
 
 }

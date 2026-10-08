@@ -85,6 +85,15 @@ private:
     double zoom_ = 0; /* 0 = fit the window, otherwise the scale (1 = actual size) */
 };
 
+/* The contents of a text file in a window of its own (read-only, monospace): Save as, Copy, word wrap and find. */
+class TextViewer : public QDialog {
+    Q_OBJECT
+public:
+    TextViewer(const QString &name, const QString &text, qint64 size, bool truncated, QWidget *parent);
+signals:
+    void saveRequested();
+};
+
 /* Name and topic of the open room */
 class RoomSettingsDialog : public QDialog {
     Q_OBJECT

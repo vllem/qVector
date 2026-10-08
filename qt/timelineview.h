@@ -49,6 +49,7 @@ signals:
     void reactRequested(const QString &eventId, const QString &key);
     void reactPickerRequested(const QString &eventId);
     void saveRequested(const QString &eventId);
+    void textRequested(const QString &eventId);       /* "Open file" under a text file: show its contents */
     void forwardRequested(const QString &eventId);
     void historyRequested(const QString &eventId);
     void threadRequested(const QString &rootEventId);

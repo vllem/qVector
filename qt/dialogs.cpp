@@ -12,6 +12,7 @@
 #include <QKeyEvent>
 #include <QMessageBox>
 #include <QPlainTextEdit>
+#include <QShortcut>
 #include <QToolBar>
 #include <QWheelEvent>
 #include <functional>
@@ -382,6 +383,49 @@ void ImageViewer::render()
     pm.setDevicePixelRatio(target == image_.size() ? 1.0 : dpr);
     label_->setPixmap(pm);
     info_->setText(QString("%1 x %2   %3%").arg(image_.width()).arg(image_.height()).arg(int(k * 100 + 0.5)));
+}
+
+/* ---------- text viewer ---------- */
+
+TextViewer::TextViewer(const QString &name, const QString &text, qint64 size, bool truncated, QWidget *parent) : QDialog(parent)
+{
+    setWindowTitle(name.isEmpty() ? QString("Text file") : QFileInfo(name).fileName());
+    resize(820, 620);
+    auto *v = new QVBoxLayout(this);
+    v->setContentsMargins(0, 0, 0, 0);
+    v->setSpacing(0);
+    auto *bar = new QToolBar;
+    bar->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    bar->setMovable(false);
+    bar->addAction("Save as...", this, [this] { emit saveRequested(); })->setToolTip("Save the file");
+    auto *edit = new QPlainTextEdit;
+    edit->setReadOnly(true);
+    edit->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    edit->setLineWrapMode(QPlainTextEdit::NoWrap);
+    edit->setPlainText(text);
+    edit->setFrameShape(QFrame::NoFrame);
+    bar->addAction("Copy all", this, [edit] { QApplication::clipboard()->setText(edit->toPlainText()); })->setToolTip("Copy the whole text to the clipboard");
+    QAction *wrap = bar->addAction("Wrap lines");
+    wrap->setCheckable(true);
+    wrap->setToolTip("Wrap long lines");
+    connect(wrap, &QAction::toggled, edit, [edit](bool on) { edit->setLineWrapMode(on ? QPlainTextEdit::WidgetWidth : QPlainTextEdit::NoWrap); });
+    bar->addSeparator();
+    auto *find = new QLineEdit;
+    find->setPlaceholderText("Find");
+    find->setClearButtonEnabled(true);
+    find->setMaximumWidth(220);
+    bar->addWidget(find);
+    connect(find, &QLineEdit::returnPressed, edit, [edit, find] { if (!edit->find(find->text())) { edit->moveCursor(QTextCursor::Start); edit->find(find->text()); } }); /* Enter: next hit, wrapping around */
+    auto *spacer = new QWidget;
+    spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    bar->addWidget(spacer);
+    const int lines = text.count('\n') + (text.isEmpty() || text.endsWith('\n') ? 0 : 1);
+    auto *info = new QLabel(QString("%1 lines   %2%3").arg(lines).arg(size < 1024 ? QString::number(size) + " B" : size < 1024 * 1024 ? QString::number((size + 1023) / 1024) + " KB" : QString::number(double(size) / (1024 * 1024), 'f', 1) + " MB", truncated ? "   (only the start is shown)" : QString()));
+    info->setContentsMargins(0, 0, 8, 0);
+    bar->addWidget(info);
+    v->addWidget(bar);
+    v->addWidget(edit, 1);
+    new QShortcut(QKeySequence::Find, this, [find] { find->setFocus(); find->selectAll(); });
 }
 
 /* ---------- room settings ---------- */

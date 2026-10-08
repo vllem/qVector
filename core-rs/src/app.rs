@@ -149,6 +149,7 @@ impl App {
             "search_all" => self.search_all(&s(args, "query")),
             "save_attachment" => self.save_attachment(&s(args, "event_id"), &s(args, "dest")),
             "open_attachment" => self.open_attachment(&s(args, "event_id"), "open_file"),
+            "fetch_text" => { let id = s(args, "event_id"); self.on_timeline(move |i, tl| async move { if let Some(c) = i.client() { match ui::read_text_file(&c, &tl, &id, 2_000_000).await { Ok(t) => i.emit_json("text_file", &t), Err(e) => i.notice(format!("Cannot open the file: {e}")) } } }); Value::Null }
             "fetch_media" => self.open_attachment(&s(args, "event_id"), "media_file"),
             "accept_invite" => { let id = s(args, "room_id"); self.client_action("Joined the room", move |c| async move { ui::accept_invite(&c, &id).await.map(|_| id) }) }
             "leave_room" => { let id = s(args, "room_id"); self.client_action("Left the room", move |c| async move { ui::leave_room(&c, &id).await.map(|_| id) }) }
