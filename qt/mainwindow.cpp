@@ -340,6 +340,9 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     }
     rv->addWidget(attachBar_);
     setAcceptDrops(true);
+    /* The text boxes take dropped files as text (or refuse them), so the drop never reached the window for some file types: let them pass it on. */
+    composer_->setAcceptDrops(false);
+    for (QTextEdit *t : right->findChildren<QTextEdit *>()) { t->setAcceptDrops(false); t->viewport()->setAcceptDrops(false); }
     rv->addLayout(compRow);
     split_->addWidget(right);
     memberList_ = new MemberList;
