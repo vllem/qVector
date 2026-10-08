@@ -488,6 +488,17 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     statusSep1_->hide();
     statusSep2_->hide();
     statusBar()->addWidget(new QWidget, 1);
+    statusSep3_ = new QFrame;
+    statusSep3_->setFrameShape(QFrame::NoFrame);
+    statusSep3_->setFixedSize(2, 16);
+    statusClock_ = new QLabel;
+    statusClock_->setContentsMargins(8, 0, 8, 0);
+    statusBar()->addPermanentWidget(statusSep3_);
+    statusBar()->addPermanentWidget(statusClock_);
+    auto *clockTimer = new QTimer(this);
+    connect(clockTimer, &QTimer::timeout, this, &MainWindow::updateClock);
+    clockTimer->start(1000);
+    updateClock();
     applyChrome();
     buildMenus();
 
@@ -673,7 +684,7 @@ void MainWindow::applyChrome()
                                          0.4 * pal.color(QPalette::WindowText).blueF() + 0.6 * pal.color(QPalette::Window).blueF());
     split_->setStyleSheet(QString("QSplitter::handle { background: %1; image: none; }").arg(line.name()));
     statusLine_->setStyleSheet(QString("background: %1;").arg(line.name()));
-    for (QFrame *f : {statusSep1_, statusSep2_}) f->setStyleSheet(QString("background: %1;").arg(line.name()));
+    for (QFrame *f : {statusSep1_, statusSep2_, statusSep3_}) f->setStyleSheet(QString("background: %1;").arg(line.name()));
     for (QFrame *f : {tabLine_, topicLine_, pinLine_}) f->setStyleSheet(QString("background: %1;").arg(line.name()));
     composer_->setStyleSheet(QString("QLineEdit { border: 1px solid %1; border-radius: 4px; padding: 6px 10px; background: palette(base); color: palette(text); font-size: 11pt; }"
                                      "QLineEdit:focus { border-color: palette(highlight); }").arg(line.name()));
@@ -904,6 +915,11 @@ void MainWindow::updateTopic()
     const int n = details_["members"].toArray().size();
     membersBtn_->setText(current_.isEmpty() ? QString() : QString("%1 members").arg(n));
     membersBtn_->setVisible(!current_.isEmpty());
+}
+
+void MainWindow::updateClock()
+{
+    statusClock_->setText(formatWhen(QDateTime::currentDateTime(), true, true));
 }
 
 void MainWindow::updateStatus()
@@ -1206,6 +1222,7 @@ void MainWindow::showPreferences()
         auto apply = [this, date, time, example] {
             setTimestampFormats(date->currentText(), time->currentText());
             example->setText(formatWhen(QDateTime::currentDateTime().addDays(-3), true));
+            updateClock();
             timeline_->refresh();
             threadView_->refresh();
         };

@@ -135,7 +135,9 @@ private:
     QFrame *pinLine_ = nullptr;
     void applyChrome(); /* divider/composer colours and tab style follow the current palette and style (system Qt themes) */
     QToolButton *plus_;
-    QFrame *statusSep1_ = nullptr, *statusSep2_ = nullptr;
+    QFrame *statusSep1_ = nullptr, *statusSep2_ = nullptr, *statusSep3_ = nullptr;
+    QLabel *statusClock_ = nullptr;
+    void updateClock();
     QLabel *topic_, *banner_, *statusLeft_, *statusRight_, *typingLabel_;
     QToolButton *membersBtn_;
     TimelineView *timeline_;
