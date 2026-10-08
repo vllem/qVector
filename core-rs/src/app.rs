@@ -159,6 +159,7 @@ impl App {
             "accept_invite" => { let id = s(args, "room_id"); self.client_action("Joined the room", move |c| async move { ui::accept_invite(&c, &id).await.map(|_| id) }) }
             "leave_room" => { let id = s(args, "room_id"); self.client_action("Left the room", move |c| async move { ui::leave_room(&c, &id).await.map(|_| id) }) }
             "set_room_tag" => { let (id, k) = (s(args, "room_id"), s(args, "kind")); self.client_action("Room updated", move |c| async move { ui::set_room_tag(&c, &id, &k).await.map(|_| id) }) }
+            "set_room_notify" => { let (id, l) = (s(args, "room_id"), s(args, "level")); self.client_action("Notification level changed", move |c| async move { ui::set_room_notification_level(&c, &id, &l).await.map(|_| id) }) }
             "create_room" => {
                 let (n, t, e, p) = (s(args, "name"), s(args, "topic"), b(args, "encrypted"), b(args, "public"));
                 let invites: Vec<String> = args["invites"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();

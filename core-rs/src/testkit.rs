@@ -76,6 +76,55 @@ impl Respond for Handler {
 
 fn body(req: &Request) -> Value { serde_json::from_slice(&req.body).unwrap_or(Value::Null) }
 
+
+fn pct_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() { if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) { out.push(v); i += 3; continue; } }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The user's push rules (account data `m.push_rules`), created empty on first use.
+fn push_rules<'a>(st: &'a mut State, who: &str) -> &'a mut Value {
+    st.users.entry(user_of(who)).or_default().account_data.entry("m.push_rules".into())
+        .or_insert_with(|| json!({"global": {"override": [], "content": [], "room": [], "sender": [], "underride": []}}))
+}
+
+/// PUT/DELETE `/pushrules/global/<kind>/<id>[/enabled|/actions]`: the rule is created, changed or removed in the stored rule set.
+fn change_push_rule(st: &mut State, who: &str, req: &Request) -> Value {
+    let path = pct_decode(req.url.path());
+    let tail: Vec<&str> = path.split("/pushrules/global/").nth(1).unwrap_or("").split('/').collect();
+    let (kind, id, sub) = (tail.first().copied().unwrap_or(""), tail.get(1).copied().unwrap_or(""), tail.get(2).copied().unwrap_or(""));
+    let b = body(req);
+    let rules = push_rules(st, who)["global"][kind].as_array_mut().cloned().unwrap_or_default();
+    let mut rules: Vec<Value> = rules;
+    let at = rules.iter().position(|r| r["rule_id"] == id);
+    if req.method.as_str() == "DELETE" {
+        match at { Some(i) => { rules.remove(i); } None => return json!({"errcode": "M_NOT_FOUND", "error": "no such rule"}) }
+    } else {
+        match (at, sub) {
+            (Some(i), "enabled") => rules[i]["enabled"] = b["enabled"].clone(),
+            (Some(i), "actions") => rules[i]["actions"] = b["actions"].clone(),
+            (None, "enabled") | (None, "actions") => return json!({"errcode": "M_NOT_FOUND", "error": "no such rule"}),
+            (old, _) => {
+                let mut r = b.clone();
+                r["rule_id"] = json!(id);
+                r["default"] = json!(false);
+                r["enabled"] = json!(true);
+                if r.get("actions").is_none() { r["actions"] = json!([]); }
+                match old { Some(i) => rules[i] = r, None => rules.insert(0, r) }
+            }
+        }
+    }
+    push_rules(st, who)["global"][kind] = Value::Array(rules);
+    json!({})
+}
+
 fn member_event(user: &str, n: u64) -> Value {
     json!({"type": "m.room.member", "state_key": format!("@{user}:hs"), "sender": format!("@{user}:hs"), "event_id": format!("$mem_{user}"),
            "origin_server_ts": n, "content": {"membership": "join", "displayname": user, "avatar_url": format!("mxc://hs/av_{user}")}})
@@ -449,6 +498,9 @@ impl FakeHs {
             st.log.push(format!("leave {id}"));
             json!({})
         }).await;
+        mount("GET", r"^/_matrix/client/v3/pushrules/?$", |st, who, _| push_rules(st, who).clone()).await;
+        mount("PUT", r"^/_matrix/client/v3/pushrules/global/", change_push_rule).await;
+        mount("DELETE", r"^/_matrix/client/v3/pushrules/global/", change_push_rule).await;
         mount("PUT", r"^/_matrix/client/v3/user/[^/]+/account_data/", |st, who, req| {
             let ty = req.url.path().rsplit('/').next().unwrap_or("").to_string();
             st.users.entry(user_of(who)).or_default().account_data.insert(ty, body(req));

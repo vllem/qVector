@@ -504,6 +504,7 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
 
     connect(core_, &Core::event, this, &MainWindow::onEvent);
     connect(sidebar_, &Sidebar::roomActivated, this, [this](const QString &id) { openRoom(id); });
+    connect(sidebar_, &Sidebar::notifyRequested, this, [this](const QString &id, const QString &level) { core_->call("set_room_notify", {{"room_id", id}, {"level", level}}); });
     connect(sidebar_, &Sidebar::tagRequested, this, [this](const QString &id, const QString &kind) { core_->call("set_room_tag", {{"room_id", id}, {"kind", kind}}); });
     connect(sidebar_, &Sidebar::leaveRequested, this, [this](const QString &id) {
         if (QMessageBox::question(this, "Leave", "Leave " + roomTitle(id) + "?") != QMessageBox::Yes) return;

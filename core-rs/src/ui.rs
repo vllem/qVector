@@ -19,7 +19,7 @@ use serde::Serialize;
 
 /// One row of the room list as the UI draws it.
 #[derive(Debug, Clone, PartialEq, Serialize, Default)]
-pub struct UiRoom { pub id: String, pub title: String, pub section: String, pub unread: u32, pub highlight: bool, pub invite: bool, pub favourite: bool, pub low_priority: bool, pub avatar_mxc: String, pub avatar_path: String }
+pub struct UiRoom { pub id: String, pub title: String, pub section: String, pub unread: u32, pub highlight: bool, pub invite: bool, pub favourite: bool, pub low_priority: bool, pub notify: String, pub avatar_mxc: String, pub avatar_path: String }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct UiReaction { pub key: String, pub count: u32, pub mine: bool }
@@ -94,6 +94,7 @@ async fn direct_avatar(client: &Client, r: &matrix_sdk::Room) -> Option<matrix_s
 /// The joined rooms, grouped the way the sidebar shows them.
 pub async fn ui_rooms(client: &Client) -> Vec<UiRoom> {
     let mut out = Vec::new();
+    let settings = client.notification_settings().await;
     for r in client.joined_rooms() {
         if r.is_space() { continue; } /* spaces are sections, not conversations */
         let title = r.display_name().await.map(|n| n.to_string()).unwrap_or_else(|_| r.room_id().to_string());
@@ -109,6 +110,7 @@ pub async fn ui_rooms(client: &Client) -> Vec<UiRoom> {
             invite: false,
             favourite: r.is_favourite(),
             low_priority: r.is_low_priority(),
+            notify: notify_name(settings.get_user_defined_room_notification_mode(r.room_id()).await).into(),
             avatar_mxc: avatar.map(|u| u.to_string()).unwrap_or_default(),
             ..Default::default()
         });
@@ -236,6 +238,31 @@ pub async fn set_member_role(client: &Client, room_id: &str, user_id: &str, role
     let level: i32 = match role { "admin" => 100, "moderator" => 50, "member" => 0, other => return Err(format!("unknown role {other}")) };
     let uid = user_of(user_id)?;
     room_of(client, room_id)?.update_power_levels(vec![(&uid, level.into())]).await.map(|_| ()).map_err(|e| e.to_string())
+}
+
+fn notify_name(mode: Option<matrix_sdk::notification_settings::RoomNotificationMode>) -> &'static str {
+    use matrix_sdk::notification_settings::RoomNotificationMode as M;
+    match mode { None => "default", Some(M::AllMessages) => "all", Some(M::MentionsAndKeywordsOnly) => "mentions", Some(M::Mute) => "mute" }
+}
+
+/// What a room's notification level is set to by the user: "default" (the account's own rules), "all", "mentions" or "mute".
+pub async fn room_notification_level(client: &Client, room_id: &str) -> Result<String, String> {
+    let rid = <&matrix_sdk::ruma::RoomId>::try_from(room_id).map_err(|e| e.to_string())?;
+    Ok(notify_name(client.notification_settings().await.get_user_defined_room_notification_mode(rid).await).into())
+}
+
+/// Set a room's notification level (`level` as in `room_notification_level`; "default" removes the room's own rule).
+pub async fn set_room_notification_level(client: &Client, room_id: &str, level: &str) -> Result<(), String> {
+    use matrix_sdk::notification_settings::RoomNotificationMode as M;
+    let rid = <&matrix_sdk::ruma::RoomId>::try_from(room_id).map_err(|e| e.to_string())?;
+    let settings = client.notification_settings().await;
+    match level {
+        "default" => settings.delete_user_defined_room_rules(rid).await.map_err(|e| e.to_string()),
+        "all" => settings.set_room_notification_mode(rid, M::AllMessages).await.map_err(|e| e.to_string()),
+        "mentions" => settings.set_room_notification_mode(rid, M::MentionsAndKeywordsOnly).await.map_err(|e| e.to_string()),
+        "mute" => settings.set_room_notification_mode(rid, M::Mute).await.map_err(|e| e.to_string()),
+        other => Err(format!("unknown notification level {other}")),
+    }
 }
 
 /// Mark a room as favourite / low priority (the two are exclusive: setting one clears the other). `kind`: "favourite", "low_priority" or "none".
@@ -1390,6 +1417,25 @@ mod tests {
         }
         assert!(ui_rooms_with_spaces(&f.client, &service).await.iter().all(|r| r.section != "Favourites"));
         assert!(set_room_tag(&f.client, &plans, "bogus").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_rooms_notification_level_can_be_set_and_read_back() {
+        let f = fixture().await;
+        let id = ROOM.to_string();
+        assert_eq!(room_notification_level(&f.client, &id).await.unwrap(), "default");
+        for level in ["mute", "mentions", "all", "default"] {
+            set_room_notification_level(&f.client, &id, level).await.unwrap_or_else(|e| panic!("{level}: {e}; {:#?}", f.hs.log().iter().filter(|l| l.contains("UNHANDLED")).collect::<Vec<_>>()));
+            let mut got = String::new();
+            for _ in 0..40 { /* the rule set is read back through the sync, like the app does */
+                crate::sync_once(&f.client).await.unwrap();
+                got = room_notification_level(&f.client, &id).await.unwrap();
+                if got == level { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            assert_eq!(got, level);
+        }
+        assert!(set_room_notification_level(&f.client, &id, "loud").await.is_err());
     }
 
     #[tokio::test]

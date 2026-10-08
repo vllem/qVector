@@ -1,3 +1,4 @@
+#include <QActionGroup>
 #include "qt/sidebar.h"
 #include "qt/avatar.h"
 #include <QJsonObject>
@@ -79,6 +80,18 @@ Sidebar::Sidebar(QWidget *parent) : QTreeWidget(parent)
             menu.addAction(fav ? "Remove from favourites" : "Favourite", this, [this, room, fav] { emit tagRequested(room, fav ? "none" : "favourite"); });
             menu.addAction(low ? "Remove from low priority" : "Low priority", this, [this, room, low] { emit tagRequested(room, low ? "none" : "low_priority"); });
             menu.addSeparator();
+            QMenu *nm = menu.addMenu("Notifications");
+            auto *group = new QActionGroup(nm);
+            const QString cur = info->notify.isEmpty() ? QString("default") : info->notify;
+            for (const auto &o : {std::pair<const char *, const char *>{"default", "Account default"}, {"all", "All messages"}, {"mentions", "Mentions and keywords only"}, {"mute", "Mute"}}) {
+                QAction *a = nm->addAction(o.second);
+                a->setCheckable(true);
+                a->setChecked(cur == o.first);
+                group->addAction(a);
+                const QString level = o.first;
+                connect(a, &QAction::triggered, this, [this, room, level] { emit notifyRequested(room, level); });
+            }
+            menu.addSeparator();
         }
         menu.addAction("Leave room", this, [this, room] { emit leaveRequested(room); });
         menu.exec(viewport()->mapToGlobal(pos));
@@ -114,7 +127,7 @@ void Sidebar::refresh(const QJsonArray &rooms, const QString &current, const QSt
     for (const QString &c : collapsed_) sig += "c:" + c + ";";
     for (const QJsonValue &v : rooms) {
         const QJsonObject r = v.toObject();
-        sig += r["id"].toString() + ":" + r["title"].toString() + ":" + r["section"].toString() + ":" + QString::number(r["unread"].toInt()) + ":" + QString::number(r["highlight"].toBool()) + ";";
+        sig += r["id"].toString() + ":" + r["title"].toString() + ":" + r["section"].toString() + ":" + QString::number(r["unread"].toInt()) + ":" + QString::number(r["highlight"].toBool()) + ":" + r["notify"].toString() + ";";
     }
     if (sig == sig_) return;
     sig_ = sig;
@@ -123,7 +136,7 @@ void Sidebar::refresh(const QJsonArray &rooms, const QString &current, const QSt
     rows_.clear();
     for (const QJsonValue &v : rooms) {
         const QJsonObject r = v.toObject();
-        rows_.insert(r["id"].toString(), {r["favourite"].toBool(), r["low_priority"].toBool(), r["invite"].toBool()});
+        rows_.insert(r["id"].toString(), {r["favourite"].toBool(), r["low_priority"].toBool(), r["invite"].toBool(), r["notify"].toString()});
     }
 
     const int scroll = verticalScrollBar()->value();

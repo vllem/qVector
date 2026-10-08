@@ -21,6 +21,7 @@ protected:
 signals:
     void roomActivated(const QString &roomId);
     void leaveRequested(const QString &roomId);
+    void notifyRequested(const QString &roomId, const QString &level); /* "default", "all", "mentions" or "mute" */
     void tagRequested(const QString &roomId, const QString &kind); /* "favourite", "low_priority" or "none" */
 
 private:
@@ -28,7 +29,7 @@ private:
     QString sig_, current_, workspace_;
     QRgb paletteKey_ = 0;
     QSet<QString> collapsed_;
-    struct RowInfo { bool favourite, lowpriority, invite; };
+    struct RowInfo { bool favourite, lowpriority, invite; QString notify; };
     QHash<QString, RowInfo> rows_; /* what the last refresh showed: the context menu reads it */
 };
 
