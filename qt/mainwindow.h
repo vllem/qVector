@@ -128,6 +128,7 @@ private:
     QTabBar *tabs_;
     QFrame *statusLine_ = nullptr;
     QFrame *tabLine_ = nullptr;
+    QFrame *topicLine_ = nullptr;
     QFrame *pinLine_ = nullptr;
     void applyChrome(); /* divider/composer colours and tab style follow the current palette and style (system Qt themes) */
     QToolButton *plus_;
