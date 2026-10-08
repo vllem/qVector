@@ -919,7 +919,7 @@ void MainWindow::updateTopic()
 
 void MainWindow::updateClock()
 {
-    statusClock_->setText(formatWhen(QDateTime::currentDateTime(), true, true));
+    statusClock_->setText(formatWhen(QDateTime::currentDateTime(), true, false));
 }
 
 void MainWindow::updateStatus()
