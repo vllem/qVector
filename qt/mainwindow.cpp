@@ -472,12 +472,23 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     mv->addWidget(statusLine_);
     root_->addWidget(mainPage);
     setCentralWidget(root_);
-    applyChrome();
 
     statusLeft_ = new QLabel;
     statusRight_ = new QLabel;
-    statusBar()->addWidget(statusLeft_, 1);
-    statusBar()->addPermanentWidget(statusRight_);
+    statusBar()->setSizeGripEnabled(false);
+    statusSep1_ = new QFrame;
+    statusSep2_ = new QFrame;
+    for (QFrame *f : {statusSep1_, statusSep2_}) { f->setFrameShape(QFrame::NoFrame); f->setFixedSize(2, 16); }
+    statusLeft_->setContentsMargins(6, 0, 8, 0);
+    statusRight_->setContentsMargins(8, 0, 8, 0);
+    statusBar()->addWidget(statusLeft_);
+    statusBar()->addWidget(statusSep1_);
+    statusBar()->addWidget(statusRight_);
+    statusBar()->addWidget(statusSep2_);
+    statusSep1_->hide();
+    statusSep2_->hide();
+    statusBar()->addWidget(new QWidget, 1);
+    applyChrome();
     buildMenus();
 
     connect(core_, &Core::event, this, &MainWindow::onEvent);
@@ -662,6 +673,7 @@ void MainWindow::applyChrome()
                                          0.4 * pal.color(QPalette::WindowText).blueF() + 0.6 * pal.color(QPalette::Window).blueF());
     split_->setStyleSheet(QString("QSplitter::handle { background: %1; image: none; }").arg(line.name()));
     statusLine_->setStyleSheet(QString("background: %1;").arg(line.name()));
+    for (QFrame *f : {statusSep1_, statusSep2_}) f->setStyleSheet(QString("background: %1;").arg(line.name()));
     for (QFrame *f : {tabLine_, topicLine_, pinLine_}) f->setStyleSheet(QString("background: %1;").arg(line.name()));
     composer_->setStyleSheet(QString("QLineEdit { border: 1px solid %1; border-radius: 4px; padding: 6px 10px; background: palette(base); color: palette(text); font-size: 11pt; }"
                                      "QLineEdit:focus { border-color: palette(highlight); }").arg(line.name()));
@@ -896,9 +908,11 @@ void MainWindow::updateTopic()
 
 void MainWindow::updateStatus()
 {
-    statusLeft_->setText(QString::fromUtf8("\u25CF  ") + user_);
+    statusLeft_->setText(user_);
     const bool verified = session_["verified"].toBool();
-    statusRight_->setText(session_.isEmpty() ? QString() : verified ? "Encryption: session verified" : "Encryption: session not verified");
+    statusRight_->setText(session_.isEmpty() ? QString() : verified ? "Session verified" : "Session not verified");
+    statusSep1_->setVisible(!session_.isEmpty());
+    statusSep2_->setVisible(!session_.isEmpty());
     QString banner;
     if (session_["has_identity"].toBool() && !verified) banner = "This session is not verified: other people cannot trust it and old messages may stay unreadable.";
     else if (S(session_, "recovery") == "incomplete") banner = "Enter your recovery key to read old messages.";
