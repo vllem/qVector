@@ -17,6 +17,7 @@
 class QCamera;
 class QMediaCaptureSession;
 class QVideoSink;
+class QSoundEffect;
 
 namespace vc {
 
@@ -102,6 +103,8 @@ private:
     void tick();
     void cameraOn(bool on);
     void stopCamera();
+    void ring(const QString &state, bool incoming);
+    QSoundEffect *ringer_ = nullptr;
     Core *core_;
     QLabel *name_, *status_;
     CallVideo *video_;

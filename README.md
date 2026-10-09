@@ -19,12 +19,12 @@ viewer, save, inline video), link previews (through your homeserver, opt-in), re
 icon, search of the open room and (opt-in, with a local encrypted index) of all your messages, member list with moderation (kick, ban, unban, roles, invite),
 room settings, start a conversation (user directory search), create / browse / join rooms, avatars, light and dark theme, per-room notification levels (right-click a
 room), online status dots in the member list (and Tools > My status), exploring the rooms of a space (right-click its section header), custom emoji and stickers
-(MSC2545 packs of the room, of your account and of the rooms you chose), one-to-one voice and video calls (the Call and Video call buttons in a chat with one other person; Matrix VoIP v1 signalling, Opus audio and H.264 video over WebRTC with webrtc-rs; microphone and speakers through cpal, the camera through Qt Multimedia, H.264 by OpenH264).
+(MSC2545 packs of the room, of your account and of the rooms you chose), one-to-one voice and video calls (the Call and Video call buttons in a chat with one other person; Matrix VoIP v1 signalling, Opus audio and H.264 video over WebRTC with webrtc-rs; microphone, speakers and camera chosen in Preferences, a ring tone; microphone and speakers through cpal, the camera through Qt Multimedia, H.264 by OpenH264).
 
 Encryption: messages are end-to-end encrypted with who-wrote-this shields; interactive emoji verification of this session and of other people; recovery key
 entry and creation (secret storage and key backup); the list of your account's sessions; QR codes for the other device to scan (scanning with this computer's camera is not built).
 
-Not ported yet from the earlier all-C version: group calls (Element Call), switching a voice call to video in mid-call, choosing the camera or sound devices, screen sharing, plus sticker pack editing and scanning a QR code with a camera. Voice and video calls have only been tested between two instances of this app on the fake server (synthetic tone and pictures), never against Element, with a real sound card or a real camera. Video is VP8 (preferred) or H.264, whichever the other side takes. Everything has only been tested against the built-in fake homeserver so far, not against a real server.
+Not ported yet from the earlier all-C version: group calls (Element Call), switching a voice call to video in mid-call, screen sharing, plus sticker pack editing and scanning a QR code with a camera. Voice and video calls have only been tested between two instances of this app on the fake server (synthetic tone and pictures), never against Element, with a real sound card or a real camera. Video is VP8 (preferred) or H.264, whichever the other side takes. Everything has only been tested against the built-in fake homeserver so far, not against a real server.
 This is a hobby project and has not been audited; do not rely on it for anything sensitive.
 
 ## Building

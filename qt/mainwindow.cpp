@@ -1,4 +1,6 @@
 #include "qt/mainwindow.h"
+#include <QCameraDevice>
+#include <QMediaDevices>
 #include <QJsonDocument>
 #include "qt/packpicker.h"
 #include "qt/audioplayer.h"
@@ -1301,6 +1303,31 @@ void MainWindow::showPreferences()
     group("Privacy", {actTyping_, actPreviews_});
     group("Search", {actIndex_});
     group("Window", {actTray_, actCloseTray_});
+    {   /* calls: which devices, and whether the phone rings */
+        auto *box = new QGroupBox("Calls");
+        auto *form = new QFormLayout(box);
+        auto pick = [this, dlg](const QString &pref, const QStringList &names) {
+            auto *c = new QComboBox;
+            c->addItem("Default", QString());
+            for (const QString &n : names) c->addItem(n, n);
+            const int at = c->findData(core_->pref(pref));
+            if (at >= 0) c->setCurrentIndex(at);
+            connect(c, &QComboBox::currentIndexChanged, dlg, [this, c, pref] { core_->setPref(pref, c->currentData().toString()); });
+            return c;
+        };
+        const QJsonObject dev = core_->call("audio_devices").toObject();
+        auto list = [](const QJsonValue &v) { QStringList l; for (const QJsonValue &x : v.toArray()) l << x.toString(); return l; };
+        QStringList cams;
+        for (const QCameraDevice &c : QMediaDevices::videoInputs()) cams << c.description();
+        form->addRow("Microphone", pick("callMicrophone", list(dev["inputs"])));
+        form->addRow("Speakers", pick("callSpeakers", list(dev["outputs"])));
+        form->addRow("Camera", pick("callCamera", cams));
+        auto *ring = new QCheckBox("Ring when a call comes in or goes out");
+        ring->setChecked(core_->boolPref("callRing", true));
+        connect(ring, &QCheckBox::toggled, dlg, [this](bool on) { core_->setBoolPref("callRing", on); });
+        form->addRow(ring);
+        v->addWidget(box);
+    }
     {   /* Timestamps: presets to pick from, or any Qt format string typed in; the example below shows the result at once */
         auto *box = new QGroupBox("Timestamps");
         auto *form = new QFormLayout(box);

@@ -13,6 +13,12 @@
 #include <QKeyEvent>
 #include <QMediaCaptureSession>
 #include <QMediaDevices>
+#include <QAudioDevice>
+#include <QSoundEffect>
+#include <QStandardPaths>
+#include <QDir>
+#include <QFile>
+#include <QtMath>
 #include <QPainter>
 #include <QVideoFrame>
 #include <QVideoSink>
@@ -205,6 +211,51 @@ void VerifyDialog::closeEvent(QCloseEvent *ev)
     ev->accept();
 }
 
+/* A telephone-like tone as a WAV file in the cache: incoming = a double ring (440 + 480 Hz, 0.4 s twice, a pause), outgoing = the ringback (one long 1 s tone, a pause) */
+static QString ringFile(bool incoming)
+{
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    QDir().mkpath(dir);
+    const QString path = dir + (incoming ? "/ring-in.wav" : "/ring-out.wav");
+    if (QFile::exists(path)) return path;
+    const int rate = 22050;
+    const double total = incoming ? 3.0 : 4.0;
+    QByteArray pcm;
+    QDataStream s(&pcm, QIODevice::WriteOnly);
+    s.setByteOrder(QDataStream::LittleEndian);
+    for (int i = 0; i < int(total * rate); i++) {
+        const double t = double(i) / rate;
+        const bool on = incoming ? (t < 0.4 || (t >= 0.6 && t < 1.0)) : t < 1.0;
+        double v = on ? 0.25 * (qSin(2 * M_PI * 440 * t) + qSin(2 * M_PI * 480 * t)) : 0.0;
+        s << qint16(v * 32767);
+    }
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly)) return QString();
+    QDataStream w(&f);
+    w.setByteOrder(QDataStream::LittleEndian);
+    f.write("RIFF"); w << quint32(36 + pcm.size()); f.write("WAVEfmt "); w << quint32(16) << quint16(1) << quint16(1) << quint32(rate) << quint32(rate * 2) << quint16(2) << quint16(16);
+    f.write("data"); w << quint32(pcm.size());
+    f.write(pcm);
+    return path;
+}
+
+void CallDialog::ring(const QString &state, bool incoming)
+{
+    const bool wanted = (state == "incoming" || state == "outgoing") && core_->boolPref("callRing", true);
+    if (!wanted) { if (ringer_) ringer_->stop(); return; }
+    if (!ringer_) ringer_ = new QSoundEffect(this);
+    ringer_->stop();
+    const QString file = ringFile(incoming);
+    if (file.isEmpty()) return;
+    const QString speakers = core_->pref("callSpeakers");
+    for (const QAudioDevice &dev : QMediaDevices::audioOutputs())
+        if (!speakers.isEmpty() && dev.description() == speakers) ringer_->setAudioDevice(dev);
+    ringer_->setSource(QUrl::fromLocalFile(file));
+    ringer_->setLoopCount(QSoundEffect::Infinite);
+    ringer_->setVolume(0.6f);
+    ringer_->play();
+}
+
 CallVideo::CallVideo(QWidget *parent) : QWidget(parent)
 {
     setMinimumSize(360, 240);
@@ -282,7 +333,7 @@ CallDialog::CallDialog(Core *core, QWidget *parent) : QDialog(parent), core_(cor
     connect(timer_, &QTimer::timeout, this, [this] { tick(); });
 }
 
-CallDialog::~CallDialog() { stopCamera(); }
+CallDialog::~CallDialog() { stopCamera(); if (ringer_) ringer_->stop(); }
 
 void CallDialog::stopCamera()
 {
@@ -311,7 +362,10 @@ void CallDialog::cameraOn(bool on)
         camera_->setToolTip("No camera found");
         return;
     }
-    cam_ = new QCamera(devices.first(), this);
+    QCameraDevice device = devices.first();
+    const QString chosen = core_->pref("callCamera");
+    for (const QCameraDevice &dev : devices) if (!chosen.isEmpty() && dev.description() == chosen) device = dev;
+    cam_ = new QCamera(device, this);
     sink_ = new QVideoSink(this);
     session_ = new QMediaCaptureSession(this);
     session_->setCamera(cam_);
@@ -347,6 +401,7 @@ void CallDialog::tick()
 void CallDialog::setState(const QJsonObject &s)
 {
     const QString st = s["state"].toString();
+    ring(st, s["incoming"].toBool());
     const bool was = state_ == "connected";
     state_ = st;
     name_->setText(s["name"].toString().isEmpty() ? s["user_id"].toString() : s["name"].toString());
@@ -384,6 +439,7 @@ void CallDialog::setState(const QJsonObject &s)
 void CallDialog::closeEvent(QCloseEvent *ev)
 {
     stopCamera();
+    if (ringer_) ringer_->stop();
     if (state_ != "ended") core_->call("hangup_call");
     ev->accept();
 }

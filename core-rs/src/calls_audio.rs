@@ -40,10 +40,36 @@ impl Resampler {
 
 fn to_i16(x: f32) -> i16 { (x.clamp(-1.0, 1.0) * 32767.0) as i16 }
 
-fn open() -> Result<(mpsc::Receiver<Vec<i16>>, Playback, mpsc::Sender<()>), String> {
+/// The device called `wanted`, or `None` (use the default) when nothing is chosen or it is not there any more.
+fn choose<T: std::fmt::Display>(devices: Vec<T>, wanted: &str) -> Option<T> {
+    if wanted.is_empty() {
+        return None;
+    }
+    devices.into_iter().find(|d| d.to_string() == wanted)
+}
+
+/// Names of the microphones and of the speakers, for the preferences.
+pub fn devices() -> (Vec<String>, Vec<String>) {
     let host = cpal::default_host();
-    let input = host.default_input_device().ok_or("no microphone")?;
-    let output = host.default_output_device().ok_or("no speakers")?;
+    let names = |it: Result<Vec<cpal::Device>, _>| -> Vec<String> {
+        let mut v: Vec<String> = it.map(|d| d.iter().map(|d| d.to_string()).collect()).unwrap_or_default();
+        v.sort();
+        v.dedup();
+        v
+    };
+    (names(host.input_devices().map(|i| i.collect())), names(host.output_devices().map(|i| i.collect())))
+}
+
+fn open(microphone: &str, speakers: &str) -> Result<(mpsc::Receiver<Vec<i16>>, Playback, mpsc::Sender<()>), String> {
+    let host = cpal::default_host();
+    let input = match host.input_devices().ok().and_then(|d| choose(d.collect(), microphone)) {
+        Some(d) => d,
+        None => host.default_input_device().ok_or("no microphone")?,
+    };
+    let output = match host.output_devices().ok().and_then(|d| choose(d.collect(), speakers)) {
+        Some(d) => d,
+        None => host.default_output_device().ok_or("no speakers")?,
+    };
     let in_cfg = input.default_input_config().map_err(|e| format!("microphone: {e}"))?;
     let out_cfg = output.default_output_config().map_err(|e| format!("speakers: {e}"))?;
 
@@ -126,10 +152,11 @@ fn open() -> Result<(mpsc::Receiver<Vec<i16>>, Playback, mpsc::Sender<()>), Stri
     Ok((frames_rx, playback, stop_tx))
 }
 
-/// The default microphone and speakers.
-pub fn sound_card() -> AudioFactory {
-    Arc::new(|| {
-        let (capture, playback, stop) = open()?;
+/// The microphone and speakers the user chose (`pick` gives their names, empty for the defaults, each time a call starts).
+pub fn sound_card(pick: Arc<dyn Fn() -> (String, String) + Send + Sync>) -> AudioFactory {
+    Arc::new(move || {
+        let (microphone, speakers) = pick();
+        let (capture, playback, stop) = open(&microphone, &speakers)?;
         Ok(AudioSession { capture, playback, guard: Box::new(stop) })
     })
 }
@@ -137,6 +164,14 @@ pub fn sound_card() -> AudioFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_chosen_device_is_found_by_name_and_anything_else_means_the_default() {
+        let names = vec!["Built-in".to_string(), "USB headset".to_string()];
+        assert_eq!(choose(names.clone(), "USB headset"), Some("USB headset".to_string()));
+        assert_eq!(choose(names.clone(), ""), None);
+        assert_eq!(choose(names, "unplugged"), None);
+    }
 
     #[test]
     fn resampling_keeps_the_pitch_and_the_length() {

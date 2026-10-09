@@ -214,6 +214,7 @@ impl App {
                 if let Some(l) = list { i.emit_json("bookmarks", &l); }
                 Value::Null
             }
+            "audio_devices" => { let (inputs, outputs) = crate::calls_audio::devices(); json!({"inputs": inputs, "outputs": outputs}) }
             "pref" => Value::String(i.pref(&s(args, "key"))),
             "set_pref" => { i.set_pref(&s(args, "key"), &s(args, "value")); Value::Null }
             "set_message_index" => {
@@ -661,7 +662,8 @@ async fn start_session(i: Arc<Inner>, client: Client, secret: String) {
     let sink = i.clone();
     *i.verifier.lock().unwrap() = Some(Verifier::new(client.clone(), move |json| sink.emit("verification", json)).with_qr());
     let sink = i.clone();
-    let calls = crate::calls::Calls::new(client.clone(), crate::calls_audio::sound_card(), move |json| sink.emit("call", json));
+    let devices = i.clone();
+    let calls = crate::calls::Calls::new(client.clone(), crate::calls_audio::sound_card(Arc::new(move || (devices.pref("callMicrophone"), devices.pref("callSpeakers")))), move |json| sink.emit("call", json));
     let pictures = i.clone();
     calls.set_video_sink(Arc::new(move |f| {
         let sink = pictures.video_sink.lock().unwrap().clone();
