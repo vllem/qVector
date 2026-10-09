@@ -2,7 +2,6 @@
 [workspace]
 resolver = "2"
 members = ["core-rs"]
-exclude = ["core-rs/fuzz-afl"]
 
 [profile.dev]
 debug = "line-tables-only"   # full debug info made the build directory tens of gigabytes
