@@ -14,6 +14,11 @@ typedef void (*VcrEventFn)(void *user, const char *name, const char *json);
 VcrApp *vcr_app_new(const char *data_dir, VcrEventFn cb, void *user);
 char *vcr_app_call(VcrApp *app, const char *method, const char *args_json); /* release with vcr_string_free */
 void vcr_string_free(char *s);
+
+/* Video calls: pictures are RGBA, width * height * 4 bytes, rows top to bottom. */
+typedef void (*VcrVideoFn)(void *user, int width, int height, const unsigned char *rgba);
+void vcr_video_set_sink(VcrApp *app, VcrVideoFn cb, void *user); /* the other side's pictures; the buffer is valid during the callback only; decoder thread */
+void vcr_video_push(VcrApp *app, int width, int height, const unsigned char *rgba); /* one camera picture (copied); ignored unless the camera is on */
 void vcr_app_free(VcrApp *app);
 
 #ifdef __cplusplus

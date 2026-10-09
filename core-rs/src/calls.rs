@@ -14,7 +14,8 @@ use matrix_sdk::{Client, Room};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use crate::rtc_peer::{CallPeer, PeerEvent, Playback};
+use crate::rtc_peer::{has_video, CallPeer, PeerEvent, Playback, VideoDisplay};
+use crate::video::Frame;
 
 /// What the sound card gives and takes. `guard` keeps the streams alive until the call is over.
 pub struct AudioSession {
@@ -49,6 +50,10 @@ struct Active {
     early: Vec<Value>,
     muted: bool,
     audio: Option<Box<dyn Any + Send>>,
+    /// The call carries pictures; whether our camera is on; whether the other side shows a picture.
+    video: bool,
+    camera: bool,
+    remote_video: bool,
 }
 
 #[derive(Clone)]
@@ -57,6 +62,7 @@ pub struct Calls {
     report: Arc<dyn Fn(String) + Send + Sync>,
     audio: Arc<Mutex<AudioFactory>>,
     bind: Arc<Vec<String>>,
+    video_sink: Arc<Mutex<Option<VideoDisplay>>>,
     active: Arc<Mutex<Option<Active>>>,
 }
 
@@ -72,6 +78,7 @@ impl Calls {
             report: Arc::new(report),
             audio: Arc::new(Mutex::new(audio)),
             bind: Arc::new(vec!["0.0.0.0:0".to_string()]),
+            video_sink: Default::default(),
             active: Default::default(),
         };
         let handler = calls.clone();
@@ -94,13 +101,18 @@ impl Calls {
         self
     }
 
+    /// Where the other side's pictures go.
+    pub fn set_video_sink(&self, sink: VideoDisplay) {
+        *self.video_sink.lock().unwrap() = Some(sink);
+    }
+
     pub fn set_audio(&self, audio: AudioFactory) {
         *self.audio.lock().unwrap() = audio;
     }
 
     fn emit(&self, state: &str, a: &Active, reason: &str) {
         (self.report)(
-            json!({"state": state, "room_id": a.room_id, "call_id": a.call_id, "user_id": a.user_id, "name": a.name, "reason": reason, "muted": a.muted, "incoming": a.incoming})
+            json!({"state": state, "room_id": a.room_id, "call_id": a.call_id, "user_id": a.user_id, "name": a.name, "reason": reason, "muted": a.muted, "incoming": a.incoming, "video": a.video, "camera": a.camera, "remote_video": a.remote_video})
                 .to_string(),
         );
     }
@@ -117,11 +129,21 @@ impl Calls {
         }
     }
 
-    async fn make_peer(&self) -> Result<(Arc<CallPeer>, Box<dyn Any + Send>), String> {
+    async fn make_peer(&self, video: bool) -> Result<(Arc<CallPeer>, Box<dyn Any + Send>), String> {
         let factory = self.audio.lock().unwrap().clone();
         let session = factory().map_err(|e| format!("No sound device: {e}"))?;
-        let peer = CallPeer::new(self.ice_servers().await, (*self.bind).clone(), session.capture, session.playback, None).await?;
+        let display: Option<VideoDisplay> = if video {
+            Some(self.video_sink.lock().unwrap().clone().unwrap_or_else(|| Arc::new(|_| {})))
+        } else {
+            None
+        };
+        let peer = CallPeer::new(self.ice_servers().await, (*self.bind).clone(), session.capture, session.playback, display).await?;
         Ok((Arc::new(peer), session.guard))
+    }
+
+    /// What each stream is (MSC3077), so that the other client knows our camera is off and shows our picture instead.
+    fn metadata(a: &Active) -> Value {
+        json!({"vector-call": {"purpose": "m.usermedia", "audio_muted": a.muted, "video_muted": !a.camera}})
     }
 
     async fn send(&self, room_id: &str, ty: &str, mut content: Value, call_id: &str, party: &str) {
@@ -136,7 +158,7 @@ impl Calls {
     }
 
     /// Ring the other person in this room (a direct chat or any room with exactly two people).
-    pub async fn place(&self, room_id: &str) -> Result<(), String> {
+    pub async fn place(&self, room_id: &str, video: bool) -> Result<(), String> {
         if self.active.lock().unwrap().is_some() {
             return Err("You are already in a call".into());
         }
@@ -151,7 +173,7 @@ impl Calls {
         let (user_id, name) = (others[0].user_id().to_string(), others[0].display_name().unwrap_or(others[0].user_id().as_str()).to_string());
         let call_id = format!("c{}", rand::random::<u64>());
         let party = format!("p{}", rand::random::<u32>());
-        let (peer, guard) = self.make_peer().await?;
+        let (peer, guard) = self.make_peer(video).await?;
         let a = Active {
             call_id: call_id.clone(),
             room_id: room_id.into(),
@@ -166,8 +188,12 @@ impl Calls {
             early: vec![],
             muted: false,
             audio: Some(guard),
+            video,
+            camera: false,
+            remote_video: video,
         };
         self.emit("outgoing", &a, "");
+        let meta = Self::metadata(&a);
         *self.active.lock().unwrap() = Some(a);
         let sdp = match peer.offer().await {
             Ok(s) => s,
@@ -179,7 +205,8 @@ impl Calls {
         self.send(
             room_id,
             "m.call.invite",
-            json!({"lifetime": RING_SECONDS * 1000, "offer": {"type": "offer", "sdp": sdp}, "invitee": user_id}),
+            json!({"lifetime": RING_SECONDS * 1000, "offer": {"type": "offer", "sdp": sdp}, "invitee": user_id,
+                "org.matrix.msc3077.sdp_stream_metadata": meta, "sdp_stream_metadata": meta}),
             &call_id,
             &party,
         )
@@ -198,12 +225,12 @@ impl Calls {
 
     /// Pick up the ringing call.
     pub async fn answer(&self) -> Result<(), String> {
-        let (call_id, room_id, party, offer) = {
+        let (call_id, room_id, party, offer, video) = {
             let g = self.active.lock().unwrap();
             let a = g.as_ref().filter(|a| a.phase == Phase::Ringing).ok_or("Nobody is calling")?;
-            (a.call_id.clone(), a.room_id.clone(), a.party.clone(), a.offer.clone().unwrap_or_default())
+            (a.call_id.clone(), a.room_id.clone(), a.party.clone(), a.offer.clone().unwrap_or_default(), a.video)
         };
-        let (peer, guard) = match self.make_peer().await {
+        let (peer, guard) = match self.make_peer(video).await {
             Ok(p) => p,
             Err(e) => {
                 self.finish(&call_id, "error", true).await;
@@ -226,19 +253,20 @@ impl Calls {
                     a.phase = Phase::Connecting;
                     a.remote_set = true;
                     self.emit("connecting", a, "");
-                    Some(std::mem::take(&mut a.early))
+                    Some((std::mem::take(&mut a.early), Self::metadata(a)))
                 }
                 None => None,
             }
         };
-        let Some(early) = early else {
+        let Some((early, meta)) = early else {
             peer.close().await;
             return Err("The call ended".into());
         };
         for c in early {
             Self::add_candidates(&peer, &c).await;
         }
-        self.send(&room_id, "m.call.answer", json!({"answer": {"type": "answer", "sdp": sdp}}), &call_id, &party).await;
+        self.send(&room_id, "m.call.answer", json!({"answer": {"type": "answer", "sdp": sdp},
+            "org.matrix.msc3077.sdp_stream_metadata": meta, "sdp_stream_metadata": meta}), &call_id, &party).await;
         self.watch(peer, call_id);
         Ok(())
     }
@@ -258,8 +286,36 @@ impl Calls {
             if let Some(p) = &a.peer {
                 p.set_muted(muted);
             }
-            self.emit(if a.phase == Phase::Connected { "connected" } else { "connecting" }, a, "");
+            self.emit(Self::state_name(a), a, "");
         }
+    }
+
+    fn state_name(a: &Active) -> &'static str {
+        if a.phase == Phase::Connected { "connected" } else { "connecting" }
+    }
+
+    /// A picture from the camera (ignored unless the camera is on).
+    pub fn push_video(&self, f: Frame) {
+        let peer = self.active.lock().unwrap().as_ref().and_then(|a| if a.camera { a.peer.clone() } else { None });
+        if let Some(p) = peer {
+            p.push_video(f);
+        }
+    }
+
+    /// Turn our camera on or off in a call that carries video; the other side is told so it can show a placeholder.
+    pub async fn set_camera(&self, on: bool) {
+        let (room_id, call_id, party, meta) = {
+            let mut g = self.active.lock().unwrap();
+            let Some(a) = g.as_mut().filter(|a| a.video && a.camera != on) else { return };
+            a.camera = on;
+            if let Some(p) = &a.peer {
+                p.set_camera(on);
+            }
+            self.emit(Self::state_name(a), a, "");
+            (a.room_id.clone(), a.call_id.clone(), a.party.clone(), Self::metadata(a))
+        };
+        self.send(&room_id, "m.call.sdp_stream_metadata_changed",
+            json!({"org.matrix.msc3077.sdp_stream_metadata": meta, "sdp_stream_metadata": meta}), &call_id, &party).await;
     }
 
     /// End the call `call_id` (if it is still the current one); tell the other side when `notify`.
@@ -312,6 +368,20 @@ impl Calls {
         });
     }
 
+    /// Whether the other side's metadata says its camera is on (`default` when it says nothing).
+    fn remote_shows_picture(content: &Value, default: bool) -> bool {
+        for key in ["org.matrix.msc3077.sdp_stream_metadata", "sdp_stream_metadata"] {
+            if let Some(m) = content[key].as_object() {
+                for stream in m.values() {
+                    if let Some(muted) = stream["video_muted"].as_bool() {
+                        return !muted;
+                    }
+                }
+            }
+        }
+        default
+    }
+
     async fn add_candidates(peer: &CallPeer, content: &Value) {
         for c in content["candidates"].as_array().cloned().unwrap_or_default() {
             let cand = c["candidate"].as_str().unwrap_or("");
@@ -355,6 +425,7 @@ impl Calls {
                     Ok(Some(m)) => m.display_name().unwrap_or(sender).to_string(),
                     _ => sender.to_string(),
                 };
+                let sdp_text = sdp.clone();
                 let a = Active {
                     call_id: call_id.clone(),
                     room_id: room.room_id().to_string(),
@@ -363,12 +434,15 @@ impl Calls {
                     name,
                     incoming: true,
                     phase: Phase::Ringing,
-                    offer: Some(sdp),
+                    offer: Some(sdp_text),
                     peer: None,
                     remote_set: false,
                     early: vec![],
                     muted: false,
                     audio: None,
+                    video: has_video(&sdp),
+                    camera: false,
+                    remote_video: Self::remote_shows_picture(content, true),
                 };
                 {
                     let mut g = self.active.lock().unwrap();
@@ -412,6 +486,7 @@ impl Calls {
                     let Some(a) = g.as_mut().filter(|a| a.call_id == call_id) else { return };
                     a.phase = Phase::Connecting;
                     a.remote_set = true;
+                    a.remote_video = a.video && Self::remote_shows_picture(content, true);
                     self.emit("connecting", a, "");
                     (std::mem::take(&mut a.early), a.party.clone(), a.room_id.clone())
                 };
@@ -437,6 +512,16 @@ impl Calls {
                 };
                 if let Some(p) = peer {
                     Self::add_candidates(&p, content).await;
+                }
+            }
+            "m.call.sdp_stream_metadata_changed" => {
+                if from_me {
+                    return;
+                }
+                let mut g = self.active.lock().unwrap();
+                if let Some(a) = g.as_mut().filter(|a| a.call_id == call_id && a.video) {
+                    a.remote_video = Self::remote_shows_picture(content, a.remote_video);
+                    self.emit(Self::state_name(a), a, "");
                 }
             }
             "m.call.hangup" | "m.call.reject" => {
@@ -526,7 +611,7 @@ mod tests {
         let ac = Calls::new(alice.clone(), card(true, heard_by_alice.clone()), move |s| ca.lock().unwrap().push(serde_json::from_str(&s).unwrap())).with_bind(lo.clone());
         let bc = Calls::new(bob.clone(), card(false, heard_by_bob.clone()), move |s| cb.lock().unwrap().push(serde_json::from_str(&s).unwrap())).with_bind(lo);
 
-        ac.place(&room).await.unwrap();
+        ac.place(&room, false).await.unwrap();
         assert_eq!(states(&la), ["outgoing"]);
         pump(&alice, &bob, &la, &lb, |_, b| b.contains(&"incoming".to_string())).await;
         let incoming = lb.lock().unwrap().iter().find(|v| v["state"] == "incoming").cloned().unwrap();
@@ -542,6 +627,59 @@ mod tests {
         ac.hangup().await;
         pump(&alice, &bob, &la, &lb, |_, b| b.last().map(|s| s == "ended").unwrap_or(false)).await;
         assert_eq!(states(&la).last().unwrap(), "ended");
+        let unhandled: Vec<_> = hs.log().into_iter().filter(|l| l.contains("UNHANDLED") && !l.contains("well-known")).collect();
+        assert!(unhandled.is_empty(), "{unhandled:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_video_call_carries_pictures_and_the_camera_state() {
+        use crate::video::tests::{luma, picture};
+        let hs = FakeHs::start().await;
+        let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let alice = crate::session::sign_in(da.path(), &hs.uri(), "alice", "x", None, "a").await.unwrap();
+        let bob = crate::session::sign_in(db.path(), &hs.uri(), "bob", "x", None, "b").await.unwrap();
+        crate::sync_once(&alice).await.unwrap();
+        crate::sync_once(&bob).await.unwrap();
+        let room = alice.joined_rooms().first().unwrap().room_id().to_string();
+
+        let (la, lb): (Arc<Mutex<Vec<Value>>>, Arc<Mutex<Vec<Value>>>) = Default::default();
+        let (ca, cb) = (la.clone(), lb.clone());
+        let lo = vec!["127.0.0.1:0".to_string()];
+        let quiet = || card(false, Arc::new(AtomicUsize::new(0)));
+        let ac = Calls::new(alice.clone(), quiet(), move |s| ca.lock().unwrap().push(serde_json::from_str(&s).unwrap())).with_bind(lo.clone());
+        let bc = Calls::new(bob.clone(), quiet(), move |s| cb.lock().unwrap().push(serde_json::from_str(&s).unwrap())).with_bind(lo);
+        let seen: Arc<Mutex<Vec<(u32, u32, f32)>>> = Default::default();
+        let s2 = seen.clone();
+        bc.set_video_sink(Arc::new(move |f: Frame| s2.lock().unwrap().push((f.w, f.h, luma(&f)))));
+
+        ac.place(&room, true).await.unwrap();
+        pump(&alice, &bob, &la, &lb, |_, b| b.contains(&"incoming".to_string())).await;
+        let incoming = lb.lock().unwrap().iter().find(|v| v["state"] == "incoming").cloned().unwrap();
+        assert_eq!(incoming["video"], true);
+        assert_eq!(incoming["camera"], false);
+        bc.answer().await.unwrap();
+        pump(&alice, &bob, &la, &lb, |a, b| a.contains(&"connected".to_string()) && b.contains(&"connected".to_string())).await;
+
+        ac.set_camera(true).await;
+        for n in 0..60 {
+            ac.push_video(picture(n, 320, 240));
+            tokio::time::sleep(Duration::from_millis(66)).await;
+        }
+        for _ in 0..20 {
+            crate::sync_once(&bob).await.unwrap();
+            if lb.lock().unwrap().iter().any(|v| v["remote_video"] == true) && seen.lock().unwrap().len() > 20 { break; }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(seen.lock().unwrap().len() > 20, "bob saw {} pictures", seen.lock().unwrap().len());
+        assert!(seen.lock().unwrap().iter().all(|&(w, h, _)| (w, h) == (320, 240)));
+        let last = lb.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(last["remote_video"], true);
+
+        ac.set_camera(false).await;
+        pump(&alice, &bob, &la, &lb, |_, _| lb.lock().unwrap().last().map(|v| v["remote_video"] == false).unwrap_or(false)).await;
+        assert_eq!(la.lock().unwrap().last().unwrap()["camera"], false);
+        bc.hangup().await;
+        pump(&alice, &bob, &la, &lb, |a, _| a.last().map(|s| s == "ended").unwrap_or(false)).await;
         let unhandled: Vec<_> = hs.log().into_iter().filter(|l| l.contains("UNHANDLED") && !l.contains("well-known")).collect();
         assert!(unhandled.is_empty(), "{unhandled:?}");
     }

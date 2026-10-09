@@ -37,6 +37,29 @@ pub extern "C" fn vcr_app_call(app: *mut App, method: *const c_char, args_json: 
     CString::new(out).unwrap_or_default().into_raw()
 }
 
+pub type VcrVideoFn = extern "C" fn(user: *mut c_void, width: i32, height: i32, rgba: *const u8);
+
+/// Receive the other side's pictures of a video call: RGBA, `width * height * 4` bytes, valid only during the callback,
+/// which runs on a decoder thread.
+#[no_mangle]
+pub extern "C" fn vcr_video_set_sink(app: *mut App, cb: VcrVideoFn, user: *mut c_void) {
+    if app.is_null() { return; }
+    let user = User(user);
+    unsafe { &*app }.set_video_sink(Arc::new(move |f| {
+        let u = &user;
+        cb(u.0, f.w as i32, f.h as i32, f.rgba.as_ptr());
+    }));
+}
+
+/// Give the engine one camera picture (RGBA, rows top to bottom, no padding). It is copied; ignored unless a video call has the camera on.
+#[no_mangle]
+pub extern "C" fn vcr_video_push(app: *mut App, width: i32, height: i32, rgba: *const u8) {
+    if app.is_null() || rgba.is_null() || width <= 0 || height <= 0 || width > 8192 || height > 8192 { return; }
+    let n = width as usize * height as usize * 4;
+    let rgba = unsafe { std::slice::from_raw_parts(rgba, n) }.to_vec();
+    unsafe { &*app }.push_video(crate::video::Frame { w: width as u32, h: height as u32, rgba });
+}
+
 #[no_mangle]
 pub extern "C" fn vcr_string_free(s: *mut c_char) { if !s.is_null() { drop(unsafe { CString::from_raw(s) }); } }
 
