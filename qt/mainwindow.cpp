@@ -931,6 +931,8 @@ void MainWindow::onEvent(const QString &name, const QJsonValue &p)
         const QJsonObject row = timeline_->row(id);
         if (S(row, "kind") == "audio") (new AudioPlayer(S(p.toObject(), "path"), S(row, "file_name").isEmpty() ? S(row, "body") : S(row, "file_name"), this))->show(); /* a window with the waveform */
         else timeline_->playFile(id, S(p.toObject(), "path"));
+    } else if (name == "media_failed") {
+        timeline_->setLoading(QString());
     } else if (name == "open_file") {
         QDesktopServices::openUrl(QUrl::fromLocalFile(p.toString()));
     } else if (name == "alerts") {

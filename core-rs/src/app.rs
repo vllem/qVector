@@ -594,9 +594,9 @@ impl App {
                 match done {
                     Ok(path) if event == "media_file" => i.emit_json("media_file", &json!({"event_id": id, "path": path.to_string_lossy()})),
                     Ok(path) => i.emit(event, path.to_string_lossy().into_owned()),
-                    Err(e) => i.notice(format!("Cannot open: {e}")),
+                    Err(e) => { i.emit_json("media_failed", &json!({"event_id": id})); i.notice(format!("Cannot open: {e}")) }
                 }
-            } else { i.opening.lock().unwrap().remove(&key); }
+            } else { i.opening.lock().unwrap().remove(&key); i.emit_json("media_failed", &json!({"event_id": id})); }
         });
         Value::Null
     }

@@ -263,7 +263,12 @@ void TimelineView::onAnchor(const QUrl &u)
         if (!reply.isEmpty()) emit loadReplyRequested(reply);
         revealMessage(target);
     }
-    else if (s.startsWith("vc:vid:")) emit playRequested(s.mid(7));
+    else if (s.startsWith("vc:vid:")) {
+        const QString id = s.mid(7);
+        if (id == loadingId_) return; /* already downloading: the card shows a spinner */
+        if (row(id).value("kind").toString() == "video") setLoading(id);
+        emit playRequested(id);
+    }
     else if (s.startsWith("https://matrix.to/#/") || s.startsWith("http://matrix.to/#/")) emit matrixLink(s);
     else if (s.startsWith("vc:poll/")) emit pollVote(part(1).mid(0), part(2)); /* vc:poll/<event>/<answer> */
     else if (s.startsWith("vc:pollend/")) emit pollEnd(QUrl::fromPercentEncoding(s.mid(11).toUtf8()));
@@ -458,7 +463,17 @@ void TimelineView::render()
             p.setRenderHint(QPainter::Antialiasing);
             const QPointF c(card.width() / 2.0, (card.height() - (playingThis ? VideoPlayer::kControlsHeight * dpr : 0)) / 2.0);
             const qreal rad = 26 * dpr;
-            if (!playingThis) {
+            if (!playingThis && eid == loadingId_) {
+                p.setBrush(QColor(0, 0, 0, 150)); p.setPen(Qt::NoPen);
+                p.drawEllipse(c, rad, rad);
+                p.setBrush(Qt::NoBrush);
+                p.setPen(QPen(Qt::white, 3 * dpr, Qt::SolidLine, Qt::RoundCap));
+                const QRectF arc(c.x() - rad * 0.6, c.y() - rad * 0.6, rad * 1.2, rad * 1.2);
+                p.drawArc(arc, -spinStep_ * 30 * 16, -270 * 16);
+                p.setPen(Qt::white);
+                QFont f = p.font(); f.setPixelSize(int(12 * dpr)); p.setFont(f);
+                p.drawText(QRectF(0, c.y() + rad + 6 * dpr, card.width(), 18 * dpr), Qt::AlignHCenter, "Loading video…");
+            } else if (!playingThis) {
                 p.setBrush(QColor(0, 0, 0, 150)); p.setPen(Qt::NoPen);
                 p.drawEllipse(c, rad, rad);
                 p.setBrush(Qt::white);
@@ -708,8 +723,24 @@ void TimelineView::render()
 void TimelineView::hideEvent(QHideEvent *e) { stopInline(); QWidget::hideEvent(e); }
 void TimelineView::resizeEvent(QResizeEvent *e) { QWidget::resizeEvent(e); QTimer::singleShot(0, this, [this] { placePlayer(); }); }
 
+/* A video is being downloaded: its card shows a turning arc until the file arrives (or fails). */
+void TimelineView::setLoading(const QString &eventId)
+{
+    if (loadingId_ == eventId) return;
+    loadingId_ = eventId;
+    if (!spinner_) {
+        spinner_ = new QTimer(this);
+        spinner_->setInterval(120);
+        connect(spinner_, &QTimer::timeout, this, [this] { spinStep_ = (spinStep_ + 1) % 12; if (isVisible()) refresh(); });
+    }
+    if (eventId.isEmpty()) spinner_->stop(); else { spinStep_ = 0; spinner_->start(); }
+    if (isVisible()) refresh();
+}
+
 void TimelineView::stopInline()
 {
+    loadingId_.clear();
+    if (spinner_) spinner_->stop();
     if (player_) { player_->deleteLater(); player_.clear(); }
     const bool was = !playingId_.isEmpty();
     playingId_.clear();
@@ -721,6 +752,8 @@ void TimelineView::stopInline()
 void TimelineView::playFile(const QString &eventId, const QString &path)
 {
     if (player_) { player_->deleteLater(); player_.clear(); }
+    loadingId_.clear();
+    if (spinner_) spinner_->stop();
     playingId_ = eventId;
     playingPath_ = path;
     render(); /* reserves the space for the player's control row */

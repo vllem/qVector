@@ -34,6 +34,7 @@ public:
     void stickToBottom() { stick_ = true; }
     QString eventAt(const QPoint &pos) const; /* the message under a point of the view ("" for none) */
     void revealMessage(const QString &eventId);
+    void setLoading(const QString &eventId); /* shows a spinner on that video's card; empty = none */
     void playFile(const QString &eventId, const QString &path); /* plays a video message in place, over its card */
     void setPinned(const QSet<QString> &ids) { pinned_ = ids; }
     QJsonObject row(const QString &eventId) const;
@@ -101,7 +102,9 @@ private:
     bool renderQueued_ = false;
     int hiddenLocal_ = 0, fitFetches_ = 0;
     QSet<QString> bookmarks_, pinned_;
-    QString playingId_;
+    QString playingId_, loadingId_;
+    QTimer *spinner_ = nullptr;
+    int spinStep_ = 0;
     QSize playingSize_;
     QPointer<VideoPlayer> player_;
     QString playingPath_;
