@@ -7,3 +7,6 @@ emsdk/
 *.key
 dist/
 target/
+
+# AFL fuzzing output
+core-rs/fuzz-afl/out/
