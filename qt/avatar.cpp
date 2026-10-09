@@ -16,6 +16,12 @@ QPixmap avatarPixmap(const QString &seed, const QString &label, int size, qreal 
     QString initial = text.isEmpty() ? QStringLiteral("?") : QString(text.left(text.at(0).isHighSurrogate() ? 2 : 1)).toUpper();
     QColor bg = nameColor(seed, pal);
     bg.setHsl(bg.hslHue(), 140, isDark(pal) ? 150 : 135);
+    /* The picture depends only on the initial, the colour and the size; a list redraws the same few hundred of them again and again. */
+    static QHash<QString, QPixmap> cache;
+    const QString key = initial + QChar(1) + QString::number(bg.rgb()) + QChar(1) + QString::number(size) + QChar(1) + QString::number(dpr);
+    const auto hit = cache.constFind(key);
+    if (hit != cache.constEnd()) return hit.value();
+    if (cache.size() > 3000) cache.clear();
     QPixmap pm(QSize(size, size) * dpr);
     pm.setDevicePixelRatio(dpr);
     pm.fill(Qt::transparent);
@@ -30,6 +36,8 @@ QPixmap avatarPixmap(const QString &seed, const QString &label, int size, qreal 
     p.setFont(f);
     p.setPen(QColor(0x1b, 0x1b, 0x1b));
     p.drawText(QRectF(0, 0, size, size), Qt::AlignCenter, initial);
+    p.end();
+    cache.insert(key, pm);
     return pm;
 }
 

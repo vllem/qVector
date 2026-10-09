@@ -171,6 +171,8 @@ TimelineView::TimelineView(bool thread, QWidget *parent) : QWidget(parent), thre
     view_->installEventFilter(this);
 }
 
+static const int kMaxShownChars = 20000;
+
 TimelineView::~TimelineView() { stopInline(); }
 
 void TimelineView::reset()
@@ -351,7 +353,9 @@ void TimelineView::render()
     for (int i = firstShown; i < n; i++) {
         const QJsonObject r = rows_[i].toObject();
         const QString kind = S(r, "kind"), eid = S(r, "id"), sender = S(r, "sender_id"), name = S(r, "sender");
-        const QString text = S(r, "body");
+        QString text = S(r, "body");
+        /* A multi-megabyte message makes the text layout run for minutes and freezes the window, so only the start is drawn. */
+        if (text.size() > kMaxShownChars) text = text.left(kMaxShownChars) + QString::fromUtf8("\u2026 (message cut, %1 characters in all)").arg(text.size());
         const qint64 ts = qint64(r.value("ts").toDouble());
         const bool pending = B(r, "pending");
         const bool grouped = sender == lastSender && ts - lastTs < 5 * 60 * 1000 && ts >= lastTs;
@@ -482,7 +486,7 @@ void TimelineView::render()
             else if (kind == "emote") t = "* " + name + " " + text;
             if (kind == "notice" || kind == "emote" || pending) style = "color:" + muted;
             QString shown = linkify(t);
-            const QString fb = S(r, "html");
+            const QString fb = S(r, "html").size() > 4 * kMaxShownChars ? QString() : S(r, "html");
             if (kind == "text" && fb.isEmpty() && emojiOnly(text)) shown = "<span style=\"font-size:30pt\">" + esc(text) + "</span>";
             if (!fb.isEmpty() && kind != "undecryptable") { /* formatted text: sanitized HTML */
                 shown = fb;

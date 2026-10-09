@@ -27,7 +27,7 @@ signals:
 
 private:
     QJsonArray rooms_;
-    QString sig_, current_, workspace_;
+    QString sig_, shape_, current_, workspace_;
     QRgb paletteKey_ = 0;
     QSet<QString> collapsed_;
     struct RowInfo { bool favourite, lowpriority, invite; QString notify; };

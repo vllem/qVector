@@ -1,6 +1,7 @@
 #ifndef VC_QT_MEMBERLIST_H
 #define VC_QT_MEMBERLIST_H
 
+#include <QHash>
 #include <QJsonObject>
 #include <QListWidget>
 
@@ -20,7 +21,10 @@ signals:
     void messageRequested(const QString &userId); /* "Message" in the context menu: start / open a direct message */
 
 private:
+    void decorate(QListWidgetItem *it, const QJsonObject &m, bool banned);
     QString sig_, me_;
+    QHash<QString, QListWidgetItem *> itemById_; /* the live members' rows, so a presence change updates only its own row */
+    QHash<QString, QJsonObject> memberById_;
     QJsonObject presence_, last_;
     bool canSetRoles_ = false;
 };

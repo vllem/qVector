@@ -125,20 +125,61 @@ void Sidebar::changeEvent(QEvent *e)
     const QRgb key = w.rgb() ^ (t.rgb() * 31u);
     if (key == paletteKey_) return;
     paletteKey_ = key;
-    sig_.clear();
+    sig_.clear(); shape_.clear();
     refresh(rooms_, current_, workspace_);
 }
 
 void Sidebar::refresh(const QJsonArray &rooms, const QString &current, const QString &workspace)
 {
     rooms_ = rooms;
-    QString sig = workspace + "|" + current + "|";
-    for (const QString &c : collapsed_) sig += "c:" + c + ";";
+    /* `shape` is what decides which items exist and where; `sig` adds the counters. Only the counters changing (the usual case: a message
+       arrives) updates the numbers in place instead of rebuilding thousands of items. */
+    QString shape = workspace + "|" + current + "|", sig;
+    for (const QString &c : collapsed_) shape += "c:" + c + ";";
     for (const QJsonValue &v : rooms) {
         const QJsonObject r = v.toObject();
-        sig += r["id"].toString() + ":" + r["title"].toString() + ":" + r["section"].toString() + ":" + QString::number(r["unread"].toInt()) + ":" + QString::number(r["highlight"].toBool()) + ":" + r["notify"].toString() + ";";
+        shape += r["id"].toString() + ":" + r["title"].toString() + ":" + r["section"].toString() + ":" + r["notify"].toString() + ";";
+        sig += QString::number(r["unread"].toInt()) + (r["highlight"].toBool() ? "!" : ".");
     }
+    sig = shape + "#" + sig;
     if (sig == sig_) return;
+    if (shape == shape_ && !sig_.isEmpty()) {
+        sig_ = sig;
+        QHash<QString, QPair<int, bool>> counts;
+        QHash<QString, QPair<int, int>> totals;
+        for (const QJsonValue &v : rooms) {
+            const QJsonObject r = v.toObject();
+            const int unread = r["unread"].toInt();
+            const bool hl = r["highlight"].toBool();
+            counts.insert(r["id"].toString(), {unread, hl});
+            auto &tot = totals[r["section"].toString()]; tot.first += unread; tot.second += hl;
+        }
+        setUpdatesEnabled(false);
+        const QPalette pal = palette();
+        for (int i = 0; i < topLevelItemCount(); i++) {
+            QTreeWidgetItem *it = topLevelItem(i);
+            const QString room = it->data(0, RoleRoom).toString();
+            if (!room.isEmpty()) {
+                const auto c = counts.constFind(room);
+                if (c == counts.constEnd()) continue;
+                it->setData(0, RoleUnread, c->first);
+                it->setData(0, RoleHighlight, c->second);
+                if (c->first == 0 && !it->data(0, RoleInvite).toBool()) it->setForeground(0, pal.color(QPalette::PlaceholderText));
+                else it->setData(0, Qt::ForegroundRole, QVariant());
+            } else {
+                const QString section = it->data(0, RoleSection).toString();
+                if (collapsed_.contains(section)) {
+                    const auto tot = totals.value(section);
+                    it->setData(0, RoleUnread, tot.first > 0 ? QVariant(tot.first) : QVariant());
+                    it->setData(0, RoleHighlight, tot.first > 0 ? QVariant(tot.second > 0) : QVariant());
+                }
+            }
+        }
+        setUpdatesEnabled(true);
+        viewport()->update();
+        return;
+    }
+    shape_ = shape;
     sig_ = sig;
     current_ = current;
     workspace_ = workspace;
@@ -154,6 +195,9 @@ void Sidebar::refresh(const QJsonArray &rooms, const QString &current, const QSt
     const QBrush headBg(pal.color(QPalette::Window).darker(isDark(pal) ? 125 : 108));
     const qreal dpr = devicePixelRatioF();
 
+    QHash<QString, QPair<int, int>> totals; /* unread and highlighted rooms per section, counted once instead of once per header */
+    for (const QJsonValue &w : rooms) { const QJsonObject o = w.toObject(); auto &tot = totals[o["section"].toString()]; tot.first += o["unread"].toInt(); tot.second += o["highlight"].toBool(); }
+    setUpdatesEnabled(false); /* thousands of items are added; one repaint at the end */
     QString lastSection;
     bool folded = false;
     for (const QJsonValue &v : rooms) {
@@ -162,8 +206,7 @@ void Sidebar::refresh(const QJsonArray &rooms, const QString &current, const QSt
         if (section != lastSection) {
             lastSection = section;
             folded = collapsed_.contains(section);
-            int unread = 0, highlight = 0;
-            for (const QJsonValue &w : rooms) { const QJsonObject o = w.toObject(); if (o["section"].toString() == section) { unread += o["unread"].toInt(); highlight += o["highlight"].toBool(); } }
+            const int unread = totals[section].first, highlight = totals[section].second;
             auto *h = new QTreeWidgetItem(this, QStringList((folded ? QStringLiteral("\u25B8  ") : QStringLiteral("\u25BE  ")) + section));
             h->setData(0, RoleSection, section);
             h->setFlags(Qt::ItemIsEnabled);
@@ -184,6 +227,7 @@ void Sidebar::refresh(const QJsonArray &rooms, const QString &current, const QSt
         if (id == current) it->setSelected(true);
     }
     verticalScrollBar()->setValue(scroll);
+    setUpdatesEnabled(true);
 }
 
 }

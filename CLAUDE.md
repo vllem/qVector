@@ -105,3 +105,10 @@ Group calls are `group_calls.rs`: a mesh between qVector clients (membership = r
 emoji pack editor, tweet pictures, identity-change banner and per-user trust state beyond the shield on messages, resetting cross-signing, sign-out of other sessions,
 location messages, spoilers, (image paste, drag-and-drop with a caption bar and multi-picture galleries are done),
 notification text with sender and preview (alerts only carry a count), packaging (AppImage/.deb), a real-server run of everything.
+
+## Stress tests
+
+`core-rs/src/stress.rs` (ignored by default) and `qt/stress_main.cpp` (`qvector_stress`, not part of `all`) hit the engine and the real widgets with huge or hostile input
+and fail when a step is over its budget. Budgets are for a loaded 4-core laptop; a loosened budget needs a reason in the code. Known limit: jumping to a message far
+back in a long room lays out every message from there on (about 1 ms each), so it is only budgeted for 1500 rows. Message bodies are cut at 20 000 characters in the
+timeline (a 5 MB message used to freeze the layout for minutes); "Copy message text" still copies all of it.

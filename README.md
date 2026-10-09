@@ -58,6 +58,14 @@ cargo test -p vector-core --lib --features testkit      # the engine against the
 scripts/ui_smoke.sh build/qvector                        # every window and dialog, offscreen
 ```
 
+Stress tests (they fail when something is too slow; budgets are 8x looser in Debug builds, 30x in Rust debug):
+
+```sh
+(cd core-rs && cargo test --release --lib stress:: -- --ignored --nocapture --test-threads=1)    # search, index, video codecs, hostile input
+cmake --build build --target qvector_stress && QT_QPA_PLATFORM=offscreen build/qvector_stress [filter]   # timeline, sidebar, member list
+```
+
+
 ## Where things are
 
 Your session is stored in `~/.local/share/vector/vector/account` (the SDK's sqlite store and the session, sealed with a random key file or your passphrase); the
