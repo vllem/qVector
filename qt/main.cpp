@@ -13,6 +13,7 @@
 #include <QJsonObject>
 #include <QPainter>
 #include <QStandardPaths>
+#include <QStyleHints>
 #include <QTimer>
 #include <cstring>
 
@@ -85,6 +86,16 @@ int main(int argc, char **argv)
     QApplication::setOrganizationName("vector");
     QApplication::setApplicationDisplayName("qVector");
     QApplication::setDesktopFileName("qvector");
+    if (qEnvironmentVariableIsSet("VC_DEMO_DARK")) { /* dev aid: a dark KDE-like palette without KDE */
+        QApplication::setStyle("Fusion");
+        QPalette p;
+        p.setColor(QPalette::Window, QColor(0x2a, 0x2e, 0x32)); p.setColor(QPalette::WindowText, QColor(0xfc, 0xfc, 0xfc));
+        p.setColor(QPalette::Base, QColor(0x1b, 0x1e, 0x20)); p.setColor(QPalette::AlternateBase, QColor(0x23, 0x26, 0x29));
+        p.setColor(QPalette::Text, QColor(0xfc, 0xfc, 0xfc)); p.setColor(QPalette::Button, QColor(0x31, 0x36, 0x3b));
+        p.setColor(QPalette::ButtonText, QColor(0xfc, 0xfc, 0xfc)); p.setColor(QPalette::Highlight, QColor(0x3d, 0xae, 0xe9));
+        p.setColor(QPalette::HighlightedText, QColor(0xfc, 0xfc, 0xfc)); p.setColor(QPalette::PlaceholderText, QColor(0xa1, 0xa9, 0xb1));
+        QApplication::setPalette(p);
+    }
     bool demo = false, members = false;
     QString shot, room, dataDir, dialog, search, thread, server, user, password, sendFile;
     bool verify = false, confirm = false;
