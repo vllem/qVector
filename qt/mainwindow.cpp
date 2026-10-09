@@ -299,7 +299,7 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
         if (current_.isEmpty()) return;
         if (inGroup_ && groupDlg_) { groupDlg_->show(); groupDlg_->raise(); groupDlg_->activateWindow(); return; }
         QMenu menu(this);
-        QAction *voice = menu.addAction("Voice call");
+        menu.addAction("Voice call");
         QAction *video = menu.addAction("Video call");
         QAction *pick = menu.exec(groupBtn_->mapToGlobal(QPoint(0, groupBtn_->height())));
         if (!pick) return;

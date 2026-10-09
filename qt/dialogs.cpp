@@ -15,7 +15,10 @@
 #include <QMediaDevices>
 #include <QAudioDevice>
 #include <QSoundEffect>
+#if __has_include(<QScreenCapture>)
 #include <QScreenCapture>
+#define VC_HAVE_SCREENCAPTURE 1
+#endif
 #include <QGuiApplication>
 #include <QScreen>
 #include <QStandardPaths>
@@ -515,12 +518,16 @@ CallDialog::~CallDialog() { stopCamera(); if (ringer_) ringer_->stop(); }
 void CallDialog::stopCamera()
 {
     if (cam_) cam_->stop();
+#ifdef VC_HAVE_SCREENCAPTURE
     if (screen_) screen_->stop();
+#endif
     delete session_; /* the sources and the sink are children of this dialog */
     session_ = nullptr;
     delete cam_;
     cam_ = nullptr;
+#ifdef VC_HAVE_SCREENCAPTURE
     delete screen_;
+#endif
     screen_ = nullptr;
     delete sink_;
     sink_ = nullptr;
@@ -552,13 +559,18 @@ void CallDialog::startSource(bool screen)
         stopCamera();
         core_->call("set_call_camera", {{"on", false}});
     };
+#ifdef VC_HAVE_SCREENCAPTURE
     if (screen) {
         screen_ = new QScreenCapture(this);
         screen_->setScreen(QGuiApplication::primaryScreen());
         session_->setScreenCapture(screen_);
         connect(screen_, &QScreenCapture::errorOccurred, this, [failed](QScreenCapture::Error, const QString &msg) { failed(msg); });
         screen_->start();
-    } else {
+    } else
+#else
+    if (screen) { failed("Screen sharing needs Qt 6.5 or newer"); return; } else
+#endif
+    {
         const auto devices = QMediaDevices::videoInputs();
         QCameraDevice device = devices.first();
         const QString chosen = core_->pref("callCamera");
