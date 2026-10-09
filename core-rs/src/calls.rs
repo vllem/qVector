@@ -120,7 +120,7 @@ impl Calls {
     async fn make_peer(&self) -> Result<(Arc<CallPeer>, Box<dyn Any + Send>), String> {
         let factory = self.audio.lock().unwrap().clone();
         let session = factory().map_err(|e| format!("No sound device: {e}"))?;
-        let peer = CallPeer::new(self.ice_servers().await, (*self.bind).clone(), session.capture, session.playback).await?;
+        let peer = CallPeer::new(self.ice_servers().await, (*self.bind).clone(), session.capture, session.playback, None).await?;
         Ok((Arc::new(peer), session.guard))
     }
 
