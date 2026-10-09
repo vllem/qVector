@@ -17,13 +17,14 @@ sections, favourites / low priority, history paging, formatted messages (Markdow
 deletes, forwarding, edit history, threads (own panel), polls, pinned messages, saved messages, pictures / files / video / audio (sending with encrypted upload,
 viewer, save, inline video), link previews (through your homeserver, opt-in), read receipts and typing indicators (both ways), desktop notifications and a tray
 icon, search of the open room and (opt-in, with a local encrypted index) of all your messages, member list with moderation (kick, ban, unban, roles, invite),
-room settings, start a conversation (user directory search), create / browse / join rooms, avatars, light and dark theme.
+room settings, start a conversation (user directory search), create / browse / join rooms, avatars, light and dark theme, per-room notification levels (right-click a
+room), online status dots in the member list (and Tools > My status), exploring the rooms of a space (right-click its section header), custom emoji and stickers
+(MSC2545 packs of the room, of your account and of the rooms you chose), YouTube / X link cards (opt-in; YouTube plays in a window when Qt WebEngine is installed).
 
 Encryption: messages are end-to-end encrypted with who-wrote-this shields; interactive emoji verification of this session and of other people; recovery key
-entry and creation (secret storage and key backup); the list of your account's sessions.
+entry and creation (secret storage and key backup); the list of your account's sessions; QR codes for the other device to scan (scanning with this computer's camera is not built).
 
-Not ported yet from the earlier all-C version: custom emoji and stickers, YouTube / X embeds, online status (presence), per-room notification levels, exploring
-a space's rooms, QR verification, voice and video calls. Everything has only been tested against the built-in fake homeserver so far, not against a real server.
+Not ported yet from the earlier all-C version: voice and video calls (and tweet pictures, sticker pack editing, scanning a QR code with a camera). Everything has only been tested against the built-in fake homeserver so far, not against a real server.
 This is a hobby project and has not been audited; do not rely on it for anything sensitive.
 
 ## Building
