@@ -46,6 +46,7 @@ struct State {
     media: BTreeMap<String, Vec<u8>>, /* uploaded files by id */
     emoji_pack: bool, /* the demo room has a custom emoji pack (media emoji_cat / emoji_wave are seeded with it) */
     presence: BTreeMap<String, String>, /* user local part -> presence state set by the user (bob is online unless set) */
+    members: Vec<String>, /* who has joined ROOM (local parts): alice and bob, plus whoever `add_member` added */
 }
 
 #[derive(Clone)]
@@ -176,6 +177,7 @@ impl FakeHs {
     pub async fn start() -> FakeHs {
         let server = Arc::new(MockServer::start().await);
         let st = Arc::new(Mutex::new(State::default()));
+        st.lock().unwrap().members = vec!["alice".into(), "bob".into()];
         for u in ["alice", "bob"] { st.lock().unwrap().media.insert(format!("av_{u}"), include_bytes!("avatar_demo.png").to_vec()); }
         let hs = FakeHs { server: server.clone(), st: st.clone() };
         let mount = |m: &'static str, re: &'static str, f: fn(&mut State, &str, &Request) -> Value| {
@@ -319,7 +321,8 @@ impl FakeHs {
         mount("GET", r"^/_matrix/client/v3/sync$", |st, who, _| {
             st.syncs += 1;
             let n = st.events.len();
-            let mut state_events = room_state(&["alice", "bob"]);
+            let member_names = st.members.clone();
+            let mut state_events = room_state(&member_names.iter().map(|s| s.as_str()).collect::<Vec<_>>());
             if st.emoji_pack {
                 state_events.push(json!({"type": "im.ponies.room_emotes", "state_key": "cats", "sender": "@alice:hs", "event_id": "$emotes", "origin_server_ts": 7, "content": {"pack": {"display_name": "Cats"},
                     "images": {"cat": {"url": "mxc://hs/emoji_cat", "info": {"w": 64, "h": 64, "mimetype": "image/png"}}, "wave": {"url": "mxc://hs/emoji_wave", "usage": ["sticker"], "info": {"w": 64, "h": 64, "mimetype": "image/png"}}}}}));
@@ -584,8 +587,8 @@ impl FakeHs {
             }
         }).await;
         mount("GET", r"^/_matrix/client/v3/voip/turnServer$", |_, _, _| json!({"uris": [], "username": "", "password": "", "ttl": 3600})).await;
-        mount("GET", r"^/_matrix/client/v3/rooms/[^/]+/members$", |_, _, _| {
-            let chunk: Vec<Value> = ["alice", "bob"].iter().enumerate().map(|(i, u)| { let mut e = member_event(u, 10 + i as u64); e["room_id"] = json!(ROOM); e }).collect();
+        mount("GET", r"^/_matrix/client/v3/rooms/[^/]+/members$", |st, _, _| {
+            let chunk: Vec<Value> = st.members.iter().map(|s| s.as_str()).enumerate().map(|(i, u)| { let mut e = member_event(u, 10 + i as u64); e["room_id"] = json!(ROOM); e }).collect();
             json!({"chunk": chunk})
         }).await;
         mount("GET", r"^/_matrix/client/v3/rooms/[^/]+/messages$", |st, _, req| {
@@ -657,6 +660,13 @@ impl FakeHs {
         let id = format!("!space{}:hs", st.counter);
         st.extra_rooms.push((id.clone(), name.into(), true, children.iter().map(|c| c.to_string()).collect()));
         id
+    }
+
+    /// Another person in `ROOM` (they sign in as that user): for tests with more than two people.
+    pub fn add_member(&self, name: &str) {
+        let mut st = self.st.lock().unwrap();
+        st.members.push(name.to_string());
+        st.media.insert(format!("av_{name}"), include_bytes!("avatar_demo.png").to_vec());
     }
 
     pub fn uri(&self) -> String { self.server.uri() }

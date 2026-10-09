@@ -65,7 +65,17 @@ pub struct Calls {
     audio: Arc<Mutex<AudioFactory>>,
     bind: Arc<Vec<String>>,
     video_sink: Arc<Mutex<Option<VideoDisplay>>>,
+    group_flag: Arc<Mutex<Arc<std::sync::atomic::AtomicBool>>>,
     active: Arc<Mutex<Option<Active>>>,
+}
+
+/// STUN/TURN servers the homeserver offers for calls (none: only direct connections then).
+pub(crate) async fn turn_servers(client: &Client) -> Vec<(Vec<String>, String, String)> {
+    use matrix_sdk::ruma::api::client::voip::get_turn_server_info::v3::Request;
+    match client.send(Request::new()).await {
+        Ok(r) if !r.uris.is_empty() => vec![(r.uris, r.username, r.password)],
+        _ => vec![],
+    }
 }
 
 fn now_ms() -> u64 {
@@ -81,6 +91,7 @@ impl Calls {
             audio: Arc::new(Mutex::new(audio)),
             bind: Arc::new(vec!["0.0.0.0:0".to_string()]),
             video_sink: Default::default(),
+            group_flag: Default::default(),
             active: Default::default(),
         };
         let handler = calls.clone();
@@ -124,11 +135,17 @@ impl Calls {
     }
 
     async fn ice_servers(&self) -> Vec<(Vec<String>, String, String)> {
-        use matrix_sdk::ruma::api::client::voip::get_turn_server_info::v3::Request;
-        match self.client.send(Request::new()).await {
-            Ok(r) if !r.uris.is_empty() => vec![(r.uris, r.username, r.password)],
-            _ => vec![],
-        }
+        turn_servers(&self.client).await
+    }
+
+    /// Whether a one-to-one call is going on (ringing, connecting or connected).
+    pub fn is_busy(&self) -> bool {
+        self.active.lock().unwrap().is_some()
+    }
+
+    /// The flag a group call raises while we are in one: no one-to-one call can start or ring then.
+    pub fn set_group_flag(&self, flag: Arc<std::sync::atomic::AtomicBool>) {
+        *self.group_flag.lock().unwrap() = flag;
     }
 
     fn display(&self) -> VideoDisplay {
@@ -161,7 +178,7 @@ impl Calls {
 
     /// Ring the other person in this room (a direct chat or any room with exactly two people).
     pub async fn place(&self, room_id: &str, video: bool) -> Result<(), String> {
-        if self.active.lock().unwrap().is_some() {
+        if self.active.lock().unwrap().is_some() || self.group_flag.lock().unwrap().load(std::sync::atomic::Ordering::Relaxed) {
             return Err("You are already in a call".into());
         }
         let rid = <&matrix_sdk::ruma::RoomId>::try_from(room_id).map_err(|e| e.to_string())?;
@@ -423,8 +440,8 @@ impl Calls {
         let content = &ev["content"];
         let sender = ev["sender"].as_str().unwrap_or("");
         let call_id = content["call_id"].as_str().unwrap_or("").to_string();
-        if call_id.is_empty() {
-            return;
+        if call_id.is_empty() || content[crate::group_calls::GROUP_KEY].is_string() {
+            return; /* a group call's connection: group_calls.rs handles it */
         }
         let from_me = sender == self.me();
         match ty {
