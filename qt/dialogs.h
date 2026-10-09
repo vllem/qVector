@@ -173,6 +173,7 @@ public:
     ~GroupCallDialog() override;
     void setState(const QJsonObject &s);
     GroupTiles *tiles() const { return tiles_; }
+    void useCamera();   /* start with the camera on (a video call) */
 protected:
     void closeEvent(QCloseEvent *) override;
 private:

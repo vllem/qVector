@@ -298,6 +298,12 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     connect(groupBtn_, &QToolButton::clicked, this, [this] {
         if (current_.isEmpty()) return;
         if (inGroup_ && groupDlg_) { groupDlg_->show(); groupDlg_->raise(); groupDlg_->activateWindow(); return; }
+        QMenu menu(this);
+        QAction *voice = menu.addAction("Voice call");
+        QAction *video = menu.addAction("Video call");
+        QAction *pick = menu.exec(groupBtn_->mapToGlobal(QPoint(0, groupBtn_->height())));
+        if (!pick) return;
+        groupVideo_ = pick == video;
         core_->call("join_group_call", {{"room_id", current_}});
     });
     bar->addWidget(topic_, 1);
@@ -1036,6 +1042,7 @@ void MainWindow::showGroupCall(const QJsonObject &state)
     inGroup_ = state["state"].toString() != "ended";
     if (!groupDlg_) { groupDlg_ = new GroupCallDialog(core_, this); groupDlg_->setAttribute(Qt::WA_DeleteOnClose); }
     groupDlg_->setState(state);
+    if (inGroup_ && groupVideo_) { groupVideo_ = false; groupDlg_->useCamera(); }
     if (inGroup_) { groupDlg_->show(); groupDlg_->raise(); groupDlg_->activateWindow(); }
     updateGroupButton();
 }

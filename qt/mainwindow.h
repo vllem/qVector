@@ -174,6 +174,7 @@ private:
     QPointer<GroupCallDialog> groupDlg_;
     QHash<QString, int> groupPeople_; /* room id -> how many others are in a call there */
     bool inGroup_ = false;
+    bool groupVideo_ = false;
     QToolButton *groupBtn_ = nullptr;
     void showGroupCall(const QJsonObject &state);
     void updateGroupButton();

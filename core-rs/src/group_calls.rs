@@ -27,8 +27,10 @@ use crate::video::Frame;
 
 pub const GROUP_KEY: &str = "dev.qvector.group_id";
 const MEMBER_EVENT: &str = "dev.qvector.call.member";
-/// An "active" entry older than this is a client that died without leaving.
-const STALE_MS: u64 = 12 * 3600 * 1000;
+/// While in a call we renew our entry this often...
+const HEARTBEAT_MS: u64 = 60_000;
+/// ...so an "active" entry older than this is a client that died without leaving.
+const STALE_MS: u64 = 3 * HEARTBEAT_MS;
 const FRAME: usize = crate::rtc_peer::FRAME;
 /// At most this many people (including us): every extra person costs every other person another connection and encoder.
 pub const MAX_PEOPLE: usize = 5;
@@ -114,6 +116,18 @@ impl GroupCalls {
                 let Ok(v) = ev.deserialize_as_unchecked::<Value>() else { return };
                 if v["type"] == MEMBER_EVENT {
                     c.on_member(&room, &v).await;
+                }
+            }
+        });
+        // entries of crashed clients run out of time; tell the UI when that happens
+        let me = calls.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(30));
+            while me.client.user_id().is_some() {
+                tick.tick().await;
+                let rooms: Vec<String> = me.presence.lock().unwrap().keys().cloned().collect();
+                for r in rooms {
+                    me.emit_presence(&r);
                 }
             }
         });
@@ -278,8 +292,19 @@ impl GroupCalls {
                 }
             }
         });
+        // renew our entry so others can tell a live call from a crashed client
+        let me = self.clone();
+        let (beat_room, beat_group) = (room.clone(), group_id.clone());
+        let heartbeat = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(HEARTBEAT_MS));
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                me.set_membership(&beat_room, &beat_group, true).await;
+            }
+        });
         if let Some(g) = self.group.lock().unwrap().as_mut() {
-            g.tasks = vec![mic, mixer];
+            g.tasks = vec![mic, mixer, heartbeat];
             self.emit("active", g);
         }
         self.set_membership(&room, &group_id, true).await;

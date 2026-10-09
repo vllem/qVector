@@ -341,6 +341,13 @@ GroupCallDialog::GroupCallDialog(Core *core, QWidget *parent) : QDialog(parent),
 
 GroupCallDialog::~GroupCallDialog() { stopCamera(); }
 
+void GroupCallDialog::useCamera()
+{
+    if (!camera_->isEnabled() || camera_->isChecked()) return;
+    camera_->setChecked(true);
+    cameraOn(true);
+}
+
 void GroupCallDialog::stopCamera()
 {
     if (cam_) cam_->stop();
