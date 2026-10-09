@@ -9,7 +9,7 @@ description = "Matrix core of the Vector desktop client, on matrix-sdk (E2EE by 
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-matrix-sdk = { version = "=0.19.1", default-features = false, features = ["e2e-encryption", "sqlite", "bundled-sqlite", "rustls-aws-lc-rs", "markdown", "unstable-msc4274"] }
+matrix-sdk = { version = "=0.19.1", default-features = false, features = ["e2e-encryption", "sqlite", "bundled-sqlite", "rustls-aws-lc-rs", "markdown", "qrcode", "unstable-msc4274"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
 serde_json = "1"
 matrix-sdk-store-encryption = "=0.19.1"

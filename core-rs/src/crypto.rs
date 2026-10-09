@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use futures_util::StreamExt;
 use matrix_sdk::{
-    encryption::verification::{SasState, SasVerification, Verification, VerificationRequest, VerificationRequestState},
+    encryption::verification::{QrVerification, QrVerificationState, SasState, SasVerification, Verification, VerificationRequest, VerificationRequestState},
     ruma::events::key::verification::request::ToDeviceKeyVerificationRequestEvent,
     Client,
 };
@@ -17,6 +17,7 @@ type Report = Arc<dyn Fn(String) + Send + Sync>;
 struct Flow {
     request: Option<VerificationRequest>,
     sas: Option<SasVerification>,
+    qr: Option<QrVerification>,
     generation: u64,
 }
 
@@ -26,6 +27,8 @@ pub struct Verifier {
     client: Client,
     flow: Arc<Mutex<Flow>>,
     report: Report,
+    /// offer a QR code for the other device to scan (when it can) instead of going straight to the emoji comparison
+    qr_on: bool,
 }
 
 fn idle() -> String { json!({"state": "idle"}).to_string() }
@@ -33,7 +36,7 @@ fn idle() -> String { json!({"state": "idle"}).to_string() }
 impl Verifier {
     /// `report` is called with a JSON state ({"state": "idle|incoming|waiting|emoji|confirmed|done|cancelled", ...}) whenever it changes.
     pub fn new(client: Client, report: impl Fn(String) + Send + Sync + 'static) -> Verifier {
-        let v = Verifier { client: client.clone(), flow: Arc::new(Mutex::new(Flow::default())), report: Arc::new(report) };
+        let v = Verifier { client: client.clone(), flow: Arc::new(Mutex::new(Flow::default())), report: Arc::new(report), qr_on: false };
         /* requests from our other sessions arrive as to-device events during sync */
         let handler = v.clone();
         client.add_event_handler(move |ev: ToDeviceKeyVerificationRequestEvent, c: Client| {
@@ -55,6 +58,9 @@ impl Verifier {
         });
         v
     }
+
+    /// Show a QR code for the other device to scan whenever it can (the emoji comparison stays available): returns a verifier that does so.
+    pub fn with_qr(mut self) -> Verifier { self.qr_on = true; self }
 
     /// Ask another person to verify each other (in the direct chat with them; the SDK creates it if there is none).
     pub async fn request_user(&self, user_id: &str) -> Result<(), String> {
@@ -83,16 +89,25 @@ impl Verifier {
         req.accept().await.map_err(|e| e.to_string())
     }
 
-    /// The emoji match.
+    /// Compare emoji instead of using the QR code.
+    pub async fn use_emoji(&self) -> Result<(), String> {
+        let req = self.flow.lock().unwrap().request.clone().ok_or("no verification is running")?;
+        req.start_sas().await.map(|_| ()).map_err(|e| e.to_string())
+    }
+
+    /// The emoji match, or the other device scanned our QR code.
     pub async fn confirm(&self) -> Result<(), String> {
-        let sas = self.flow.lock().unwrap().sas.clone().ok_or("no emoji comparison is running")?;
-        sas.confirm().await.map_err(|e| e.to_string())
+        let (sas, qr) = { let f = self.flow.lock().unwrap(); (f.sas.clone(), f.qr.clone()) };
+        if let Some(sas) = sas { return sas.confirm().await.map_err(|e| e.to_string()); }
+        qr.ok_or("nothing to confirm")?.confirm().await.map_err(|e| e.to_string())
     }
 
     /// Decline, or the emoji do not match.
     pub async fn cancel(&self) -> Result<(), String> {
-        let (req, sas) = { let f = self.flow.lock().unwrap(); (f.request.clone(), f.sas.clone()) };
-        if let Some(s) = sas { s.cancel().await.map_err(|e| e.to_string())?; } else if let Some(r) = req { r.cancel().await.map_err(|e| e.to_string())?; }
+        let (req, sas, qr) = { let f = self.flow.lock().unwrap(); (f.request.clone(), f.sas.clone(), f.qr.clone()) };
+        if let Some(s) = sas { s.cancel().await.map_err(|e| e.to_string())?; }
+        else if let Some(q) = qr { q.cancel().await.map_err(|e| e.to_string())?; }
+        else if let Some(r) = req { r.cancel().await.map_err(|e| e.to_string())?; }
         Ok(())
     }
 
@@ -103,16 +118,20 @@ impl Verifier {
     }
 
     fn adopt(&self, request: VerificationRequest) {
-        let gen = { let mut f = self.flow.lock().unwrap(); f.generation += 1; f.request = Some(request.clone()); f.sas = None; f.generation };
+        let gen = { let mut f = self.flow.lock().unwrap(); f.generation += 1; f.request = Some(request.clone()); f.sas = None; f.qr = None; f.generation };
         let me = self.clone();
         tokio::spawn(async move {
             let mut changes = request.changes();
-            if matches!(request.state(), VerificationRequestState::Ready { .. }) && request.we_started() { let _ = request.start_sas().await; }
+            if matches!(request.state(), VerificationRequestState::Ready { .. }) { me.ready(&request, gen).await; }
             me.publish_request(&request);
             while let Some(state) = changes.next().await {
                 if me.flow.lock().unwrap().generation != gen { return; }
                 match state {
-                    VerificationRequestState::Ready { .. } if request.we_started() => { let _ = request.start_sas().await; }
+                    VerificationRequestState::Ready { .. } => { me.ready(&request, gen).await; }
+                    VerificationRequestState::Transitioned { verification: Verification::QrV1(qr) } => {
+                        let known = me.flow.lock().unwrap().qr.is_some();
+                        if !known { me.flow.lock().unwrap().qr = Some(qr.clone()); let inner = me.clone(); tokio::spawn(async move { inner.watch_qr(qr, gen).await }); }
+                    }
                     VerificationRequestState::Transitioned { verification: Verification::SasV1(sas) } => {
                         me.flow.lock().unwrap().sas = Some(sas.clone());
                         let inner = me.clone();
@@ -124,6 +143,52 @@ impl Verifier {
                 me.publish_request(&request);
             }
         });
+    }
+
+    /// Both sides are ready: show a QR code when the other one can scan it, else (when we asked) start the emoji comparison.
+    async fn ready(&self, request: &VerificationRequest, gen: u64) {
+        if self.qr_on {
+            if let Ok(Some(qr)) = request.generate_qr_code().await {
+                self.flow.lock().unwrap().qr = Some(qr.clone());
+                let me = self.clone();
+                tokio::spawn(async move { me.watch_qr(qr, gen).await });
+                return;
+            }
+        }
+        if request.we_started() { let _ = request.start_sas().await; }
+    }
+
+    async fn watch_qr(&self, qr: QrVerification, gen: u64) {
+        let mut changes = qr.changes();
+        self.publish_qr(&qr, &qr.state());
+        while let Some(state) = changes.next().await {
+            { let f = self.flow.lock().unwrap(); if f.generation != gen || f.sas.is_some() { return; } } /* dismissed, or the emoji comparison took over */
+            self.publish_qr(&qr, &state);
+        }
+    }
+
+    fn publish_qr(&self, qr: &QrVerification, state: &QrVerificationState) {
+        let user = qr.other_user_id().to_string();
+        let v: Value = match state {
+            QrVerificationState::Started => match qr.to_qr_code() {
+                Ok(code) => {
+                    let w = code.width();
+                    let colors = code.to_colors();
+                    let rows: Vec<String> = colors.chunks(w).map(|r| r.iter().map(|c| c.select('1', '0')).collect()).collect();
+                    json!({"state": "qr", "user": user, "qr": {"size": w, "rows": rows}})
+                }
+                Err(e) => json!({"state": "cancelled", "user": user, "reason": format!("cannot make the QR code: {e}")}),
+            },
+            QrVerificationState::Scanned => json!({"state": "qr_scanned", "user": user}),
+            QrVerificationState::Reciprocated | QrVerificationState::Confirmed => json!({"state": "waiting", "user": user}),
+            QrVerificationState::Done { .. } => {
+                let (client, uid) = (self.client.clone(), qr.other_user_id().to_owned());
+                tokio::spawn(async move { let _ = client.encryption().request_user_identity(&uid).await; });
+                json!({"state": "done", "user": user})
+            }
+            QrVerificationState::Cancelled(info) => json!({"state": "cancelled", "user": user, "reason": info.reason()}),
+        };
+        (self.report)(v.to_string());
     }
 
     async fn watch_sas(&self, sas: SasVerification, gen: u64) {
@@ -139,6 +204,7 @@ impl Verifier {
     }
 
     fn publish_request(&self, r: &VerificationRequest) {
+        if self.flow.lock().unwrap().qr.is_some() && !r.is_done() && !r.is_cancelled() { return; } /* the QR code's own states are reported */
         let other = String::new(); /* the request does not name the other session until it moves to the emoji step */
         let user = r.other_user_id().to_string();
         let state = if r.is_done() { "done" } else if r.is_cancelled() { "cancelled" } else {
@@ -333,6 +399,58 @@ mod tests {
         assert_eq!(emoji.0, emoji.1, "both sides show the same emoji");
         assert_eq!(last(&s1)["state"], "done", "{:?}", s1.lock().unwrap());
         assert_eq!(last(&s2)["state"], "done");
+        for _ in 0..20 { crate::sync_once(&two).await.unwrap(); two.encryption().request_user_identity(&me).await.unwrap(); tokio::time::sleep(Duration::from_millis(100)).await; if session_status(&two).await["verified"] == true { break; } }
+        assert_eq!(session_status(&two).await["verified"], true, "the second session is cross-signed now");
+    }
+
+    #[tokio::test]
+    async fn a_qr_code_shown_by_one_session_is_scanned_by_the_other_and_confirmed() {
+        use matrix_sdk::encryption::verification::QrVerificationData;
+        let hs = FakeHs::start().await;
+        let (d1, d2) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let one = crate::session::sign_in(d1.path(), &hs.uri(), "alice", "x", None, "first").await.unwrap();
+        one.encryption().bootstrap_cross_signing(None).await.unwrap();
+        crate::sync_once(&one).await.unwrap();
+        let two = second_session(&hs, d2.path()).await;
+        crate::sync_once(&two).await.unwrap();
+        let me = two.user_id().unwrap().to_owned();
+        two.encryption().request_user_identity(&me).await.unwrap();
+        one.encryption().request_user_identity(&me).await.unwrap();
+
+        let (s1, s2): (Arc<Mutex<Vec<Value>>>, Arc<Mutex<Vec<Value>>>) = Default::default();
+        let (c1, c2) = (s1.clone(), s2.clone());
+        let v1 = Verifier::new(one.clone(), move |s| c1.lock().unwrap().push(serde_json::from_str(&s).unwrap())).with_qr();
+        let v2 = Verifier::new(two.clone(), move |s| c2.lock().unwrap().push(serde_json::from_str(&s).unwrap())).with_qr();
+        v2.request_own().await.unwrap();
+
+        let (mut accepted, mut scanned, mut confirmed) = (false, false, false);
+        for _ in 0..300 {
+            crate::sync_once(&one).await.unwrap();
+            crate::sync_once(&two).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let (a, b) = (last(&s1), last(&s2));
+            if a["state"] == "incoming" && !accepted { /* this session can scan, like a phone: the SDK itself has no camera, so it only offers to show a code */
+                accepted = true;
+                use matrix_sdk::ruma::events::key::verification::VerificationMethod as M;
+                let req1 = v1.flow.lock().unwrap().request.clone().unwrap();
+                req1.accept_with_methods(vec![M::SasV1, M::QrCodeScanV1, M::QrCodeShowV1, M::ReciprocateV1]).await.unwrap();
+            }
+            if b["state"] == "qr" && !scanned {
+                scanned = true;
+                let rows = b["qr"]["rows"].as_array().unwrap();
+                assert_eq!(rows.len() as u64, b["qr"]["size"].as_u64().unwrap(), "a square of modules");
+                assert!(rows.iter().all(|r| r.as_str().unwrap().len() == rows.len() && r.as_str().unwrap().chars().all(|c| c == '0' || c == '1')));
+                /* the other device scans it (a camera would hand over these bytes) */
+                let bytes = v2.flow.lock().unwrap().qr.clone().unwrap().to_bytes().unwrap();
+                let req1 = v1.flow.lock().unwrap().request.clone().unwrap();
+                assert!(req1.scan_qr_code(QrVerificationData::from_bytes(bytes).unwrap()).await.unwrap().is_some());
+            }
+            if b["state"] == "qr_scanned" && !confirmed { confirmed = true; v2.confirm().await.unwrap(); }
+            if a["state"] == "done" && b["state"] == "done" { break; }
+        }
+        assert!(accepted && scanned && confirmed, "{accepted} {scanned} {confirmed}; first: {:?}; second: {:?}", s1.lock().unwrap(), s2.lock().unwrap());
+        assert_eq!(last(&s2)["state"], "done", "{:?}", s2.lock().unwrap());
+        assert_eq!(last(&s1)["state"], "done", "{:?}", s1.lock().unwrap());
         for _ in 0..20 { crate::sync_once(&two).await.unwrap(); two.encryption().request_user_identity(&me).await.unwrap(); tokio::time::sleep(Duration::from_millis(100)).await; if session_status(&two).await["verified"] == true { break; } }
         assert_eq!(session_status(&two).await["verified"], true, "the second session is cross-signed now");
     }

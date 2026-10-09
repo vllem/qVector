@@ -1396,6 +1396,12 @@ void MainWindow::dialogForDemo(const QString &which)
     else if (which == "saved") showSaved();
     else if (which == "prefs") showPreferences();
     else if (which == "recovery") showRecovery(false);
+    else if (which == "verifyqr") {
+        QJsonArray rows;
+        const int n = 25;
+        for (int y = 0; y < n; y++) { QString r; for (int x = 0; x < n; x++) r += ((x * 7 + y * 13 + x * y) % 5 < 2 || (x < 7 && y < 7 && (x == 0 || y == 0 || x == 6 || y == 6)) ? '1' : '0'); rows.append(r); }
+        showVerify(QJsonObject{{"state", "qr"}, {"user", "@zach:example.org"}, {"qr", QJsonObject{{"size", n}, {"rows", rows}}}});
+    }
     else if (which == "verify") showVerify(QJsonObject{{"state", "emoji"}, {"user", "@zach:example.org"}, {"emoji", QJsonArray{QJsonArray{"\U0001F436", "Dog"}, QJsonArray{"\U0001F431", "Cat"}, QJsonArray{"\U0001F981", "Lion"}, QJsonArray{"\U0001F40E", "Horse"}, QJsonArray{"\U0001F984", "Unicorn"}, QJsonArray{"\U0001F437", "Pig"}, QJsonArray{"\U0001F418", "Elephant"}}}, {"decimals", QJsonArray{123, 456, 789}}});
     else if (which == "settings") roomSettings();
     else if (which == "explore") {

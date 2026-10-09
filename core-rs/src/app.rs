@@ -241,6 +241,7 @@ impl App {
             }
             "request_verification" => self.verification(|v, i| async move { if let Err(e) = v.request_own().await { i.emit("verification", json!({"state": "cancelled", "reason": e}).to_string()); } }),
             "request_user_verification" => { let u = s(args, "user_id"); self.verification(move |v, i| async move { if let Err(e) = v.request_user(&u).await { i.emit("verification", json!({"state": "cancelled", "reason": e, "user": u}).to_string()); } }) }
+            "emoji_verification" => self.verification(|v, i| async move { if let Err(e) = v.use_emoji().await { i.notice(format!("Cannot start the emoji comparison: {e}")); } }),
             "accept_verification" => self.verification(|v, _| async move { let _ = v.accept().await; }),
             "confirm_verification" => self.verification(|v, _| async move { let _ = v.confirm().await; }),
             "cancel_verification" => self.verification(|v, _| async move { let _ = v.cancel().await; }),
@@ -653,7 +654,7 @@ async fn start_session(i: Arc<Inner>, client: Client, secret: String) {
     *i.client.lock().unwrap() = Some(client.clone());
     *i.secret.lock().unwrap() = Some(secret.clone());
     let sink = i.clone();
-    *i.verifier.lock().unwrap() = Some(Verifier::new(client.clone(), move |json| sink.emit("verification", json)));
+    *i.verifier.lock().unwrap() = Some(Verifier::new(client.clone(), move |json| sink.emit("verification", json)).with_qr());
     if i.pref("messageIndex") == "1" { i.open_index(); }
     if i.pref("linkPreviews") == "1" { i.previews_on.store(true, Ordering::Relaxed); }
     if i.pref("embeds") == "1" { i.embeds_on.store(true, Ordering::Relaxed); }

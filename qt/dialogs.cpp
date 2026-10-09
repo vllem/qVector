@@ -253,6 +253,30 @@ void VerifyDialog::setState(const QJsonObject &s)
         text(own ? "Waiting for your other session to accept. Open Element or another qVector on it and accept the verification request."
                  : "Waiting for " + user + " to accept the request in their client...", muted);
         buttons({{"Cancel", [c] { c->call("cancel_verification"); }}}, false);
+    } else if (st == "qr") { /* the other device scans this code (a phone's camera); or compare emoji instead */
+        text(own ? "On your other session choose \"Scan QR code\" and point its camera at this code."
+                 : "Ask " + user + " to scan this code with their device (choose \"Scan QR code\" in their client).", muted);
+        const QJsonObject qr = s["qr"].toObject();
+        const int n = qr["size"].toInt(), scale = 6, quiet = 4;
+        if (n > 0) {
+            QImage img((n + 2 * quiet) * scale, (n + 2 * quiet) * scale, QImage::Format_RGB32);
+            img.fill(Qt::white); /* a QR code is black on white whatever the theme: scanners need the contrast and the quiet border */
+            const QJsonArray rows = qr["rows"].toArray();
+            for (int y = 0; y < n && y < rows.size(); y++) {
+                const QString r = rows[y].toString();
+                for (int x = 0; x < n && x < r.size(); x++)
+                    if (r[x] == '1') for (int dy = 0; dy < scale; dy++) for (int dx = 0; dx < scale; dx++) img.setPixel((x + quiet) * scale + dx, (y + quiet) * scale + dy, qRgb(0, 0, 0));
+            }
+            auto *l = new QLabel;
+            l->setPixmap(QPixmap::fromImage(img));
+            l->setAlignment(Qt::AlignCenter);
+            lay_->addWidget(l);
+        }
+        buttons({{"Compare emoji instead", [c] { c->call("emoji_verification"); }}, {"Cancel", [c] { c->call("cancel_verification"); }}}, false);
+    } else if (st == "qr_scanned") {
+        text(own ? "Your other session scanned the code. Does it say it scanned this session's code? Then confirm."
+                 : user + " scanned the code. Confirm if they say it worked.", muted);
+        buttons({{"Confirm", [c] { c->call("confirm_verification"); }}, {"Cancel", [c] { c->call("cancel_verification"); }}}, true);
     } else if (st == "emoji" || st == "confirmed") {
         text(own ? "Check that these emoji appear, in the same order, on your other session."
                  : "Check that these emoji appear, in the same order, for " + user + ". Compare them over a call or in person, not in this chat.", muted);
