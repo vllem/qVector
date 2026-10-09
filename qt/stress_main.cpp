@@ -19,6 +19,7 @@ using namespace vc;
 
 static int failures = 0;
 static QString only;
+static double excludedMs = 0; /* time a step spent building its own input, not the view's cost */
 #ifdef QT_NO_DEBUG
 static const double SLACK = 1;
 #else
@@ -30,9 +31,10 @@ template <class F> static void step(const char *name, double budgetMs, F f)
     if (!only.isEmpty() && !QString(name).contains(only, Qt::CaseInsensitive)) return;
     QElapsedTimer t;
     t.start();
+    excludedMs = 0;
     f();
     QApplication::processEvents(); /* the layout that was only scheduled */
-    const double ms = t.nsecsElapsed() / 1e6;
+    const double ms = t.nsecsElapsed() / 1e6 - excludedMs;
     const bool ok = ms <= budgetMs * SLACK;
     std::printf("%-58s %9.1f ms  (budget %.0f)  %s\n", name, ms, budgetMs * SLACK, ok ? "ok" : "TOO SLOW");
     std::fflush(stdout);
@@ -85,7 +87,7 @@ int main(int argc, char **argv)
         QJsonArray rows = messages(50000);
         qint64 build = 0; /* the harness copy of the array (QJsonArray detaches on append) is not the view's cost */
         for (int i = 0; i < 300; i++) { QElapsedTimer b; b.start(); rows.append(message(50000 + i, "new")); build += b.nsecsElapsed(); tl.setRows(rows); app.processEvents(); }
-        std::printf("    (of which %.0f ms is the test building its own array)\n", build / 1e6);
+        excludedMs = build / 1e6;
     });
     step("timeline: 20 000 event-id look-ups (reply, reaction, jump)", 300, [&] {
         tl.setRows(messages(20000));
