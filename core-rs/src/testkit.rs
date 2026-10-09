@@ -583,6 +583,7 @@ impl FakeHs {
                 _ => json!({"rooms": all}),
             }
         }).await;
+        mount("GET", r"^/_matrix/client/v3/voip/turnServer$", |_, _, _| json!({"uris": [], "username": "", "password": "", "ttl": 3600})).await;
         mount("GET", r"^/_matrix/client/v3/rooms/[^/]+/members$", |_, _, _| {
             let chunk: Vec<Value> = ["alice", "bob"].iter().enumerate().map(|(i, u)| { let mut e = member_event(u, 10 + i as u64); e["room_id"] = json!(ROOM); e }).collect();
             json!({"chunk": chunk})

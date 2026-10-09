@@ -173,4 +173,5 @@ pub mod bookmarks;
 pub mod ui;
 pub mod emotes;
 pub mod rtc_peer;
+pub mod calls;
 pub use ui::{ui_messages, ui_rooms, UiMessage, UiRoom};
