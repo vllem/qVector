@@ -27,6 +27,7 @@ cpal = "0.18.2"
 rtc = "0.21"
 async-trait = "0.1.92"
 bytes = "1.12.1"
+openh264 = "0.9.8"
 
 # Quicker to compile than release (no LTO, many codegen units, incremental) and fast enough to run: used by the dev/test builds.
 [profile.fast]

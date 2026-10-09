@@ -175,4 +175,5 @@ pub mod emotes;
 pub mod rtc_peer;
 pub mod calls;
 pub mod calls_audio;
+pub mod video;
 pub use ui::{ui_messages, ui_rooms, UiMessage, UiRoom};
