@@ -41,6 +41,7 @@ struct Inner {
     timeline: tokio::sync::Mutex<Option<Arc<Timeline>>>,
     thread: tokio::sync::Mutex<Option<Arc<Timeline>>>,
     images: Mutex<HashMap<String, PathBuf>>,
+    opening: Mutex<HashSet<String>>, /* attachments being downloaded for opening: a second click while one runs is ignored */
     previews: Mutex<HashMap<String, Option<ui::UiPreview>>>,
     index: Mutex<Option<Arc<Mutex<MessageIndex>>>>,
     avatars: crate::avatars::Avatars,
@@ -122,7 +123,7 @@ impl App {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("tokio runtime");
         let inner = Arc::new(Inner {
             sink, data_dir: Mutex::new(data_dir), client: Mutex::new(None), secret: Mutex::new(None), verifier: Mutex::new(None), calls: Mutex::new(None), video_sink: Mutex::new(None), groups: Mutex::new(None), tasks: Mutex::new(Tasks::default()),
-            timeline: Default::default(), thread: Default::default(), images: Default::default(), previews: Default::default(), index: Default::default(), avatars: Default::default(), user_mxc: Default::default(),
+            timeline: Default::default(), thread: Default::default(), images: Default::default(), opening: Default::default(), previews: Default::default(), index: Default::default(), avatars: Default::default(), user_mxc: Default::default(),
             bookmarks: Default::default(), focused: AtomicBool::new(true), previews_on: AtomicBool::new(false), busy: AtomicBool::new(false),
             screen: Mutex::new("login".into()),
             #[cfg(feature = "testkit")]
@@ -584,13 +585,18 @@ impl App {
     /// or "media_file" (the UI plays it itself: payload = {"event_id", "path"}).
     fn open_attachment(&self, event_id: &str, event: &'static str) -> Value {
         let (i, id) = (self.inner.clone(), event_id.to_string());
+        if !i.opening.lock().unwrap().insert(format!("{event}|{id}")) { return Value::Null; }
         self.rt().spawn(async move {
-            let (Some(client), Some(tl)) = (i.client(), i.open_timeline_of().await) else { return };
-            match ui::media_copy(&client, &tl, &id, &i.dir().join("media").join("open")).await {
-                Ok(path) if event == "media_file" => i.emit_json("media_file", &json!({"event_id": id, "path": path.to_string_lossy()})),
-                Ok(path) => i.emit(event, path.to_string_lossy().into_owned()),
-                Err(e) => i.notice(format!("Cannot open: {e}")),
-            }
+            let key = format!("{event}|{id}");
+            if let (Some(client), Some(tl)) = (i.client(), i.open_timeline_of().await) {
+                let done = ui::media_copy(&client, &tl, &id, &i.dir().join("media").join("open")).await;
+                i.opening.lock().unwrap().remove(&key);
+                match done {
+                    Ok(path) if event == "media_file" => i.emit_json("media_file", &json!({"event_id": id, "path": path.to_string_lossy()})),
+                    Ok(path) => i.emit(event, path.to_string_lossy().into_owned()),
+                    Err(e) => i.notice(format!("Cannot open: {e}")),
+                }
+            } else { i.opening.lock().unwrap().remove(&key); }
         });
         Value::Null
     }
