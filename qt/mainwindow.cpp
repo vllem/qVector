@@ -278,22 +278,22 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     topic_->setTextFormat(Qt::PlainText);
     topic_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     membersBtn_ = new QToolButton;
-    membersBtn_->setAutoRaise(true);
+    membersBtn_->setAutoRaise(false);
     membersBtn_->setToolTip("Show or hide the member list (Ctrl+M)");
     callBtn_ = new QToolButton;
-    callBtn_->setAutoRaise(true);
+    callBtn_->setAutoRaise(false);
     callBtn_->setText("Call");
     callBtn_->setToolTip("Voice call");
     callBtn_->hide();
     connect(callBtn_, &QToolButton::clicked, this, [this] { if (!current_.isEmpty()) core_->call("place_call", {{"room_id", current_}}); });
     videoBtn_ = new QToolButton;
-    videoBtn_->setAutoRaise(true);
+    videoBtn_->setAutoRaise(false);
     videoBtn_->setText("Video call");
     videoBtn_->setToolTip("Video call");
     videoBtn_->hide();
     connect(videoBtn_, &QToolButton::clicked, this, [this] { if (!current_.isEmpty()) core_->call("place_call", {{"room_id", current_}, {"video", true}}); });
     groupBtn_ = new QToolButton;
-    groupBtn_->setAutoRaise(true);
+    groupBtn_->setAutoRaise(false);
     groupBtn_->hide();
     connect(groupBtn_, &QToolButton::clicked, this, [this] {
         if (current_.isEmpty()) return;
