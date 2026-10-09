@@ -21,6 +21,12 @@ serde = { version = "1", features = ["derive"] }
 matrix-sdk-ui = { version = "=0.19.1", default-features = false, features = ["unstable-msc4274"] }
 futures-util = "0.3"
 wiremock = { version = "0.6", optional = true }
+webrtc = "0.21.0"
+opus = "0.4.0"
+cpal = "0.18.2"
+rtc = "0.21"
+async-trait = "0.1.92"
+bytes = "1.12.1"
 
 # Quicker to compile than release (no LTO, many codegen units, incremental) and fast enough to run: used by the dev/test builds.
 [profile.fast]
