@@ -29,12 +29,29 @@ void Core::trampoline(void *user, const char *name, const char *json)
 Core::Core(const QString &dataDir, QObject *parent) : QObject(parent)
 {
     app_ = vcr_app_new(dataDir.toUtf8().constData(), &Core::trampoline, this);
+    vcr_video_set_sink(app_, &Core::pictureTrampoline, this);
 }
 
 Core::~Core()
 {
     vcr_app_free(app_); /* stops the engine's threads: no event arrives after this */
     app_ = nullptr;
+}
+
+/* a decoder thread calls this; the buffer is only valid now, so copy the picture */
+void Core::pictureTrampoline(void *user, int width, int height, const unsigned char *rgba)
+{
+    Core *self = static_cast<Core *>(user);
+    const QImage img = QImage(rgba, width, height, width * 4, QImage::Format_RGBA8888).copy();
+    QMetaObject::invokeMethod(self, [self, img] { emit self->remoteFrame(img); }, Qt::QueuedConnection);
+}
+
+void Core::pushVideo(const QImage &picture)
+{
+    if (!app_ || picture.isNull()) return;
+    const QImage img = picture.format() == QImage::Format_RGBA8888 ? picture : picture.convertToFormat(QImage::Format_RGBA8888);
+    if (img.bytesPerLine() != img.width() * 4) return; /* the engine wants rows without padding */
+    vcr_video_push(app_, img.width(), img.height(), img.constBits());
 }
 
 QJsonValue Core::call(const char *method, const QJsonObject &args)

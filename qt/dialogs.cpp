@@ -9,7 +9,13 @@
 #include <QFontDatabase>
 #include <QFormLayout>
 #include <QImageReader>
+#include <QCamera>
 #include <QKeyEvent>
+#include <QMediaCaptureSession>
+#include <QMediaDevices>
+#include <QPainter>
+#include <QVideoFrame>
+#include <QVideoSink>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QShortcut>
@@ -199,6 +205,35 @@ void VerifyDialog::closeEvent(QCloseEvent *ev)
     ev->accept();
 }
 
+CallVideo::CallVideo(QWidget *parent) : QWidget(parent)
+{
+    setMinimumSize(360, 240);
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+}
+
+void CallVideo::paintEvent(QPaintEvent *)
+{
+    QPainter p(this);
+    p.fillRect(rect(), QColor(24, 24, 28));
+    if (!remote_.isNull()) {
+        const QSize s = remote_.size().scaled(size(), Qt::KeepAspectRatio);
+        p.setRenderHint(QPainter::SmoothPixmapTransform);
+        p.drawImage(QRect(QPoint((width() - s.width()) / 2, (height() - s.height()) / 2), s), remote_);
+    }
+    if (!note_.isEmpty()) {
+        p.setPen(QColor(200, 200, 205));
+        p.drawText(rect(), Qt::AlignCenter, note_);
+    }
+    if (!local_.isNull()) {
+        const int w = qMin(180, width() / 3);
+        const QSize s = local_.size().scaled(w, w, Qt::KeepAspectRatio);
+        const QRect r(QPoint(width() - s.width() - 10, height() - s.height() - 10), s);
+        p.drawImage(r, local_);
+        p.setPen(QPen(QColor(255, 255, 255, 160), 1));
+        p.drawRect(r.adjusted(0, 0, -1, -1));
+    }
+}
+
 CallDialog::CallDialog(Core *core, QWidget *parent) : QDialog(parent), core_(core)
 {
     setWindowTitle("Voice call");
@@ -216,22 +251,90 @@ CallDialog::CallDialog(Core *core, QWidget *parent) : QDialog(parent), core_(cor
     status_->setAlignment(Qt::AlignCenter);
     lay->addWidget(name_);
     lay->addWidget(status_);
+    video_ = new CallVideo;
+    video_->hide();
+    lay->addWidget(video_, 1);
     lay->addSpacing(8);
     auto *row = new QHBoxLayout;
     answer_ = new QPushButton("Answer");
     mute_ = new QPushButton("Mute");
     mute_->setCheckable(true);
+    camera_ = new QPushButton("Camera");
+    camera_->setCheckable(true);
+    camera_->hide();
     hangup_ = new QPushButton("Hang up");
     row->addWidget(answer_);
     row->addWidget(mute_);
+    row->addWidget(camera_);
     row->addWidget(hangup_);
     lay->addLayout(row);
     connect(answer_, &QPushButton::clicked, this, [this] { core_->call("answer_call"); answer_->setEnabled(false); });
     connect(mute_, &QPushButton::clicked, this, [this](bool on) { core_->call("set_call_muted", {{"muted", on}}); });
+    connect(camera_, &QPushButton::clicked, this, [this](bool on) { cameraOn(on); });
     connect(hangup_, &QPushButton::clicked, this, [this] { core_->call("hangup_call"); });
+    connect(core_, &Core::remoteFrame, this, [this](const QImage &img) {
+        gotRemote_ = true;
+        video_->setRemote(img);
+        if (remoteShows_) video_->setNote(QString());
+    });
     timer_ = new QTimer(this);
     timer_->setInterval(1000);
     connect(timer_, &QTimer::timeout, this, [this] { tick(); });
+}
+
+CallDialog::~CallDialog() { stopCamera(); }
+
+void CallDialog::stopCamera()
+{
+    if (cam_) cam_->stop();
+    delete session_; /* owns nothing; the camera and the sink are children of this dialog */
+    session_ = nullptr;
+    delete cam_;
+    cam_ = nullptr;
+    delete sink_;
+    sink_ = nullptr;
+    video_->setLocal(QImage());
+}
+
+/* Start or stop sending our camera. The picture is shrunk to what the engine encodes and limited to about 15 per second. */
+void CallDialog::cameraOn(bool on)
+{
+    if (!on) {
+        stopCamera();
+        core_->call("set_call_camera", {{"on", false}});
+        return;
+    }
+    const auto devices = QMediaDevices::videoInputs();
+    if (devices.isEmpty()) {
+        camera_->setChecked(false);
+        camera_->setEnabled(false);
+        camera_->setToolTip("No camera found");
+        return;
+    }
+    cam_ = new QCamera(devices.first(), this);
+    sink_ = new QVideoSink(this);
+    session_ = new QMediaCaptureSession(this);
+    session_->setCamera(cam_);
+    session_->setVideoSink(sink_);
+    sent_.start();
+    connect(sink_, &QVideoSink::videoFrameChanged, this, [this](const QVideoFrame &fr) {
+        if (!fr.isValid() || sent_.elapsed() < 66) return;
+        sent_.restart();
+        QImage img = fr.toImage();
+        if (img.isNull()) return;
+        img = img.convertToFormat(QImage::Format_RGBA8888);
+        if (img.width() > 640 || img.height() > 480) img = img.scaled(640, 480, Qt::KeepAspectRatio, Qt::FastTransformation);
+        core_->pushVideo(img);
+        video_->setLocal(img.mirrored(true, false)); /* a mirror, as people expect of a self-view */
+    });
+    connect(cam_, &QCamera::errorOccurred, this, [this](QCamera::Error, const QString &msg) {
+        camera_->setChecked(false);
+        camera_->setToolTip(msg);
+        stopCamera();
+        core_->call("set_call_camera", {{"on", false}});
+    });
+    cam_->start();
+    core_->call("set_call_camera", {{"on", true}});
 }
 
 void CallDialog::tick()
@@ -250,8 +353,19 @@ void CallDialog::setState(const QJsonObject &s)
     const bool incoming = s["incoming"].toBool();
     answer_->setVisible(st == "incoming");
     answer_->setEnabled(true);
-    mute_->setVisible(st == "connecting" || st == "connected");
+    const bool live = st == "connecting" || st == "connected";
+    mute_->setVisible(live);
     mute_->setChecked(s["muted"].toBool());
+    hasVideo_ = s["video"].toBool();
+    remoteShows_ = s["remote_video"].toBool(true);
+    setWindowTitle(hasVideo_ ? "Video call" : "Voice call");
+    video_->setVisible(hasVideo_ && st != "ended");
+    camera_->setVisible(hasVideo_ && live);
+    if (st == "incoming" || st == "outgoing") { gotRemote_ = false; video_->setRemote(QImage()); camera_->setChecked(false); }
+    if (hasVideo_) {
+        setMinimumWidth(560);
+        video_->setNote(!live ? QString() : !remoteShows_ ? name_->text() + "'s camera is off" : gotRemote_ ? QString() : "Waiting for the picture...");
+    }
     hangup_->setText(st == "incoming" ? "Decline" : "Hang up");
     hangup_->setVisible(st != "ended");
     if (st == "incoming") status_->setText("Incoming call");
@@ -260,6 +374,7 @@ void CallDialog::setState(const QJsonObject &s)
     else if (st == "connected") { if (!was) since_.start(); tick(); timer_->start(); }
     else if (st == "ended") {
         timer_->stop();
+        stopCamera();
         const QString r = s["reason"].toString();
         status_->setText(r == "user_busy" ? "Busy" : r == "invite_timeout" ? (incoming ? "Missed call" : "No answer") : r == "rejected" ? "Declined" : r == "ice_failed" || r == "ice_timeout" || r == "error" ? "The call failed" : "Call ended");
         QTimer::singleShot(2500, this, &QDialog::close);
@@ -268,6 +383,7 @@ void CallDialog::setState(const QJsonObject &s)
 
 void CallDialog::closeEvent(QCloseEvent *ev)
 {
+    stopCamera();
     if (state_ != "ended") core_->call("hangup_call");
     ev->accept();
 }

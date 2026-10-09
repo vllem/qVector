@@ -284,8 +284,15 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     callBtn_->setToolTip("Voice call");
     callBtn_->hide();
     connect(callBtn_, &QToolButton::clicked, this, [this] { if (!current_.isEmpty()) core_->call("place_call", {{"room_id", current_}}); });
+    videoBtn_ = new QToolButton;
+    videoBtn_->setAutoRaise(true);
+    videoBtn_->setText("Video call");
+    videoBtn_->setToolTip("Video call");
+    videoBtn_->hide();
+    connect(videoBtn_, &QToolButton::clicked, this, [this] { if (!current_.isEmpty()) core_->call("place_call", {{"room_id", current_}, {"video", true}}); });
     bar->addWidget(topic_, 1);
     bar->addWidget(callBtn_);
+    bar->addWidget(videoBtn_);
     bar->addWidget(membersBtn_);
     rv->addLayout(bar);
     topicLine_ = new QFrame; /* divider under the topic row */
@@ -993,6 +1000,7 @@ void MainWindow::updateTopic()
     membersBtn_->setText(current_.isEmpty() ? QString() : QString("%1 members").arg(n));
     membersBtn_->setVisible(!current_.isEmpty());
     callBtn_->setVisible(!current_.isEmpty() && n == 2); /* a call needs exactly one other person */
+    videoBtn_->setVisible(callBtn_->isVisible());
 }
 
 void MainWindow::updateClock()
@@ -1385,6 +1393,14 @@ void MainWindow::dialogForDemo(const QString &which)
     }
     else if (which == "call") showCall(QJsonObject{{"state", "incoming"}, {"name", "Zach"}, {"user_id", "@zach:example.org"}, {"incoming", true}});
     else if (which == "callon") showCall(QJsonObject{{"state", "connected"}, {"name", "Zach"}, {"user_id", "@zach:example.org"}});
+    else if (which == "videocall" || which == "videooff") { /* synthetic pictures: no camera here, and offscreen shows no video surfaces anyway */
+        showCall(QJsonObject{{"state", "connected"}, {"name", "Zach"}, {"user_id", "@zach:example.org"}, {"video", true}, {"remote_video", which == "videocall"}, {"camera", true}});
+        QImage remote(640, 360, QImage::Format_RGB32), self(320, 240, QImage::Format_RGB32);
+        for (int y = 0; y < remote.height(); y++) for (int x = 0; x < remote.width(); x++) remote.setPixel(x, y, qRgb(40 + x * 120 / remote.width(), 70 + y * 100 / remote.height(), 140));
+        self.fill(QColor(200, 150, 60));
+        callDlg_->video()->setLocal(self);
+        if (which == "videocall") { callDlg_->video()->setRemote(remote); callDlg_->video()->setNote(QString()); }
+    }
     else if (which == "verify") showVerify(QJsonObject{{"state", "emoji"}, {"user", "@zach:example.org"}, {"emoji", QJsonArray{QJsonArray{"\U0001F436", "Dog"}, QJsonArray{"\U0001F431", "Cat"}, QJsonArray{"\U0001F981", "Lion"}, QJsonArray{"\U0001F40E", "Horse"}, QJsonArray{"\U0001F984", "Unicorn"}, QJsonArray{"\U0001F437", "Pig"}, QJsonArray{"\U0001F418", "Elephant"}}}, {"decimals", QJsonArray{123, 456, 789}}});
     else if (which == "settings") roomSettings();
     else if (which == "explore") {

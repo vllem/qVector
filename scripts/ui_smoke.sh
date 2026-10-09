@@ -8,7 +8,7 @@ trap 'rm -rf "$out"' EXIT
 mkdir -p "$out/cfg"
 export QT_QPA_PLATFORM=offscreen XDG_CONFIG_HOME="$out/cfg" XDG_CACHE_HOME="$out/cache" XDG_DATA_HOME="$out/data"
 fail=0
-for args in "" "--members" "--search message" "--thread Hello" "--dialog poll" "--dialog saved" "--dialog prefs" "--dialog verify" "--dialog recovery" "--dialog settings" "--dialog explore" "--dialog verifyqr" "--dialog call" "--dialog callon"; do
+for args in "" "--members" "--search message" "--thread Hello" "--dialog poll" "--dialog saved" "--dialog prefs" "--dialog verify" "--dialog recovery" "--dialog settings" "--dialog explore" "--dialog verifyqr" "--dialog call" "--dialog callon" "--dialog videocall" "--dialog videooff"; do
     log="$out/log"
     # shellcheck disable=SC2086
     if ! timeout 120 "$bin" --demo --data "$out/data" --room bob --delay 20000 $args --screenshot "$out/shot.png" >"$log" 2>&1; then echo "FAILED ($args): exit status"; tail -5 "$log"; fail=1; continue; fi

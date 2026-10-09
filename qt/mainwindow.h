@@ -171,7 +171,7 @@ private:
     QPointer<SavedDialog> savedDlg_;
     QPointer<VerifyDialog> verifyDlg_;
     QPointer<CallDialog> callDlg_;
-    QToolButton *callBtn_ = nullptr;
+    QToolButton *callBtn_ = nullptr, *videoBtn_ = nullptr;
     QPointer<RecoveryDialog> recoveryDlg_;
     QPointer<StartDmDialog> startDm_;
     QPointer<BrowseRoomsDialog> browse_, explore_;

@@ -14,6 +14,10 @@
 #include <QScrollArea>
 #include <QVBoxLayout>
 
+class QCamera;
+class QMediaCaptureSession;
+class QVideoSink;
+
 namespace vc {
 
 /* The messages the user saved, across rooms (engine event "bookmarks") */
@@ -68,18 +72,45 @@ private:
 };
 
 /* A voice call (engine event "call"): ringing, calling, connected; answer, mute and hang up */
+/* The pictures of a video call: the other side large (or a note when there is none), our own camera small in the corner. */
+class CallVideo : public QWidget {
+    Q_OBJECT
+public:
+    explicit CallVideo(QWidget *parent = nullptr);
+    void setRemote(const QImage &img) { remote_ = img; update(); }
+    void setLocal(const QImage &img) { local_ = img; update(); }
+    void setNote(const QString &note) { note_ = note; update(); }
+    QSize sizeHint() const override { return QSize(560, 360); }
+protected:
+    void paintEvent(QPaintEvent *) override;
+private:
+    QImage remote_, local_;
+    QString note_;
+};
+
 class CallDialog : public QDialog {
     Q_OBJECT
 public:
     CallDialog(Core *core, QWidget *parent);
+    ~CallDialog() override;
     void setState(const QJsonObject &s);
+    /* demo and tests: pictures without a camera */
+    CallVideo *video() const { return video_; }
 protected:
     void closeEvent(QCloseEvent *) override;
 private:
     void tick();
+    void cameraOn(bool on);
+    void stopCamera();
     Core *core_;
     QLabel *name_, *status_;
-    QPushButton *answer_, *mute_, *hangup_;
+    CallVideo *video_;
+    QPushButton *answer_, *mute_, *camera_, *hangup_;
+    QCamera *cam_ = nullptr;
+    QMediaCaptureSession *session_ = nullptr;
+    QVideoSink *sink_ = nullptr;
+    QElapsedTimer sent_;
+    bool hasVideo_ = false, remoteShows_ = true, gotRemote_ = false;
     QTimer *timer_;
     QElapsedTimer since_;
     QString state_;
