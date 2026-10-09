@@ -109,6 +109,7 @@ private:
     void updatePinBar();
     void showPreferences();
     void showSaved();
+    void showCall(const QJsonObject &state);
     void showVerify(const QJsonObject &state);
     void showRecovery(bool create);
     void roomSettings();
@@ -169,6 +170,8 @@ private:
     QJsonArray bookmarks_;
     QPointer<SavedDialog> savedDlg_;
     QPointer<VerifyDialog> verifyDlg_;
+    QPointer<CallDialog> callDlg_;
+    QToolButton *callBtn_ = nullptr;
     QPointer<RecoveryDialog> recoveryDlg_;
     QPointer<StartDmDialog> startDm_;
     QPointer<BrowseRoomsDialog> browse_, explore_;

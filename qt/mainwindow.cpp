@@ -278,7 +278,14 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     membersBtn_ = new QToolButton;
     membersBtn_->setAutoRaise(true);
     membersBtn_->setToolTip("Show or hide the member list (Ctrl+M)");
+    callBtn_ = new QToolButton;
+    callBtn_->setAutoRaise(true);
+    callBtn_->setText("Call");
+    callBtn_->setToolTip("Voice call");
+    callBtn_->hide();
+    connect(callBtn_, &QToolButton::clicked, this, [this] { if (!current_.isEmpty()) core_->call("place_call", {{"room_id", current_}}); });
     bar->addWidget(topic_, 1);
+    bar->addWidget(callBtn_);
     bar->addWidget(membersBtn_);
     rv->addLayout(bar);
     topicLine_ = new QFrame; /* divider under the topic row */
@@ -861,6 +868,8 @@ void MainWindow::onEvent(const QString &name, const QJsonValue &p)
         if (browse_) browse_->setRooms(p.toArray());
     } else if (name == "edit_history") {
         showEditHistory(this, p.toArray());
+    } else if (name == "call") {
+        showCall(p.toObject());
     } else if (name == "verification") {
         showVerify(p.toObject());
     } else if (name == "recovery") {
@@ -983,6 +992,7 @@ void MainWindow::updateTopic()
     const int n = details_["members"].toArray().size();
     membersBtn_->setText(current_.isEmpty() ? QString() : QString("%1 members").arg(n));
     membersBtn_->setVisible(!current_.isEmpty());
+    callBtn_->setVisible(!current_.isEmpty() && n == 2); /* a call needs exactly one other person */
 }
 
 void MainWindow::updateClock()
@@ -1215,6 +1225,15 @@ void MainWindow::jumpTo(const QString &room, const QString &event)
 
 void MainWindow::verifyPerson(const QString &userId) { core_->call("request_user_verification", {{"user_id", userId}}); }
 
+void MainWindow::showCall(const QJsonObject &state)
+{
+    if (!callDlg_) { callDlg_ = new CallDialog(core_, this); callDlg_->setAttribute(Qt::WA_DeleteOnClose); }
+    callDlg_->setState(state);
+    callDlg_->show();
+    callDlg_->raise();
+    callDlg_->activateWindow();
+}
+
 void MainWindow::showVerify(const QJsonObject &state)
 {
     if (!verifyDlg_) { verifyDlg_ = new VerifyDialog(core_, this); verifyDlg_->setAttribute(Qt::WA_DeleteOnClose); }
@@ -1364,6 +1383,8 @@ void MainWindow::dialogForDemo(const QString &which)
         for (int y = 0; y < n; y++) { QString r; for (int x = 0; x < n; x++) r += ((x * 7 + y * 13 + x * y) % 5 < 2 || (x < 7 && y < 7 && (x == 0 || y == 0 || x == 6 || y == 6)) ? '1' : '0'); rows.append(r); }
         showVerify(QJsonObject{{"state", "qr"}, {"user", "@zach:example.org"}, {"qr", QJsonObject{{"size", n}, {"rows", rows}}}});
     }
+    else if (which == "call") showCall(QJsonObject{{"state", "incoming"}, {"name", "Zach"}, {"user_id", "@zach:example.org"}, {"incoming", true}});
+    else if (which == "callon") showCall(QJsonObject{{"state", "connected"}, {"name", "Zach"}, {"user_id", "@zach:example.org"}});
     else if (which == "verify") showVerify(QJsonObject{{"state", "emoji"}, {"user", "@zach:example.org"}, {"emoji", QJsonArray{QJsonArray{"\U0001F436", "Dog"}, QJsonArray{"\U0001F431", "Cat"}, QJsonArray{"\U0001F981", "Lion"}, QJsonArray{"\U0001F40E", "Horse"}, QJsonArray{"\U0001F984", "Unicorn"}, QJsonArray{"\U0001F437", "Pig"}, QJsonArray{"\U0001F418", "Elephant"}}}, {"decimals", QJsonArray{123, 456, 789}}});
     else if (which == "settings") roomSettings();
     else if (which == "explore") {

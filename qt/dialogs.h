@@ -3,6 +3,8 @@
 
 #include "qt/core.h"
 #include <QDialog>
+#include <QElapsedTimer>
+#include <QTimer>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QLabel>
@@ -63,6 +65,24 @@ private:
     QVBoxLayout *lay_;
     QString me_;
     bool finished_ = false;
+};
+
+/* A voice call (engine event "call"): ringing, calling, connected; answer, mute and hang up */
+class CallDialog : public QDialog {
+    Q_OBJECT
+public:
+    CallDialog(Core *core, QWidget *parent);
+    void setState(const QJsonObject &s);
+protected:
+    void closeEvent(QCloseEvent *) override;
+private:
+    void tick();
+    Core *core_;
+    QLabel *name_, *status_;
+    QPushButton *answer_, *mute_, *hangup_;
+    QTimer *timer_;
+    QElapsedTimer since_;
+    QString state_;
 };
 
 /* The picture of a message in a window of its own, with Save as, Copy and zoom. */

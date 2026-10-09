@@ -199,6 +199,79 @@ void VerifyDialog::closeEvent(QCloseEvent *ev)
     ev->accept();
 }
 
+CallDialog::CallDialog(Core *core, QWidget *parent) : QDialog(parent), core_(core)
+{
+    setWindowTitle("Voice call");
+    setMinimumWidth(340);
+    auto *lay = new QVBoxLayout(this);
+    lay->setContentsMargins(24, 22, 24, 20);
+    lay->setSpacing(10);
+    name_ = new QLabel;
+    QFont f = name_->font();
+    f.setPointSizeF(f.pointSizeF() * 1.5);
+    f.setBold(true);
+    name_->setFont(f);
+    name_->setAlignment(Qt::AlignCenter);
+    status_ = new QLabel;
+    status_->setAlignment(Qt::AlignCenter);
+    lay->addWidget(name_);
+    lay->addWidget(status_);
+    lay->addSpacing(8);
+    auto *row = new QHBoxLayout;
+    answer_ = new QPushButton("Answer");
+    mute_ = new QPushButton("Mute");
+    mute_->setCheckable(true);
+    hangup_ = new QPushButton("Hang up");
+    row->addWidget(answer_);
+    row->addWidget(mute_);
+    row->addWidget(hangup_);
+    lay->addLayout(row);
+    connect(answer_, &QPushButton::clicked, this, [this] { core_->call("answer_call"); answer_->setEnabled(false); });
+    connect(mute_, &QPushButton::clicked, this, [this](bool on) { core_->call("set_call_muted", {{"muted", on}}); });
+    connect(hangup_, &QPushButton::clicked, this, [this] { core_->call("hangup_call"); });
+    timer_ = new QTimer(this);
+    timer_->setInterval(1000);
+    connect(timer_, &QTimer::timeout, this, [this] { tick(); });
+}
+
+void CallDialog::tick()
+{
+    if (state_ != "connected") return;
+    const int s = int(since_.elapsed() / 1000);
+    status_->setText(QString("Connected  %1:%2").arg(s / 60).arg(s % 60, 2, 10, QChar('0')));
+}
+
+void CallDialog::setState(const QJsonObject &s)
+{
+    const QString st = s["state"].toString();
+    const bool was = state_ == "connected";
+    state_ = st;
+    name_->setText(s["name"].toString().isEmpty() ? s["user_id"].toString() : s["name"].toString());
+    const bool incoming = s["incoming"].toBool();
+    answer_->setVisible(st == "incoming");
+    answer_->setEnabled(true);
+    mute_->setVisible(st == "connecting" || st == "connected");
+    mute_->setChecked(s["muted"].toBool());
+    hangup_->setText(st == "incoming" ? "Decline" : "Hang up");
+    hangup_->setVisible(st != "ended");
+    if (st == "incoming") status_->setText("Incoming call");
+    else if (st == "outgoing") status_->setText("Calling...");
+    else if (st == "connecting") status_->setText("Connecting...");
+    else if (st == "connected") { if (!was) since_.start(); tick(); timer_->start(); }
+    else if (st == "ended") {
+        timer_->stop();
+        const QString r = s["reason"].toString();
+        status_->setText(r == "user_busy" ? "Busy" : r == "invite_timeout" ? (incoming ? "Missed call" : "No answer") : r == "rejected" ? "Declined" : r == "ice_failed" || r == "ice_timeout" || r == "error" ? "The call failed" : "Call ended");
+        QTimer::singleShot(2500, this, &QDialog::close);
+    }
+}
+
+void CallDialog::closeEvent(QCloseEvent *ev)
+{
+    if (state_ != "ended") core_->call("hangup_call");
+    ev->accept();
+}
+
 /* Empties a layout. A nested QLayout is itself the item takeAt() returns: deleting it and then "its item" would delete it twice. */
 static void clearLayout(QLayout *l)
 {
