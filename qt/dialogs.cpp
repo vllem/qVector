@@ -15,6 +15,9 @@
 #include <QMediaDevices>
 #include <QAudioDevice>
 #include <QSoundEffect>
+#include <QScreenCapture>
+#include <QGuiApplication>
+#include <QScreen>
 #include <QStandardPaths>
 #include <QDir>
 #include <QFile>
@@ -313,15 +316,24 @@ CallDialog::CallDialog(Core *core, QWidget *parent) : QDialog(parent), core_(cor
     camera_ = new QPushButton("Camera");
     camera_->setCheckable(true);
     camera_->hide();
+    share_ = new QPushButton("Share screen");
+    share_->setCheckable(true);
+    share_->hide();
+    addVideo_ = new QPushButton("Add video");
+    addVideo_->hide();
     hangup_ = new QPushButton("Hang up");
     row->addWidget(answer_);
     row->addWidget(mute_);
     row->addWidget(camera_);
+    row->addWidget(share_);
+    row->addWidget(addVideo_);
     row->addWidget(hangup_);
     lay->addLayout(row);
     connect(answer_, &QPushButton::clicked, this, [this] { core_->call("answer_call"); answer_->setEnabled(false); });
     connect(mute_, &QPushButton::clicked, this, [this](bool on) { core_->call("set_call_muted", {{"muted", on}}); });
     connect(camera_, &QPushButton::clicked, this, [this](bool on) { cameraOn(on); });
+    connect(share_, &QPushButton::clicked, this, [this](bool on) { shareOn(on); });
+    connect(addVideo_, &QPushButton::clicked, this, [this] { core_->call("add_call_video"); addVideo_->setEnabled(false); });
     connect(hangup_, &QPushButton::clicked, this, [this] { core_->call("hangup_call"); });
     connect(core_, &Core::remoteFrame, this, [this](const QImage &img) {
         gotRemote_ = true;
@@ -338,57 +350,89 @@ CallDialog::~CallDialog() { stopCamera(); if (ringer_) ringer_->stop(); }
 void CallDialog::stopCamera()
 {
     if (cam_) cam_->stop();
-    delete session_; /* owns nothing; the camera and the sink are children of this dialog */
+    if (screen_) screen_->stop();
+    delete session_; /* the sources and the sink are children of this dialog */
     session_ = nullptr;
     delete cam_;
     cam_ = nullptr;
+    delete screen_;
+    screen_ = nullptr;
     delete sink_;
     sink_ = nullptr;
     video_->setLocal(QImage());
 }
 
-/* Start or stop sending our camera. The picture is shrunk to what the engine encodes and limited to about 15 per second. */
-void CallDialog::cameraOn(bool on)
+/* Frames of the camera or of the screen go to the engine, shrunk to what it encodes and limited to about 15 per second. */
+void CallDialog::startSource(bool screen)
 {
-    if (!on) {
-        stopCamera();
-        core_->call("set_call_camera", {{"on", false}});
-        return;
-    }
-    const auto devices = QMediaDevices::videoInputs();
-    if (devices.isEmpty()) {
-        camera_->setChecked(false);
-        camera_->setEnabled(false);
-        camera_->setToolTip("No camera found");
-        return;
-    }
-    QCameraDevice device = devices.first();
-    const QString chosen = core_->pref("callCamera");
-    for (const QCameraDevice &dev : devices) if (!chosen.isEmpty() && dev.description() == chosen) device = dev;
-    cam_ = new QCamera(device, this);
+    stopCamera();
     sink_ = new QVideoSink(this);
     session_ = new QMediaCaptureSession(this);
-    session_->setCamera(cam_);
     session_->setVideoSink(sink_);
     sent_.start();
-    connect(sink_, &QVideoSink::videoFrameChanged, this, [this](const QVideoFrame &fr) {
+    connect(sink_, &QVideoSink::videoFrameChanged, this, [this, screen](const QVideoFrame &fr) {
         if (!fr.isValid() || sent_.elapsed() < 66) return;
         sent_.restart();
         QImage img = fr.toImage();
         if (img.isNull()) return;
         img = img.convertToFormat(QImage::Format_RGBA8888);
-        if (img.width() > 640 || img.height() > 480) img = img.scaled(640, 480, Qt::KeepAspectRatio, Qt::FastTransformation);
+        if (img.width() > 960 || img.height() > 540) img = img.scaled(960, 540, Qt::KeepAspectRatio, Qt::FastTransformation);
         core_->pushVideo(img);
-        video_->setLocal(img.mirrored(true, false)); /* a mirror, as people expect of a self-view */
+        video_->setLocal(screen ? img : img.mirrored(true, false)); /* the camera as a mirror, as people expect of a self-view */
     });
-    connect(cam_, &QCamera::errorOccurred, this, [this](QCamera::Error, const QString &msg) {
+    auto failed = [this](const QString &msg) {
         camera_->setChecked(false);
+        share_->setChecked(false);
         camera_->setToolTip(msg);
         stopCamera();
         core_->call("set_call_camera", {{"on", false}});
-    });
-    cam_->start();
+    };
+    if (screen) {
+        screen_ = new QScreenCapture(this);
+        screen_->setScreen(QGuiApplication::primaryScreen());
+        session_->setScreenCapture(screen_);
+        connect(screen_, &QScreenCapture::errorOccurred, this, [failed](QScreenCapture::Error, const QString &msg) { failed(msg); });
+        screen_->start();
+    } else {
+        const auto devices = QMediaDevices::videoInputs();
+        QCameraDevice device = devices.first();
+        const QString chosen = core_->pref("callCamera");
+        for (const QCameraDevice &dev : devices) if (!chosen.isEmpty() && dev.description() == chosen) device = dev;
+        cam_ = new QCamera(device, this);
+        session_->setCamera(cam_);
+        connect(cam_, &QCamera::errorOccurred, this, [failed](QCamera::Error, const QString &msg) { failed(msg); });
+        cam_->start();
+    }
     core_->call("set_call_camera", {{"on", true}});
+}
+
+void CallDialog::cameraOn(bool on)
+{
+    share_->setChecked(false);
+    if (!on) {
+        stopCamera();
+        core_->call("set_call_camera", {{"on", false}});
+        return;
+    }
+    if (QMediaDevices::videoInputs().isEmpty()) {
+        camera_->setChecked(false);
+        camera_->setEnabled(false);
+        camera_->setToolTip("No camera found");
+        return;
+    }
+    startSource(false);
+}
+
+/* Show the screen in place of the camera (the other side sees it as our video). */
+void CallDialog::shareOn(bool on)
+{
+    camera_->setChecked(false);
+    if (!on) {
+        stopCamera();
+        core_->call("set_call_camera", {{"on", false}});
+        return;
+    }
+    startSource(true);
 }
 
 void CallDialog::tick()
@@ -416,7 +460,9 @@ void CallDialog::setState(const QJsonObject &s)
     setWindowTitle(hasVideo_ ? "Video call" : "Voice call");
     video_->setVisible(hasVideo_ && st != "ended");
     camera_->setVisible(hasVideo_ && live);
-    if (st == "incoming" || st == "outgoing") { gotRemote_ = false; video_->setRemote(QImage()); camera_->setChecked(false); }
+    share_->setVisible(hasVideo_ && live);
+    addVideo_->setVisible(!hasVideo_ && st == "connected");
+    if (st == "incoming" || st == "outgoing") { gotRemote_ = false; video_->setRemote(QImage()); camera_->setChecked(false); share_->setChecked(false); }
     if (hasVideo_) {
         setMinimumWidth(560);
         video_->setNote(!live ? QString() : !remoteShows_ ? name_->text() + "'s camera is off" : gotRemote_ ? QString() : "Waiting for the picture...");

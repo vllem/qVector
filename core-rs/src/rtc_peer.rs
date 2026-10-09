@@ -63,7 +63,7 @@ struct Handler {
     events: mpsc::UnboundedSender<PeerEvent>,
     gathered: watch::Sender<bool>,
     playback: Playback,
-    display: Option<VideoDisplay>,
+    display: Arc<Mutex<Option<VideoDisplay>>>,
     runtime: Arc<dyn Runtime>,
 }
 
@@ -86,7 +86,7 @@ impl PeerConnectionEventHandler for Handler {
 
     async fn on_track(&self, track: Arc<dyn TrackRemote>) {
         if track.kind().await == RtpCodecKind::Video {
-            let Some(display) = self.display.clone() else { return };
+            let Some(display) = self.display.lock().unwrap().clone() else { return };
             self.runtime.spawn(Box::pin(async move {
                 let mut decoder: Option<(Codec, DecoderThread)> = None;
                 let mut h264 = H264Packet::default();
@@ -157,7 +157,10 @@ pub struct CallPeer {
     gathered: watch::Receiver<bool>,
     muted: Arc<AtomicBool>,
     camera: Arc<AtomicBool>,
-    video_out: Option<EncoderThread>,
+    video_out: Mutex<Option<EncoderThread>>,
+    display: Arc<Mutex<Option<VideoDisplay>>>,
+    runtime: Arc<dyn Runtime>,
+    video_params: Vec<RTCRtpCodecParameters>,
     pub events: Mutex<Option<mpsc::UnboundedReceiver<PeerEvent>>>,
 }
 
@@ -205,6 +208,77 @@ fn h264_codec() -> RTCRtpCodecParameters {
     }
 }
 
+/// Add a video track to the connection and start its sender; frames pushed to the returned encoder are sent.
+async fn start_video(
+    pc: &Arc<dyn PeerConnection>,
+    runtime: &Arc<dyn Runtime>,
+    video_params: &[RTCRtpCodecParameters],
+) -> Result<EncoderThread, String> {
+    let e = |x: &dyn std::fmt::Display| x.to_string();
+    let first_video = video_params.first().cloned().unwrap_or_else(vp8_codec);
+        let vssrc = rand::random::<u32>();
+        // Packetising is done here, after the SDP exchange has chosen the codec: a sample track fixes it at creation.
+        let vtrack = Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
+            STREAM.into(),
+            "vector-video".into(),
+            "video".into(),
+            RtpCodecKind::Video,
+            vec![RTCRtpEncodingParameters {
+                rtp_coding_parameters: RTCRtpCodingParameters { ssrc: Some(vssrc), ..Default::default() },
+                codec: first_video.rtp_codec.clone(),
+                ..Default::default()
+            }],
+        )));
+        let vsender = pc.add_track(vtrack.clone() as Arc<dyn TrackLocal>).await.map_err(|x| e(&x))?;
+        // The track names one codec; the section must offer (or accept) all of ours.
+        let mine: rtc::rtp_transceiver::RTCRtpTransceiverId = vsender.id().into();
+        for t in pc.get_transceivers().await {
+            if t.id() == mine {
+                let _ = t.set_codec_preferences(video_params.to_vec()).await;
+            }
+        }
+        let (units_tx, mut units) = mpsc::channel::<Vec<u8>>(4);
+        let encoder = EncoderThread::spawn(Codec::Vp8, units_tx);
+        let control = encoder.clone();
+        runtime.spawn(Box::pin(async move {
+            let mut sending: Option<Box<dyn Packetizer>> = None;
+            let mut last = Instant::now();
+            while let Some(unit) = units.recv().await {
+                if sending.is_none() {
+                    let Ok(params) = vsender.get_parameters().await else { continue };
+                    let Some(negotiated) = params.rtp_parameters.codecs.first().cloned() else { continue };
+                    let Some(codec) = Codec::from_mime(&negotiated.rtp_codec.mime_type) else { continue };
+                    let Ok(payloader) = negotiated.rtp_codec.payloader() else { continue };
+                    sending = Some(Box::new(new_packetizer(
+                        Instant::now(),
+                        1200,
+                        negotiated.payload_type,
+                        vssrc,
+                        payloader,
+                        Box::new(new_random_sequencer()),
+                        negotiated.rtp_codec.clock_rate,
+                    )));
+                    if codec != control.codec() {
+                        // This frame was coded for another codec: switch and start over with a key frame.
+                        control.set_codec(codec);
+                        control.key();
+                        continue;
+                    }
+                }
+                let Some(packetizer) = sending.as_mut() else { continue };
+                let now = Instant::now();
+                let duration = now.duration_since(last).clamp(Duration::from_millis(10), Duration::from_millis(500));
+                last = now;
+                let samples = (duration.as_secs_f64() * 90000.0) as u32;
+                let Ok(packets) = packetizer.packetize(now, &bytes::Bytes::from(unit), samples) else { continue };
+                for pkt in packets {
+                    let _ = vtrack.write_rtp_with_extensions(pkt, &[]).await;
+                }
+            }
+        }));
+    Ok(encoder)
+}
+
 impl CallPeer {
     /// `ice` are STUN/TURN urls with optional credentials; `bind` the local UDP addresses. With a `video` display the
     /// connection carries pictures too (offered, or accepted from an offer).
@@ -239,7 +313,6 @@ impl CallPeer {
             engine.register_codec(params.clone(), RtpCodecKind::Video).map_err(|x| e(&x))?;
             video_params.push(params);
         }
-        let first_video = video_params.first().cloned().unwrap_or_else(vp8_codec);
         let registry = register_default_interceptors(Registry::new(), &mut engine).map_err(|x| e(&x))?;
         let config = RTCConfigurationBuilder::new()
             .with_ice_servers(
@@ -248,9 +321,10 @@ impl CallPeer {
                     .collect(),
             )
             .build();
+        let display: Arc<Mutex<Option<VideoDisplay>>> = Arc::new(Mutex::new(video.clone()));
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (gathered_tx, gathered) = watch::channel(false);
-        let handler = Arc::new(Handler { events: events_tx, gathered: gathered_tx, playback, display: video.clone(), runtime: runtime.clone() });
+        let handler = Arc::new(Handler { events: events_tx, gathered: gathered_tx, playback, display: display.clone(), runtime: runtime.clone() });
         let pc = PeerConnectionBuilder::new()
             .with_configuration(config)
             .with_media_engine(engine)
@@ -314,86 +388,24 @@ impl CallPeer {
         }));
 
         let camera = Arc::new(AtomicBool::new(false));
-        let video_out = if video.is_some() {
-            let vssrc = rand::random::<u32>();
-            // Packetising is done here, after the SDP exchange has chosen the codec: a sample track fixes it at creation.
-            let vtrack = Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
-                STREAM.into(),
-                "vector-video".into(),
-                "video".into(),
-                RtpCodecKind::Video,
-                vec![RTCRtpEncodingParameters {
-                    rtp_coding_parameters: RTCRtpCodingParameters { ssrc: Some(vssrc), ..Default::default() },
-                    codec: first_video.rtp_codec.clone(),
-                    ..Default::default()
-                }],
-            )));
-            let vsender = pc.add_track(vtrack.clone() as Arc<dyn TrackLocal>).await.map_err(|x| e(&x))?;
-            // The track names one codec; the section must offer (or accept) all of ours.
-            let mine: rtc::rtp_transceiver::RTCRtpTransceiverId = vsender.id().into();
-            for t in pc.get_transceivers().await {
-                if t.id() == mine {
-                    let _ = t.set_codec_preferences(video_params.clone()).await;
-                }
-            }
-            let (units_tx, mut units) = mpsc::channel::<Vec<u8>>(4);
-            let encoder = EncoderThread::spawn(Codec::Vp8, units_tx);
-            let control = encoder.clone();
-            runtime.spawn(Box::pin(async move {
-                let mut sending: Option<Box<dyn Packetizer>> = None;
-                let mut last = Instant::now();
-                while let Some(unit) = units.recv().await {
-                    if sending.is_none() {
-                        let Ok(params) = vsender.get_parameters().await else { continue };
-                        let Some(negotiated) = params.rtp_parameters.codecs.first().cloned() else { continue };
-                        let Some(codec) = Codec::from_mime(&negotiated.rtp_codec.mime_type) else { continue };
-                        let Ok(payloader) = negotiated.rtp_codec.payloader() else { continue };
-                        sending = Some(Box::new(new_packetizer(
-                            Instant::now(),
-                            1200,
-                            negotiated.payload_type,
-                            vssrc,
-                            payloader,
-                            Box::new(new_random_sequencer()),
-                            negotiated.rtp_codec.clock_rate,
-                        )));
-                        if codec != control.codec() {
-                            // This frame was coded for another codec: switch and start over with a key frame.
-                            control.set_codec(codec);
-                            control.key();
-                            continue;
-                        }
-                    }
-                    let Some(packetizer) = sending.as_mut() else { continue };
-                    let now = Instant::now();
-                    let duration = now.duration_since(last).clamp(Duration::from_millis(10), Duration::from_millis(500));
-                    last = now;
-                    let samples = (duration.as_secs_f64() * 90000.0) as u32;
-                    let Ok(packets) = packetizer.packetize(now, &bytes::Bytes::from(unit), samples) else { continue };
-                    for pkt in packets {
-                        let _ = vtrack.write_rtp_with_extensions(pkt, &[]).await;
-                    }
-                }
-            }));
-            Some(encoder)
-        } else {
-            None
-        };
+        let video_out = if video.is_some() { Some(start_video(&pc, &runtime, &video_params).await?) } else { None };
 
-        Ok(CallPeer { pc, gathered, muted, camera, video_out, events: Mutex::new(Some(events_rx)) })
+        Ok(CallPeer { pc, gathered, muted, camera, video_out: Mutex::new(video_out), display, runtime, video_params, events: Mutex::new(Some(events_rx)) })
     }
 
     /// A picture from the camera; sent when the camera is on (and the call carries video).
     pub fn push_video(&self, f: Frame) {
-        if let (Some(out), true) = (&self.video_out, self.camera.load(Ordering::Relaxed)) {
-            out.push(f);
+        if self.camera.load(Ordering::Relaxed) {
+            if let Some(out) = self.video_out.lock().unwrap().as_ref() {
+                out.push(f);
+            }
         }
     }
 
     /// Start or stop sending pictures. Starting begins with a key frame.
     pub fn set_camera(&self, on: bool) {
         if on && !self.camera.swap(true, Ordering::Relaxed) {
-            if let Some(out) = &self.video_out {
+            if let Some(out) = self.video_out.lock().unwrap().as_ref() {
                 out.key();
             }
         } else if !on {
@@ -402,7 +414,23 @@ impl CallPeer {
     }
 
     pub fn has_video_out(&self) -> bool {
-        self.video_out.is_some()
+        self.video_out.lock().unwrap().is_some()
+    }
+
+    /// Give a voice connection a video section (the caller then renegotiates: `renegotiate` or `answer`).
+    pub async fn add_video(&self, display: VideoDisplay) -> Result<(), String> {
+        if self.has_video_out() {
+            return Ok(());
+        }
+        *self.display.lock().unwrap() = Some(display);
+        let out = start_video(&self.pc, &self.runtime, &self.video_params).await?;
+        *self.video_out.lock().unwrap() = Some(out);
+        Ok(())
+    }
+
+    /// A new offer on a running connection (after `add_video`).
+    pub async fn renegotiate(&self) -> Result<String, String> {
+        self.offer().await
     }
 
     pub fn set_muted(&self, muted: bool) {

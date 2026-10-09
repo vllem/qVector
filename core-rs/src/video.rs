@@ -92,8 +92,8 @@ impl Frame {
 }
 
 /// Pictures larger than this are shrunk before encoding (keeps the bitrate and the CPU modest).
-pub const MAX_W: u32 = 640;
-pub const MAX_H: u32 = 480;
+pub const MAX_W: u32 = 960;
+pub const MAX_H: u32 = 540;
 /// A key frame (everything a late joiner or a lossy link needs) at least this often, in frames at `FPS`.
 pub const FPS: f32 = 15.0;
 const KEY_EVERY: u32 = 30;
@@ -118,7 +118,7 @@ impl Encoder {
         match self.codec {
             Codec::H264 => {
                 let config = EncoderConfig::new()
-                    .bitrate(BitRate::from_bps(700_000))
+                    .bitrate(BitRate::from_bps(1_000_000))
                     .max_frame_rate(FrameRate::from_hz(FPS))
                     .usage_type(UsageType::CameraVideoRealTime)
                     .profile(Profile::Baseline)
@@ -127,7 +127,7 @@ impl Encoder {
                     openh264::encoder::Encoder::with_api_config(openh264::OpenH264API::from_source(), config).map_err(|e| e.to_string())?,
                 );
             }
-            Codec::Vp8 => self.vp8 = Some(Vp8Encoder::new(w as usize, h as usize, FPS as u32, 700, KEY_EVERY)?),
+            Codec::Vp8 => self.vp8 = Some(Vp8Encoder::new(w as usize, h as usize, FPS as u32, 1000, KEY_EVERY)?),
         }
         self.size = (w, h);
         Ok(())
@@ -341,7 +341,7 @@ pub mod tests {
     #[test]
     fn big_pictures_shrink_and_odd_sizes_become_even() {
         let f = picture(0, 1280, 720).fitted(MAX_W, MAX_H);
-        assert_eq!((f.w, f.h), (640, 360));
+        assert_eq!((f.w, f.h), (960, 540));
         assert!(f.is_valid());
         let small = picture(0, 321, 241).fitted(MAX_W, MAX_H);
         assert_eq!((small.w, small.h), (320, 240));

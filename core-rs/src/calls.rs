@@ -54,6 +54,8 @@ struct Active {
     video: bool,
     camera: bool,
     remote_video: bool,
+    /// We sent a `m.call.negotiate` offer and wait for the answer.
+    negotiating: bool,
 }
 
 #[derive(Clone)]
@@ -129,14 +131,14 @@ impl Calls {
         }
     }
 
+    fn display(&self) -> VideoDisplay {
+        self.video_sink.lock().unwrap().clone().unwrap_or_else(|| Arc::new(|_| {}))
+    }
+
     async fn make_peer(&self, video: bool) -> Result<(Arc<CallPeer>, Box<dyn Any + Send>), String> {
         let factory = self.audio.lock().unwrap().clone();
         let session = factory().map_err(|e| format!("No sound device: {e}"))?;
-        let display: Option<VideoDisplay> = if video {
-            Some(self.video_sink.lock().unwrap().clone().unwrap_or_else(|| Arc::new(|_| {})))
-        } else {
-            None
-        };
+        let display = if video { Some(self.display()) } else { None };
         let peer = CallPeer::new(self.ice_servers().await, (*self.bind).clone(), session.capture, session.playback, display).await?;
         Ok((Arc::new(peer), session.guard))
     }
@@ -191,6 +193,7 @@ impl Calls {
             video,
             camera: false,
             remote_video: video,
+            negotiating: false,
         };
         self.emit("outgoing", &a, "");
         let meta = Self::metadata(&a);
@@ -300,6 +303,30 @@ impl Calls {
         if let Some(p) = peer {
             p.push_video(f);
         }
+    }
+
+    /// Turn a connected voice call into a video call: a new offer goes over `m.call.negotiate`; the camera stays off until switched on.
+    pub async fn add_video(&self) -> Result<(), String> {
+        let (peer, room_id, call_id, party) = {
+            let g = self.active.lock().unwrap();
+            let a = g.as_ref().filter(|a| a.phase == Phase::Connected && !a.video && !a.negotiating).ok_or("Video can be added to a connected voice call")?;
+            (a.peer.clone().ok_or("No connection")?, a.room_id.clone(), a.call_id.clone(), a.party.clone())
+        };
+        peer.add_video(self.display()).await?;
+        let sdp = peer.renegotiate().await?;
+        let meta = {
+            let mut g = self.active.lock().unwrap();
+            let a = g.as_mut().filter(|a| a.call_id == call_id).ok_or("The call ended")?;
+            a.video = true;
+            a.camera = false;
+            a.remote_video = true;
+            a.negotiating = true;
+            self.emit(Self::state_name(a), a, "");
+            Self::metadata(a)
+        };
+        self.send(&room_id, "m.call.negotiate", json!({"description": {"type": "offer", "sdp": sdp}, "lifetime": 60000,
+            "org.matrix.msc3077.sdp_stream_metadata": meta, "sdp_stream_metadata": meta}), &call_id, &party).await;
+        Ok(())
     }
 
     /// Turn our camera on or off in a call that carries video; the other side is told so it can show a placeholder.
@@ -443,6 +470,7 @@ impl Calls {
                     video: has_video(&sdp),
                     camera: false,
                     remote_video: Self::remote_shows_picture(content, true),
+                    negotiating: false,
                 };
                 {
                     let mut g = self.active.lock().unwrap();
@@ -512,6 +540,48 @@ impl Calls {
                 };
                 if let Some(p) = peer {
                     Self::add_candidates(&p, content).await;
+                }
+            }
+            "m.call.negotiate" => {
+                if from_me {
+                    return;
+                }
+                let kind = content["description"]["type"].as_str().unwrap_or("");
+                let sdp = content["description"]["sdp"].as_str().unwrap_or("").to_string();
+                let (peer, negotiating, room_id, party) = {
+                    let g = self.active.lock().unwrap();
+                    match g.as_ref().filter(|a| a.call_id == call_id && a.phase == Phase::Connected) {
+                        Some(a) => (a.peer.clone(), a.negotiating, a.room_id.clone(), a.party.clone()),
+                        None => return,
+                    }
+                };
+                let Some(peer) = peer else { return };
+                if kind == "offer" && !negotiating {
+                    if has_video(&sdp) && !peer.has_video_out() && peer.add_video(self.display()).await.is_err() {
+                        return;
+                    }
+                    let Ok(answer) = peer.answer(&sdp).await else { return };
+                    let meta = {
+                        let mut g = self.active.lock().unwrap();
+                        let Some(a) = g.as_mut().filter(|a| a.call_id == call_id) else { return };
+                        if has_video(&sdp) {
+                            a.video = true;
+                            a.remote_video = Self::remote_shows_picture(content, true);
+                        }
+                        self.emit(Self::state_name(a), a, "");
+                        Self::metadata(a)
+                    };
+                    self.send(&room_id, "m.call.negotiate", json!({"description": {"type": "answer", "sdp": answer},
+                        "org.matrix.msc3077.sdp_stream_metadata": meta, "sdp_stream_metadata": meta}), &call_id, &party).await;
+                } else if kind == "answer" && negotiating {
+                    if peer.accept_answer(&sdp).await.is_ok() {
+                        let mut g = self.active.lock().unwrap();
+                        if let Some(a) = g.as_mut().filter(|a| a.call_id == call_id) {
+                            a.negotiating = false;
+                            a.remote_video = Self::remote_shows_picture(content, true);
+                            self.emit(Self::state_name(a), a, "");
+                        }
+                    }
                 }
             }
             "m.call.sdp_stream_metadata_changed" => {
@@ -678,6 +748,58 @@ mod tests {
         ac.set_camera(false).await;
         pump(&alice, &bob, &la, &lb, |_, _| lb.lock().unwrap().last().map(|v| v["remote_video"] == false).unwrap_or(false)).await;
         assert_eq!(la.lock().unwrap().last().unwrap()["camera"], false);
+        bc.hangup().await;
+        pump(&alice, &bob, &la, &lb, |a, _| a.last().map(|s| s == "ended").unwrap_or(false)).await;
+        let unhandled: Vec<_> = hs.log().into_iter().filter(|l| l.contains("UNHANDLED") && !l.contains("well-known")).collect();
+        assert!(unhandled.is_empty(), "{unhandled:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_voice_call_can_become_a_video_call() {
+        use crate::video::tests::{luma, picture};
+        let hs = FakeHs::start().await;
+        let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let alice = crate::session::sign_in(da.path(), &hs.uri(), "alice", "x", None, "a").await.unwrap();
+        let bob = crate::session::sign_in(db.path(), &hs.uri(), "bob", "x", None, "b").await.unwrap();
+        crate::sync_once(&alice).await.unwrap();
+        crate::sync_once(&bob).await.unwrap();
+        let room = alice.joined_rooms().first().unwrap().room_id().to_string();
+
+        let (la, lb): (Arc<Mutex<Vec<Value>>>, Arc<Mutex<Vec<Value>>>) = Default::default();
+        let (ca, cb) = (la.clone(), lb.clone());
+        let lo = vec!["127.0.0.1:0".to_string()];
+        let quiet = || card(false, Arc::new(AtomicUsize::new(0)));
+        let ac = Calls::new(alice.clone(), quiet(), move |s| ca.lock().unwrap().push(serde_json::from_str(&s).unwrap())).with_bind(lo.clone());
+        let bc = Calls::new(bob.clone(), quiet(), move |s| cb.lock().unwrap().push(serde_json::from_str(&s).unwrap())).with_bind(lo);
+        let (seen_a, seen_b): (Arc<Mutex<Vec<f32>>>, Arc<Mutex<Vec<f32>>>) = Default::default();
+        let (sa, sb) = (seen_a.clone(), seen_b.clone());
+        ac.set_video_sink(Arc::new(move |f: Frame| sa.lock().unwrap().push(luma(&f))));
+        bc.set_video_sink(Arc::new(move |f: Frame| sb.lock().unwrap().push(luma(&f))));
+
+        ac.place(&room, false).await.unwrap();
+        pump(&alice, &bob, &la, &lb, |_, b| b.contains(&"incoming".to_string())).await;
+        bc.answer().await.unwrap();
+        pump(&alice, &bob, &la, &lb, |a, b| a.contains(&"connected".to_string()) && b.contains(&"connected".to_string())).await;
+        assert_eq!(lb.lock().unwrap().last().unwrap()["video"], false);
+        assert!(ac.add_video().await.is_ok());
+        assert!(ac.add_video().await.is_err(), "once is enough");
+        pump(&alice, &bob, &la, &lb, |_, _| lb.lock().unwrap().last().map(|v| v["video"] == true).unwrap_or(false) && la.lock().unwrap().iter().any(|v| v["video"] == true)).await;
+        for _ in 0..100 {
+            crate::sync_once(&alice).await.unwrap();
+            crate::sync_once(&bob).await.unwrap();
+            if !ac.active.lock().unwrap().as_ref().map(|a| a.negotiating).unwrap_or(true) { break; }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        ac.set_camera(true).await;
+        bc.set_camera(true).await;
+        for n in 0..70 {
+            ac.push_video(picture(n, 320, 240));
+            bc.push_video(picture(n, 320, 240));
+            tokio::time::sleep(Duration::from_millis(66)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(seen_b.lock().unwrap().len() > 15, "bob saw {} pictures", seen_b.lock().unwrap().len());
+        assert!(seen_a.lock().unwrap().len() > 15, "alice saw {} pictures", seen_a.lock().unwrap().len());
         bc.hangup().await;
         pump(&alice, &bob, &la, &lb, |a, _| a.last().map(|s| s == "ended").unwrap_or(false)).await;
         let unhandled: Vec<_> = hs.log().into_iter().filter(|l| l.contains("UNHANDLED") && !l.contains("well-known")).collect();

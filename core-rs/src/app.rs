@@ -169,6 +169,7 @@ impl App {
             "set_room_tag" => { let (id, k) = (s(args, "room_id"), s(args, "kind")); self.client_action("Room updated", move |c| async move { ui::set_room_tag(&c, &id, &k).await.map(|_| id) }) }
             "set_room_notify" => { let (id, l) = (s(args, "room_id"), s(args, "level")); self.client_action("Notification level changed", move |c| async move { ui::set_room_notification_level(&c, &id, &l).await.map(|_| id) }) }
             "place_call" => { let (r, v) = (s(args, "room_id"), b(args, "video")); self.calls_action(move |c| async move { c.place(&r, v).await }) }
+            "add_call_video" => self.calls_action(|c| async move { c.add_video().await }),
             "set_call_camera" => { let on = b(args, "on"); self.calls_action(move |c| async move { c.set_camera(on).await; Ok(()) }) }
             "answer_call" => self.calls_action(|c| async move { c.answer().await }),
             "hangup_call" => self.calls_action(|c| async move { c.hangup().await; Ok(()) }),

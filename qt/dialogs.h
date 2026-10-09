@@ -18,6 +18,7 @@ class QCamera;
 class QMediaCaptureSession;
 class QVideoSink;
 class QSoundEffect;
+class QScreenCapture;
 
 namespace vc {
 
@@ -102,13 +103,16 @@ protected:
 private:
     void tick();
     void cameraOn(bool on);
+    void shareOn(bool on);
+    void startSource(bool screen);
     void stopCamera();
     void ring(const QString &state, bool incoming);
     QSoundEffect *ringer_ = nullptr;
     Core *core_;
     QLabel *name_, *status_;
     CallVideo *video_;
-    QPushButton *answer_, *mute_, *camera_, *hangup_;
+    QPushButton *answer_, *mute_, *camera_, *share_, *addVideo_, *hangup_;
+    QScreenCapture *screen_ = nullptr;
     QCamera *cam_ = nullptr;
     QMediaCaptureSession *session_ = nullptr;
     QVideoSink *sink_ = nullptr;
