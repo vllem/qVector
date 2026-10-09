@@ -71,8 +71,6 @@ pub struct UiMessage {
     pub gallery: Vec<UiGalleryItem>,
     /// the sender's picture: a file the app downloaded (set by the app, empty until then)
     pub avatar_path: String,
-    /// the card of a YouTube / X link (filled in by the app when cards are on)
-    pub embed: Option<crate::embeds::UiEmbed>,
     /// custom emoji pictures inside `html` (`mxc://` address and, once the app has downloaded it, the file)
     pub emoji: Vec<UiEmojiRef>,
 }

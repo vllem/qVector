@@ -98,8 +98,7 @@ the alice/bob direct chat (`m.direct`).
 
 ## What is done and what is not
 
-Done (engine tests + fake server only): see README. New engine modules: `emotes.rs` (MSC2545 packs, `:shortcode:` -> `<img data-mx-emoticon>`, stickers), `embeds.rs`
-(YouTube / X classification from checked ids, oEmbed fetch with `Hosts` overridable for the fake server; opt-in `embeds` pref). Notification levels use the SDK's
+Done (engine tests + fake server only): see README. New engine modules: `emotes.rs` (MSC2545 packs, `:shortcode:` -> `<img data-mx-emoticon>`, stickers). Notification levels use the SDK's
 `NotificationSettings` (the fake serves `/pushrules`), presence is asked per member after the details (`presence_of`, one request each, max 150), space exploring uses
 `/hierarchy` (`space_rooms`), QR verification is `Verifier::with_qr` (needs the peer to advertise `m.qr_code.scan.v1`, as phones do: the SDK itself only shows codes).
 Not done / ideas: voice and video calls (Element Call as a widget in WebEngine would be the route; native needs libwebrtc), scanning a QR code with a camera, a sticker /

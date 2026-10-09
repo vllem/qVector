@@ -6,7 +6,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
 option(VC_DEMO "Include the fake homeserver so `qvector --demo` runs without an account (dev aid)" ON)
-option(VC_WEBENGINE "Play YouTube embeds inside the chat with Qt WebEngine (when it is installed)" ON)
 
 # ---- the Rust core (core-rs: matrix-sdk) as a static library ----
 find_program(VC_CARGO cargo REQUIRED)
@@ -41,13 +40,6 @@ if(UNIX AND NOT APPLE)
   list(APPEND VC_QT_COMPONENTS DBus) # desktop notifications (freedesktop.org)
 endif()
 find_package(Qt6 REQUIRED COMPONENTS ${VC_QT_COMPONENTS})
-set(VC_HAVE_WEBENGINE OFF)
-if(VC_WEBENGINE)
-  find_package(Qt6 QUIET COMPONENTS WebEngineWidgets)
-  if(Qt6WebEngineWidgets_FOUND)
-    set(VC_HAVE_WEBENGINE ON)
-  endif()
-endif()
 
 set(VC_QT_SOURCES
   qt/main.cpp qt/core.cpp qt/theme.cpp qt/avatar.cpp qt/videoplayer.cpp qt/audioplayer.cpp qt/loginpage.cpp qt/sidebar.cpp qt/emoji.cpp qt/emojipicker.cpp qt/packpicker.cpp
@@ -57,11 +49,6 @@ target_include_directories(qvector PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(qvector PRIVATE vc_rust Qt6::Widgets Qt6::Multimedia Qt6::MultimediaWidgets)
 if(UNIX AND NOT APPLE)
   target_link_libraries(qvector PRIVATE Qt6::DBus)
-endif()
-if(VC_HAVE_WEBENGINE)
-  target_sources(qvector PRIVATE qt/webembed.cpp)
-  target_link_libraries(qvector PRIVATE Qt6::WebEngineWidgets)
-  target_compile_definitions(qvector PRIVATE VC_HAVE_WEBENGINE=1)
 endif()
 target_compile_options(qvector PRIVATE -Wall -Wextra -Wno-unused-parameter)
 

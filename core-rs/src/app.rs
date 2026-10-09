@@ -45,9 +45,6 @@ struct Inner {
     bookmarks: Mutex<Option<Bookmarks>>,
     focused: AtomicBool,
     previews_on: AtomicBool,
-    embeds_on: AtomicBool,
-    embeds: Mutex<HashMap<String, Option<crate::embeds::UiEmbed>>>, /* "kind:id" -> the card (None: the site had none, do not ask again this session) */
-    embed_hosts: Mutex<crate::embeds::Hosts>,
     busy: AtomicBool,
     screen: Mutex<String>,
     #[cfg(feature = "testkit")]
@@ -123,7 +120,7 @@ impl App {
         let inner = Arc::new(Inner {
             sink, data_dir: Mutex::new(data_dir), client: Mutex::new(None), secret: Mutex::new(None), verifier: Mutex::new(None), tasks: Mutex::new(Tasks::default()),
             timeline: Default::default(), thread: Default::default(), images: Default::default(), previews: Default::default(), index: Default::default(), avatars: Default::default(), user_mxc: Default::default(),
-            bookmarks: Default::default(), focused: AtomicBool::new(true), previews_on: AtomicBool::new(false), embeds_on: AtomicBool::new(false), embeds: Default::default(), embed_hosts: Default::default(), busy: AtomicBool::new(false),
+            bookmarks: Default::default(), focused: AtomicBool::new(true), previews_on: AtomicBool::new(false), busy: AtomicBool::new(false),
             screen: Mutex::new("login".into()),
             #[cfg(feature = "testkit")]
             fake: Default::default(),
@@ -216,7 +213,6 @@ impl App {
                 if b(args, "on") { i.open_index(); } else { *i.index.lock().unwrap() = None; let dir = i.dir().join("index"); self.rt().spawn(async move { let _ = std::fs::remove_dir_all(dir); }); }
                 Value::Null
             }
-            "set_embeds" => { i.embeds_on.store(b(args, "on"), Ordering::Relaxed); Value::Null }
             "set_previews" => { i.previews_on.store(b(args, "on"), Ordering::Relaxed); Value::Null }
             "search_emoji" => json!(crate::emoji::search(&s(args, "query"), args["limit"].as_u64().unwrap_or(160) as usize)),
             "account_info" => match i.client() {
@@ -372,11 +368,10 @@ impl App {
         hs.add_space("Rust club", &[plans.as_str(), "!announcements:hs"]);
         hs.add_room("Lounge");
         *self.inner.data_dir.lock().unwrap() = std::env::temp_dir().join(format!("vector-demo-{}", std::process::id())); /* never the real saved session */
-        let lines = ["Hello alice, this room is end-to-end encrypted.", "You are reading it through matrix-sdk.", "Watch https://youtu.be/dQw4w9WgXcQ", "And https://x.com/jack/status/20", "Reply below!"].map(String::from).to_vec();
+        let lines = ["Hello alice, this room is end-to-end encrypted.", "You are reading it through matrix-sdk.", "Reply below!"].map(String::from).to_vec();
         self.rt().spawn(crate::testkit::bob_says(hs.clone(), lines));
         self.rt().spawn(crate::testkit::bob_reads_alice(hs.clone()));
         let uri = hs.uri();
-        *self.inner.embed_hosts.lock().unwrap() = crate::embeds::Hosts::all_on(&uri); /* the demo's cards come from the fake server, never from the real sites */
         *self.inner.fake.lock().unwrap() = Some(hs);
         json!({"homeserver": uri})
     }
@@ -447,16 +442,6 @@ impl App {
                     let known = i.previews.lock().unwrap();
                     for r in rows.iter_mut() { if let Some(u) = ui::first_url(&r.body) { r.preview = known.get(&u).cloned().flatten(); } }
                 }
-                let embeds_on = i.embeds_on.load(Ordering::Relaxed);
-                if embeds_on { /* YouTube / X links become cards (and then need no link preview) */
-                    let known = i.embeds.lock().unwrap();
-                    for r in rows.iter_mut() {
-                        if let Some((k, eid)) = ui::first_url(&r.body).and_then(|u| crate::embeds::classify(&u)) {
-                            r.embed = known.get(&format!("{k:?}:{eid}")).cloned().flatten();
-                            if r.embed.is_some() { r.preview = None; }
-                        }
-                    }
-                }
                 i.emit("timeline", json!({"room_id": id, "rows": rows}).to_string());
                 if i.focused.load(Ordering::Relaxed) { let _ = ui::mark_read(&timeline).await; }
                 if let Some(index) = i.index.lock().unwrap().clone() { let _ = index.lock().map(|mut x| x.add_items(&id, &items)); }
@@ -470,12 +455,6 @@ impl App {
                 {   /* the custom emoji shown in messages, a few per pass like the pictures of people */
                     let wanted: Vec<String> = rows.iter().rev().flat_map(|r| r.emoji.iter()).map(|e| e.mxc.clone()).filter(|m| i.avatars.wanted(m)).take(6).collect();
                     for m in &wanted { i.avatars.fetch(&client, m, &i.avatar_dir()).await; }
-                    if !wanted.is_empty() { continue; }
-                }
-                if embeds_on { /* a few new cards per pass, the newest messages first */
-                    let wanted: Vec<(crate::embeds::Kind, String)> = { let known = i.embeds.lock().unwrap(); rows.iter().rev().take(30).filter_map(|r| ui::first_url(&r.body)).filter_map(|u| crate::embeds::classify(&u)).filter(|(k, e)| !known.contains_key(&format!("{k:?}:{e}"))).take(2).collect() };
-                    let hosts = i.embed_hosts.lock().unwrap().clone();
-                    for (k, e) in &wanted { let card = crate::embeds::fetch(client.http_client(), *k, e, &cache, &hosts).await; i.embeds.lock().unwrap().insert(format!("{k:?}:{e}"), card); }
                     if !wanted.is_empty() { continue; }
                 }
                 if previews_on { /* a few new links per pass, the newest messages first */
@@ -657,7 +636,6 @@ async fn start_session(i: Arc<Inner>, client: Client, secret: String) {
     *i.verifier.lock().unwrap() = Some(Verifier::new(client.clone(), move |json| sink.emit("verification", json)).with_qr());
     if i.pref("messageIndex") == "1" { i.open_index(); }
     if i.pref("linkPreviews") == "1" { i.previews_on.store(true, Ordering::Relaxed); }
-    if i.pref("embeds") == "1" { i.embeds_on.store(true, Ordering::Relaxed); }
     match Bookmarks::open(&i.dir().join("bookmarks"), &secret) {
         Ok(bk) => { let list = bk.list(); *i.bookmarks.lock().unwrap() = Some(bk); i.emit_json("bookmarks", &list); }
         Err(e) => eprintln!("bookmarks: {e}"),

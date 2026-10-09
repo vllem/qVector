@@ -1,9 +1,6 @@
 #include "qt/mainwindow.h"
 #include <QJsonDocument>
 #include "qt/packpicker.h"
-#ifdef VC_HAVE_WEBENGINE
-#include "qt/webembed.h"
-#endif
 #include "qt/audioplayer.h"
 #include "qt/avatar.h"
 #include "qt/theme.h"
@@ -604,7 +601,6 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     connect(timeline_, &TimelineView::threadRequested, this, &MainWindow::openThread);
     connect(timeline_, &TimelineView::forwardRequested, this, [this](const QString &id) { auto *d = new ForwardDialog(core_, rooms_, id, this); d->setAttribute(Qt::WA_DeleteOnClose); d->show(); });
     connect(timeline_, &TimelineView::historyRequested, this, [this](const QString &id) { core_->call("edit_history", {{"event_id", id}}); });
-    connect(timeline_, &TimelineView::embedRequested, this, &MainWindow::openEmbed);
     connect(timeline_, &TimelineView::playRequested, this, [this](const QString &id) { core_->call("fetch_media", {{"event_id", id}}); });
     connect(timeline_, &TimelineView::openRequested, this, &MainWindow::openPicture);
     composer_->candidates = [this](const QString &prefix) {
@@ -658,18 +654,6 @@ void MainWindow::buildMenus()
     actPreviews_->setToolTip("The preview is fetched by your homeserver, which therefore sees the link");
     actPreviews_->setChecked(core_->boolPref("linkPreviews", false));
     connect(actPreviews_, &QAction::toggled, this, [this](bool on) { core_->setBoolPref("linkPreviews", on); core_->call("set_previews", {{"on", on}}); });
-    actEmbeds_ = view->addAction("YouTube and X links as cards (fetched from those sites)");
-    actEmbeds_->setCheckable(true);
-    actEmbeds_->setToolTip("The sites see this computer's address when a card is fetched, and YouTube plays inside the window");
-    actEmbeds_->setChecked(core_->boolPref("embeds", false) || demo_);
-    if (demo_) core_->call("set_embeds", {{"on", true}}); /* the demo's cards come from its fake server */
-    connect(actEmbeds_, &QAction::toggled, this, [this](bool on) {
-        if (on && QMessageBox::question(this, "Show YouTube and X links as cards",
-                "To draw a card, qVector asks youtube.com or x.com about the link, directly and not through your homeserver. They then see this computer's address "
-                "and which link was posted. Nothing is asked about other links.\n\nTurn it on?") != QMessageBox::Yes) { QSignalBlocker b(actEmbeds_); actEmbeds_->setChecked(false); return; }
-        core_->setBoolPref("embeds", on);
-        core_->call("set_embeds", {{"on", on}});
-    });
     actIndex_ = view->addAction("Search all my messages (keeps an encrypted index on this computer)");
     actIndex_->setCheckable(true);
     actIndex_->setChecked(core_->boolPref("messageIndex", false));
@@ -1366,28 +1350,6 @@ void MainWindow::threadForDemo(const QString &text)
     for (const QJsonValue &v : timeline_->rows())
         if (S(v.toObject(), "body").contains(text)) { openThread(S(v.toObject(), "id")); QTimer::singleShot(600, this, [this] { core_->call("send_thread", {{"text", "A reply **inside** the thread"}}); }); return; }
     QTimer::singleShot(1000, this, [this, text] { threadForDemo(text); }); /* the messages may not have arrived yet */
-}
-
-/* A YouTube card plays inside a small window when Qt WebEngine is there; everything else (and every post) opens in the browser. */
-void MainWindow::openEmbed(const QString &kind, const QString &id, const QString &url)
-{
-#ifdef VC_HAVE_WEBENGINE
-    if (kind == "youtube") {
-        auto *d = new QDialog(this);
-        d->setAttribute(Qt::WA_DeleteOnClose);
-        d->setWindowTitle("YouTube");
-        d->resize(800, 450);
-        auto *l = new QVBoxLayout(d);
-        l->setContentsMargins(0, 0, 0, 0);
-        auto *w = new WebEmbed(id, d);
-        l->addWidget(w);
-        connect(w, &WebEmbed::closeRequested, d, &QDialog::close);
-        d->show();
-        return;
-    }
-#endif
-    Q_UNUSED(kind) Q_UNUSED(id)
-    QDesktopServices::openUrl(QUrl(url));
 }
 
 void MainWindow::dialogForDemo(const QString &which)

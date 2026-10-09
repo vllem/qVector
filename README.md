@@ -19,7 +19,7 @@ viewer, save, inline video), link previews (through your homeserver, opt-in), re
 icon, search of the open room and (opt-in, with a local encrypted index) of all your messages, member list with moderation (kick, ban, unban, roles, invite),
 room settings, start a conversation (user directory search), create / browse / join rooms, avatars, light and dark theme, per-room notification levels (right-click a
 room), online status dots in the member list (and Tools > My status), exploring the rooms of a space (right-click its section header), custom emoji and stickers
-(MSC2545 packs of the room, of your account and of the rooms you chose), YouTube / X link cards (opt-in; YouTube plays in a window when Qt WebEngine is installed).
+(MSC2545 packs of the room, of your account and of the rooms you chose).
 
 Encryption: messages are end-to-end encrypted with who-wrote-this shields; interactive emoji verification of this session and of other people; recovery key
 entry and creation (secret storage and key backup); the list of your account's sessions; QR codes for the other device to scan (scanning with this computer's camera is not built).

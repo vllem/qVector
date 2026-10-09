@@ -80,9 +80,6 @@ static void ensureEmojiFont()
 
 int main(int argc, char **argv)
 {
-#ifdef VC_HAVE_WEBENGINE
-    QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts); /* Qt WebEngine asks for this before the application object exists */
-#endif
     QApplication app(argc, argv);
     QApplication::setApplicationName("vector");
     QApplication::setOrganizationName("vector");

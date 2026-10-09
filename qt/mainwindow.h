@@ -71,7 +71,6 @@ public:
     ~MainWindow() override;
     void start();
     void openRoomByTitle(const QString &title); /* dev aid: opens the first room with this name */
-    void openEmbed(const QString &kind, const QString &id, const QString &url);
     void dialogForDemo(const QString &which);   /* dev aid */
     void membersForDemo() { toggleMembers(); }
     void setAutoConfirm(bool on) { autoConfirm_ = on; } /* dev aid: confirm the emoji by itself */
@@ -173,7 +172,7 @@ private:
     QPointer<RecoveryDialog> recoveryDlg_;
     QPointer<StartDmDialog> startDm_;
     QPointer<BrowseRoomsDialog> browse_, explore_;
-    QAction *actNotify_ = nullptr, *actTyping_ = nullptr, *actPreviews_ = nullptr, *actEmbeds_ = nullptr, *actIndex_ = nullptr, *actTray_ = nullptr, *actCloseTray_ = nullptr;
+    QAction *actNotify_ = nullptr, *actTyping_ = nullptr, *actPreviews_ = nullptr, *actIndex_ = nullptr, *actTray_ = nullptr, *actCloseTray_ = nullptr;
     QJsonArray sessions_;
     QPointer<QDialog> prefsDlg_;
     QString pendingReveal_;
