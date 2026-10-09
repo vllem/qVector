@@ -24,7 +24,7 @@ room), online status dots in the member list (and Tools > My status), exploring 
 Encryption: messages are end-to-end encrypted with who-wrote-this shields; interactive emoji verification of this session and of other people; recovery key
 entry and creation (secret storage and key backup); the list of your account's sessions; QR codes for the other device to scan (scanning with this computer's camera is not built).
 
-Not ported yet from the earlier all-C version: group calls (Element Call), switching a voice call to video in mid-call, choosing the camera or sound devices, screen sharing, plus sticker pack editing and scanning a QR code with a camera. Voice and video calls have only been tested between two instances of this app on the fake server (synthetic tone and pictures), never against Element, with a real sound card or a real camera. Video is H.264 only: a client that offers only VP8 gets no picture. Everything has only been tested against the built-in fake homeserver so far, not against a real server.
+Not ported yet from the earlier all-C version: group calls (Element Call), switching a voice call to video in mid-call, choosing the camera or sound devices, screen sharing, plus sticker pack editing and scanning a QR code with a camera. Voice and video calls have only been tested between two instances of this app on the fake server (synthetic tone and pictures), never against Element, with a real sound card or a real camera. Video is VP8 (preferred) or H.264, whichever the other side takes. Everything has only been tested against the built-in fake homeserver so far, not against a real server.
 This is a hobby project and has not been audited; do not rely on it for anything sensitive.
 
 ## Building
@@ -33,7 +33,7 @@ Requirements: a Rust toolchain (>= 1.96, [rustup](https://rustup.rs)), CMake >= 
 (optionally WebEngine). On Debian / Ubuntu:
 
 ```sh
-sudo apt install build-essential cmake pkg-config qt6-base-dev qt6-multimedia-dev qt6-image-formats-plugins libopus-dev libasound2-dev   # libopus and ALSA are for voice calls
+sudo apt install build-essential cmake pkg-config qt6-base-dev qt6-multimedia-dev qt6-image-formats-plugins libopus-dev libasound2-dev libvpx-dev libclang-dev   # libopus and ALSA: call audio; libvpx: VP8 video (libclang: its bindings are generated at build time)
 cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release && cmake --build build-release -j"$(nproc)"
 ./build-release/qvector
 ```

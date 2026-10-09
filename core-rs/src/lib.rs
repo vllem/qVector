@@ -176,4 +176,5 @@ pub mod rtc_peer;
 pub mod calls;
 pub mod calls_audio;
 pub mod video;
+pub mod vp8;
 pub use ui::{ui_messages, ui_rooms, UiMessage, UiRoom};

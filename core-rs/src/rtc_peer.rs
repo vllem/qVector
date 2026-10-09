@@ -13,16 +13,20 @@ use rtc::interceptor::Registry;
 use rtc::media::Sample;
 use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::{MediaEngine, MIME_TYPE_H264, MIME_TYPE_OPUS};
+use rtc::peer_connection::configuration::media_engine::{MediaEngine, MIME_TYPE_H264, MIME_TYPE_OPUS, MIME_TYPE_VP8};
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::transport::RTCIceServer;
 use rtc::rtp::codec::h264::H264Packet;
+use rtc::rtp::codec::vp8::Vp8Packet;
 use rtc::rtp::packetizer::Depacketizer;
 use rtc::rtp_transceiver::rtp_sender::{
     RTCPFeedback, RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
 use tokio::sync::{mpsc, watch};
+use rtc::rtp::packetizer::{new_packetizer, Packetizer};
+use rtc::rtp::sequence::new_random_sequencer;
+use webrtc::media_stream::track_local::static_rtp::TrackLocalStaticRTP;
 use webrtc::media_stream::track_local::static_sample::TrackLocalStaticSample;
 use webrtc::media_stream::track_local::TrackLocal;
 use webrtc::media_stream::track_remote::{TrackRemote, TrackRemoteEvent};
@@ -31,7 +35,7 @@ use webrtc::peer_connection::{
 };
 use webrtc::runtime::{default_runtime, Runtime};
 
-use crate::video::{DecoderThread, EncoderThread, Frame};
+use crate::video::{Codec, DecoderThread, EncoderThread, Frame};
 
 /// Samples in one 20 ms mono frame at 48 kHz.
 pub const FRAME: usize = 960;
@@ -63,22 +67,6 @@ struct Handler {
     runtime: Arc<dyn Runtime>,
 }
 
-/// Whether an Annex B access unit holds a key frame (IDR picture or parameter sets).
-fn has_key(unit: &[u8]) -> bool {
-    let mut i = 0;
-    while i + 3 < unit.len() {
-        if unit[i] == 0 && unit[i + 1] == 0 && unit[i + 2] == 1 {
-            if matches!(unit[i + 3] & 0x1f, 5 | 7) {
-                return true;
-            }
-            i += 3;
-        } else {
-            i += 1;
-        }
-    }
-    false
-}
-
 #[async_trait::async_trait]
 impl PeerConnectionEventHandler for Handler {
     async fn on_ice_gathering_state_change(&self, state: RTCIceGatheringState) {
@@ -100,14 +88,21 @@ impl PeerConnectionEventHandler for Handler {
         if track.kind().await == RtpCodecKind::Video {
             let Some(display) = self.display.clone() else { return };
             self.runtime.spawn(Box::pin(async move {
-                let decoder = DecoderThread::spawn(display);
-                let mut depack = H264Packet::default();
+                let mut decoder: Option<(Codec, DecoderThread)> = None;
+                let mut h264 = H264Packet::default();
+                let mut vp8 = Vp8Packet::default();
                 let mut unit: Vec<u8> = Vec::new();
                 let mut last_seq: Option<u16> = None;
                 let mut waiting_for_key = true;
                 let mut asked = Instant::now() - Duration::from_secs(10);
                 while let Some(ev) = track.poll().await {
                     let TrackRemoteEvent::OnRtpPacket(p) = ev else { continue };
+                    if decoder.is_none() {
+                        let mime = track.codec(p.header.ssrc).await.map(|c| c.mime_type).unwrap_or_default();
+                        let Some(codec) = Codec::from_mime(&mime) else { continue };
+                        decoder = Some((codec, DecoderThread::spawn(codec, display.clone())));
+                    }
+                    let Some((codec, decoder)) = decoder.as_ref() else { continue };
                     let gap = last_seq.map(|l| p.header.sequence_number != l.wrapping_add(1)).unwrap_or(false);
                     last_seq = Some(p.header.sequence_number);
                     if gap {
@@ -122,12 +117,16 @@ impl PeerConnectionEventHandler for Handler {
                         };
                         let _ = track.write_rtcp(vec![Box::new(pli)]).await;
                     }
-                    if let Ok(b) = depack.depacketize(&p.payload) {
+                    let part = match codec {
+                        Codec::H264 => h264.depacketize(&p.payload),
+                        Codec::Vp8 => vp8.depacketize(&p.payload),
+                    };
+                    if let Ok(b) = part {
                         unit.extend_from_slice(&b);
                     }
                     if p.header.marker {
                         let done = std::mem::take(&mut unit);
-                        if waiting_for_key && has_key(&done) {
+                        if waiting_for_key && codec.is_key(&done) {
                             waiting_for_key = false;
                         }
                         if !waiting_for_key && !done.is_empty() {
@@ -176,6 +175,21 @@ fn opus_codec() -> RTCRtpCodecParameters {
     }
 }
 
+fn vp8_codec() -> RTCRtpCodecParameters {
+    let fb = |typ: &str, parameter: &str| RTCPFeedback { typ: typ.into(), parameter: parameter.into() };
+    RTCRtpCodecParameters {
+        rtp_codec: RTCRtpCodec {
+            mime_type: MIME_TYPE_VP8.to_owned(),
+            clock_rate: 90000,
+            channels: 0,
+            sdp_fmtp_line: String::new(),
+            rtcp_feedback: vec![fb("nack", ""), fb("nack", "pli"), fb("ccm", "fir")],
+        },
+        payload_type: 96,
+        ..Default::default()
+    }
+}
+
 fn h264_codec() -> RTCRtpCodecParameters {
     let fb = |typ: &str, parameter: &str| RTCPFeedback { typ: typ.into(), parameter: parameter.into() };
     RTCRtpCodecParameters {
@@ -197,17 +211,35 @@ impl CallPeer {
     pub async fn new(
         ice: Vec<(Vec<String>, String, String)>,
         bind: Vec<String>,
+        capture: mpsc::Receiver<Vec<i16>>,
+        playback: Playback,
+        video: Option<VideoDisplay>,
+    ) -> Result<CallPeer, String> {
+        Self::with_codecs(ice, bind, capture, playback, video, &[Codec::Vp8, Codec::H264]).await
+    }
+
+    /// Like `new`, with the video codecs this side offers, best first (tests use it to force a fallback).
+    pub async fn with_codecs(
+        ice: Vec<(Vec<String>, String, String)>,
+        bind: Vec<String>,
         mut capture: mpsc::Receiver<Vec<i16>>,
         playback: Playback,
         video: Option<VideoDisplay>,
+        video_codecs: &[Codec],
     ) -> Result<CallPeer, String> {
         let e = |x: &dyn std::fmt::Display| x.to_string();
         let runtime = default_runtime().ok_or("no async runtime")?;
         let mut engine = MediaEngine::default();
         let codec = opus_codec();
         engine.register_codec(codec.clone(), RtpCodecKind::Audio).map_err(|x| e(&x))?;
-        let h264 = h264_codec();
-        engine.register_codec(h264.clone(), RtpCodecKind::Video).map_err(|x| e(&x))?;
+        // VP8 first: the offer lists it first, so it wins when both sides have it.
+        let mut video_params = Vec::new();
+        for c in video_codecs {
+            let params = if *c == Codec::Vp8 { vp8_codec() } else { h264_codec() };
+            engine.register_codec(params.clone(), RtpCodecKind::Video).map_err(|x| e(&x))?;
+            video_params.push(params);
+        }
+        let first_video = video_params.first().cloned().unwrap_or_else(vp8_codec);
         let registry = register_default_interceptors(Registry::new(), &mut engine).map_err(|x| e(&x))?;
         let config = RTCConfigurationBuilder::new()
             .with_ice_servers(
@@ -284,44 +316,63 @@ impl CallPeer {
         let camera = Arc::new(AtomicBool::new(false));
         let video_out = if video.is_some() {
             let vssrc = rand::random::<u32>();
-            let vtrack = Arc::new(
-                TrackLocalStaticSample::new(
-                    Instant::now(),
-                    MediaStreamTrack::new(
-                        STREAM.into(),
-                        "vector-video".into(),
-                        "video".into(),
-                        RtpCodecKind::Video,
-                        vec![RTCRtpEncodingParameters {
-                            rtp_coding_parameters: RTCRtpCodingParameters { ssrc: Some(vssrc), ..Default::default() },
-                            codec: h264.rtp_codec.clone(),
-                            ..Default::default()
-                        }],
-                    ),
-                )
-                .map_err(|x| e(&x))?,
-            );
+            // Packetising is done here, after the SDP exchange has chosen the codec: a sample track fixes it at creation.
+            let vtrack = Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
+                STREAM.into(),
+                "vector-video".into(),
+                "video".into(),
+                RtpCodecKind::Video,
+                vec![RTCRtpEncodingParameters {
+                    rtp_coding_parameters: RTCRtpCodingParameters { ssrc: Some(vssrc), ..Default::default() },
+                    codec: first_video.rtp_codec.clone(),
+                    ..Default::default()
+                }],
+            )));
             let vsender = pc.add_track(vtrack.clone() as Arc<dyn TrackLocal>).await.map_err(|x| e(&x))?;
+            // The track names one codec; the section must offer (or accept) all of ours.
+            let mine: rtc::rtp_transceiver::RTCRtpTransceiverId = vsender.id().into();
+            for t in pc.get_transceivers().await {
+                if t.id() == mine {
+                    let _ = t.set_codec_preferences(video_params.clone()).await;
+                }
+            }
             let (units_tx, mut units) = mpsc::channel::<Vec<u8>>(4);
-            let encoder = EncoderThread::spawn(units_tx);
+            let encoder = EncoderThread::spawn(Codec::Vp8, units_tx);
+            let control = encoder.clone();
             runtime.spawn(Box::pin(async move {
-                let mut payload_type = None;
+                let mut sending: Option<Box<dyn Packetizer>> = None;
                 let mut last = Instant::now();
                 while let Some(unit) = units.recv().await {
-                    if payload_type.is_none() {
-                        payload_type = match vsender.get_parameters().await {
-                            Ok(p) => p.rtp_parameters.codecs.first().map(|c| c.payload_type),
-                            Err(_) => None,
-                        };
+                    if sending.is_none() {
+                        let Ok(params) = vsender.get_parameters().await else { continue };
+                        let Some(negotiated) = params.rtp_parameters.codecs.first().cloned() else { continue };
+                        let Some(codec) = Codec::from_mime(&negotiated.rtp_codec.mime_type) else { continue };
+                        let Ok(payloader) = negotiated.rtp_codec.payloader() else { continue };
+                        sending = Some(Box::new(new_packetizer(
+                            Instant::now(),
+                            1200,
+                            negotiated.payload_type,
+                            vssrc,
+                            payloader,
+                            Box::new(new_random_sequencer()),
+                            negotiated.rtp_codec.clock_rate,
+                        )));
+                        if codec != control.codec() {
+                            // This frame was coded for another codec: switch and start over with a key frame.
+                            control.set_codec(codec);
+                            control.key();
+                            continue;
+                        }
                     }
-                    let Some(pt) = payload_type else { continue };
+                    let Some(packetizer) = sending.as_mut() else { continue };
                     let now = Instant::now();
                     let duration = now.duration_since(last).clamp(Duration::from_millis(10), Duration::from_millis(500));
                     last = now;
-                    let _ = vtrack
-                        .sample_writer(vssrc, pt)
-                        .write_sample(&Sample { data: bytes::Bytes::from(unit), duration, ..Sample::new(now) })
-                        .await;
+                    let samples = (duration.as_secs_f64() * 90000.0) as u32;
+                    let Ok(packets) = packetizer.packetize(now, &bytes::Bytes::from(unit), samples) else { continue };
+                    for pkt in packets {
+                        let _ = vtrack.write_rtp_with_extensions(pkt, &[]).await;
+                    }
                 }
             }));
             Some(encoder)
@@ -464,9 +515,19 @@ mod tests {
         b.close().await;
     }
 
-    /// A films a moving square; B must see pictures of the right size and brightness, and an audio-only peer sees none.
+    /// A films a moving square; B must see pictures of the right size and brightness. Run with VP8 (both sides have it),
+    /// and with a B that only knows H.264: the fallback must negotiate and carry pictures too.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn pictures_flow_between_two_peers_on_this_machine() {
+        picture_round(&[Codec::Vp8, Codec::H264], &[Codec::Vp8, Codec::H264], "VP8").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pictures_fall_back_to_h264_when_the_other_side_has_no_vp8() {
+        picture_round(&[Codec::Vp8, Codec::H264], &[Codec::H264], "H264").await;
+    }
+
+    async fn picture_round(a_codecs: &[Codec], b_codecs: &[Codec], expect: &str) {
         use crate::video::tests::{luma, picture};
         let seen: Arc<Mutex<Vec<(u32, u32, f32)>>> = Default::default();
         let s2 = seen.clone();
@@ -476,13 +537,14 @@ mod tests {
         let (_ta, rx_a) = mpsc::channel(16);
         let (_tb, rx_b) = mpsc::channel(16);
         let bind = || vec!["127.0.0.1:0".to_string()];
-        let a = CallPeer::new(vec![], bind(), rx_a, quiet.clone(), Some(ignore)).await.unwrap();
-        let b = CallPeer::new(vec![], bind(), rx_b, quiet, Some(display)).await.unwrap();
+        let a = CallPeer::with_codecs(vec![], bind(), rx_a, quiet.clone(), Some(ignore), a_codecs).await.unwrap();
+        let b = CallPeer::with_codecs(vec![], bind(), rx_b, quiet, Some(display), b_codecs).await.unwrap();
         let offer = a.offer().await.unwrap();
         assert!(has_video(&offer), "{offer}");
-        assert!(offer.contains("H264/90000") && offer.contains("42e01f"), "{offer}");
+        assert!(offer.contains("VP8/90000") && offer.contains("H264/90000") && offer.contains("42e01f"), "{offer}");
         let answer = b.answer(&offer).await.unwrap();
         assert!(has_video(&answer), "{answer}");
+        assert!(answer.contains(&format!("{expect}/90000")), "{answer}");
         a.accept_answer(&answer).await.unwrap();
         let mut ev_a = a.events.lock().unwrap().take().unwrap();
         let up = tokio::time::timeout(Duration::from_secs(10), async {
@@ -506,21 +568,22 @@ mod tests {
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
         let seen = seen.lock().unwrap().clone();
-        assert!(seen.len() > 20, "pictures seen: {}", seen.len());
+        assert!(seen.len() > 20, "{expect}: pictures seen: {}", seen.len());
         assert!(seen.iter().all(|&(w, h, _)| (w, h) == (320, 240)));
         let mean = seen.iter().map(|x| x.2).sum::<f32>() / seen.len() as f32;
         let want = luma(&picture(10, 320, 240));
-        assert!((mean - want).abs() < 6.0, "mean {mean} want {want}");
+        assert!((mean - want).abs() < 6.0, "{expect}: mean {mean} want {want}");
         assert!(a.has_video_out());
         a.set_camera(false);
         a.close().await;
         b.close().await;
     }
+
     #[test]
     fn key_frames_are_recognised_in_an_access_unit() {
-        assert!(has_key(&[0, 0, 0, 1, 0x67, 1, 2, 0, 0, 1, 0x65, 9]));
-        assert!(has_key(&[0, 0, 1, 0x65, 9]));
-        assert!(!has_key(&[0, 0, 0, 1, 0x41, 1, 2, 3]));
-        assert!(!has_key(&[]));
+        assert!(crate::video::has_key(&[0, 0, 0, 1, 0x67, 1, 2, 0, 0, 1, 0x65, 9]));
+        assert!(crate::video::has_key(&[0, 0, 1, 0x65, 9]));
+        assert!(!crate::video::has_key(&[0, 0, 0, 1, 0x41, 1, 2, 3]));
+        assert!(!crate::video::has_key(&[]));
     }
 }
