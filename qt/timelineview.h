@@ -79,6 +79,7 @@ private:
     QString me_, highlight_;
     bool encrypted_ = false, canLoadMore_ = false, loadingHistory_ = false;
     QJsonArray rows_;
+    QHash<QString, int> rowIndex_;
     QString seeking_; /* a message to scroll to once older history has brought it in */
     int seekTries_ = 0;
     bool seekPending_ = false;

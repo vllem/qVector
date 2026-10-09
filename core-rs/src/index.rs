@@ -16,6 +16,26 @@ use matrix_sdk_ui::timeline::TimelineItem;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IndexRow { pub room_id: String, pub event_id: String, pub sender: String, pub time: String, pub ts: u64, pub body: String }
 
+/// Case-insensitive substring test without allocating; `needle` is already lowercase. Non-ASCII needles take the slow path.
+fn contains_ci(hay: &str, needle: &str) -> bool {
+    if !needle.is_ascii() { return hay.to_lowercase().contains(needle); }
+    let (h, n) = (hay.as_bytes(), needle.as_bytes());
+    if n.len() > h.len() { return false; }
+    let (lo, up) = (n[0].to_ascii_lowercase(), n[0].to_ascii_uppercase());
+    let last = h.len() - n.len();
+    let mut i = 0;
+    while i <= last {
+        // skip quickly to the next byte that could start the needle
+        match h[i..=last].iter().position(|&b| b == lo || b == up) {
+            None => return false,
+            Some(p) => i += p,
+        }
+        if h[i..i + n.len()].eq_ignore_ascii_case(n) { return true; }
+        i += 1;
+    }
+    false
+}
+
 pub struct MessageIndex {
     file: PathBuf,
     cipher: StoreCipher,
@@ -52,6 +72,9 @@ impl MessageIndex {
 
     pub fn len(&self) -> usize { self.rows.len() }
 
+    #[cfg(test)]
+    pub(crate) fn insert_row(&mut self, row: IndexRow) { self.rows.insert(format!("{}|{}", row.room_id, row.event_id), row); self.dirty = true; }
+
     /// Add the readable messages of these timeline items (what is not decrypted yet, pending or empty is skipped).
     pub fn add_items(&mut self, room_id: &str, items: &[Arc<TimelineItem>]) -> usize {
         let mut added = 0;
@@ -72,13 +95,16 @@ impl MessageIndex {
     /// Messages containing every word of `query` (case-insensitive), in one room or all, newest first, at most `limit`.
     pub fn search(&self, query: &str, room_id: Option<&str>, limit: usize) -> Vec<IndexRow> {
         let words: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
-        if words.is_empty() { return Vec::new(); }
-        let mut hits: Vec<&IndexRow> = self.rows.values().filter(|r| room_id.map(|id| id == r.room_id).unwrap_or(true) && {
-            let hay = format!("{} {}", r.body, r.sender).to_lowercase();
-            words.iter().all(|w| hay.contains(w))
-        }).collect();
-        hits.sort_by(|a, b| b.ts.cmp(&a.ts).then(b.event_id.cmp(&a.event_id)));
-        hits.into_iter().take(limit).cloned().collect()
+        if words.is_empty() || limit == 0 { return Vec::new(); }
+        let mut hits: Vec<&IndexRow> = self.rows.values().filter(|r| room_id.map(|id| id == r.room_id).unwrap_or(true)
+            && words.iter().all(|w| contains_ci(&r.body, w) || contains_ci(&r.sender, w))).collect();
+        let newest = |a: &&IndexRow, b: &&IndexRow| b.ts.cmp(&a.ts).then(b.event_id.cmp(&a.event_id));
+        if hits.len() > limit {
+            hits.select_nth_unstable_by(limit - 1, newest);
+            hits.truncate(limit);
+        }
+        hits.sort_by(newest);
+        hits.into_iter().cloned().collect()
     }
 
     /// Write the index if it changed.

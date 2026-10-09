@@ -77,6 +77,9 @@ pub async fn timeline_messages(client: &Client, room_id: &str) -> Option<Vec<Mes
 pub mod testkit;
 
 #[cfg(test)]
+mod stress;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use wiremock::{matchers::{method, path}, Mock, MockServer, ResponseTemplate};

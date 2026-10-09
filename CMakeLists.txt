@@ -66,3 +66,12 @@ if(UNIX AND NOT APPLE)
   install(FILES packaging/qvector.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
   install(FILES packaging/qvector.png DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/256x256/apps)
 endif()
+
+# Torture test for the widgets (not built by default): cmake --build build --target qvector_stress
+add_executable(qvector_stress EXCLUDE_FROM_ALL qt/stress_main.cpp qt/core.cpp qt/theme.cpp qt/avatar.cpp qt/videoplayer.cpp qt/audioplayer.cpp qt/sidebar.cpp qt/emoji.cpp
+  qt/emojipicker.cpp qt/timelineview.cpp qt/memberlist.cpp qt/notifier.cpp)
+target_include_directories(qvector_stress PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(qvector_stress PRIVATE vc_rust Qt6::Widgets Qt6::Multimedia Qt6::MultimediaWidgets)
+if(UNIX AND NOT APPLE)
+  target_link_libraries(qvector_stress PRIVATE Qt6::DBus)
+endif()

@@ -176,6 +176,7 @@ TimelineView::~TimelineView() { stopInline(); }
 void TimelineView::reset()
 {
     rows_ = QJsonArray();
+    rowIndex_.clear();
     lastChunks_.clear(); rowEvents_.clear(); lastState_.clear();
     windowStart_.clear(); shownLimit_ = 100; stick_ = true; loadingMore_ = false; highlight_.clear();
     stopInline();
@@ -187,7 +188,13 @@ void TimelineView::reset()
 
 void TimelineView::setRows(const QJsonArray &rows)
 {
+    /* id -> position, so looking up a reply target or a jump does not walk 50 000 rows. A message arriving at the end only adds its own entry. */
+    const int old = rows_.size();
+    const bool grew = old > 0 && rows.size() >= old && rows[old - 1].toObject().value("id") == rows_[old - 1].toObject().value("id")
+        && rows[0].toObject().value("id") == rows_[0].toObject().value("id");
     rows_ = rows;
+    if (!grew) rowIndex_.clear();
+    for (int i = grew ? old : 0; i < rows.size(); i++) rowIndex_.insert(rows[i].toObject().value("id").toString(), i); /* first of equal ids wins */
     refresh();
     if (!seeking_.isEmpty() && !row(seeking_).isEmpty()) { const QString id = seeking_; seeking_.clear(); seekPending_ = false; revealMessage(id); }
 }
@@ -204,8 +211,8 @@ void TimelineView::continueSeek()
 
 QJsonObject TimelineView::row(const QString &eventId) const
 {
-    for (const QJsonValue &v : rows_) if (v.toObject().value("id").toString() == eventId) return v.toObject();
-    return QJsonObject();
+    const auto it = rowIndex_.constFind(eventId);
+    return it == rowIndex_.constEnd() ? QJsonObject() : rows_[it.value()].toObject();
 }
 
 /* Only the reader's own scrolling counts (wheel, scrollbar, keys). The scrollbar also moves when the document is laid out or redrawn; treating that as
@@ -322,7 +329,7 @@ void TimelineView::render()
     int firstShown = 0;
     if (n > int(shownLimit_)) {
         int idx = -1;
-        if (!windowStart_.isEmpty()) for (int i = 0; i < n; i++) if (S(rows_[i].toObject(), "id") == windowStart_) { idx = i; break; }
+        if (!windowStart_.isEmpty()) { const auto it = rowIndex_.constFind(windowStart_); if (it != rowIndex_.constEnd()) idx = it.value(); }
         if (idx < 0 || n - idx > int(shownLimit_) * 2) idx = n - int(shownLimit_);
         firstShown = idx;
         windowStart_ = S(rows_[idx].toObject(), "id");
@@ -813,7 +820,7 @@ void TimelineView::applyStyle()
 void TimelineView::revealMessage(const QString &eventId)
 {
     int at = -1;
-    for (int i = 0; i < rows_.size(); i++) if (S(rows_[i].toObject(), "id") == eventId) { at = i; break; }
+    { const auto it = rowIndex_.constFind(eventId); if (it != rowIndex_.constEnd()) at = it.value(); }
     if (at < 0) { /* older than what is loaded: bring in history until it shows up */
         if (canLoadMore_ && !thread_ && !seekPending_) { seeking_ = eventId; seekTries_ = 0; seekPending_ = true; loadingMore_ = true; emit olderRequested(); }
         return;
