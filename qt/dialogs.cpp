@@ -259,6 +259,163 @@ void CallDialog::ring(const QString &state, bool incoming)
     ringer_->play();
 }
 
+GroupTiles::GroupTiles(QWidget *parent) : QWidget(parent)
+{
+    setMinimumSize(420, 280);
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+}
+
+void GroupTiles::setPeople(const QJsonArray &people)
+{
+    people_ = people;
+    QStringList keep;
+    for (const QJsonValue &v : people) keep << v.toObject()["user_id"].toString();
+    for (const QString &k : frames_.keys()) if (!keep.contains(k)) frames_.remove(k);
+    update();
+}
+
+void GroupTiles::paintEvent(QPaintEvent *)
+{
+    QPainter p(this);
+    p.fillRect(rect(), QColor(24, 24, 28));
+    const int count = people_.size() + 1; /* and ourselves */
+    const int cols = qCeil(qSqrt(double(count))), rows = qCeil(double(count) / cols);
+    const int gap = 6, tw = (width() - gap * (cols + 1)) / cols, th = (height() - gap * (rows + 1)) / rows;
+    p.setRenderHint(QPainter::SmoothPixmapTransform);
+    auto tile = [&](int i, const QString &name, const QImage &img, const QString &note) {
+        const QRect r(gap + (i % cols) * (tw + gap), gap + (i / cols) * (th + gap), tw, th);
+        p.fillRect(r, QColor(40, 40, 46));
+        if (!img.isNull()) {
+            const QSize s = img.size().scaled(r.size(), Qt::KeepAspectRatio);
+            p.drawImage(QRect(r.center() - QPoint(s.width() / 2, s.height() / 2), s), img);
+        }
+        if (!note.isEmpty()) { p.setPen(QColor(200, 200, 205)); p.drawText(r, Qt::AlignCenter, note); }
+        const QRect bar(r.left(), r.bottom() - 22, r.width(), 22);
+        p.fillRect(bar, QColor(0, 0, 0, 140));
+        p.setPen(Qt::white);
+        p.drawText(bar.adjusted(8, 0, -8, 0), Qt::AlignVCenter | Qt::AlignLeft, p.fontMetrics().elidedText(name, Qt::ElideRight, bar.width() - 16));
+    };
+    int i = 0;
+    for (const QJsonValue &v : people_) {
+        const QJsonObject o = v.toObject();
+        const QString id = o["user_id"].toString();
+        const bool shows = o["remote_video"].toBool(true) && frames_.contains(id);
+        tile(i++, o["name"].toString().isEmpty() ? id : o["name"].toString(), shows ? frames_.value(id) : QImage(),
+             !o["connected"].toBool() ? "Connecting..." : shows ? QString() : "Camera off");
+    }
+    tile(i, "You", camera_ ? local_ : QImage(), camera_ ? QString() : "Camera off");
+}
+
+GroupCallDialog::GroupCallDialog(Core *core, QWidget *parent) : QDialog(parent), core_(core)
+{
+    setWindowTitle("Group call");
+    auto *lay = new QVBoxLayout(this);
+    lay->setContentsMargins(20, 18, 20, 16);
+    lay->setSpacing(10);
+    title_ = new QLabel;
+    QFont f = title_->font();
+    f.setPointSizeF(f.pointSizeF() * 1.3);
+    f.setBold(true);
+    title_->setFont(f);
+    title_->setAlignment(Qt::AlignCenter);
+    lay->addWidget(title_);
+    tiles_ = new GroupTiles;
+    lay->addWidget(tiles_, 1);
+    auto *row = new QHBoxLayout;
+    mute_ = new QPushButton("Mute");
+    mute_->setCheckable(true);
+    camera_ = new QPushButton("Camera");
+    camera_->setCheckable(true);
+    leave_ = new QPushButton("Leave");
+    row->addStretch(1);
+    row->addWidget(mute_);
+    row->addWidget(camera_);
+    row->addWidget(leave_);
+    row->addStretch(1);
+    lay->addLayout(row);
+    connect(mute_, &QPushButton::clicked, this, [this](bool on) { core_->call("set_group_muted", {{"muted", on}}); });
+    connect(camera_, &QPushButton::clicked, this, [this](bool on) { cameraOn(on); });
+    connect(leave_, &QPushButton::clicked, this, [this] { core_->call("leave_group_call"); });
+    connect(core_, &Core::remoteFrame, this, [this](const QString &who, const QImage &img) { if (!who.isEmpty()) tiles_->setFrame(who, img); });
+}
+
+GroupCallDialog::~GroupCallDialog() { stopCamera(); }
+
+void GroupCallDialog::stopCamera()
+{
+    if (cam_) cam_->stop();
+    delete session_;
+    session_ = nullptr;
+    delete cam_;
+    cam_ = nullptr;
+    delete sink_;
+    sink_ = nullptr;
+    tiles_->setLocal(QImage());
+}
+
+void GroupCallDialog::cameraOn(bool on)
+{
+    if (!on) {
+        stopCamera();
+        tiles_->setCamera(false);
+        core_->call("set_group_camera", {{"on", false}});
+        return;
+    }
+    const auto devices = QMediaDevices::videoInputs();
+    if (devices.isEmpty()) {
+        camera_->setChecked(false);
+        camera_->setEnabled(false);
+        camera_->setToolTip("No camera found");
+        return;
+    }
+    QCameraDevice device = devices.first();
+    const QString chosen = core_->pref("callCamera");
+    for (const QCameraDevice &dev : devices) if (!chosen.isEmpty() && dev.description() == chosen) device = dev;
+    cam_ = new QCamera(device, this);
+    sink_ = new QVideoSink(this);
+    session_ = new QMediaCaptureSession(this);
+    session_->setCamera(cam_);
+    session_->setVideoSink(sink_);
+    sent_.start();
+    connect(sink_, &QVideoSink::videoFrameChanged, this, [this](const QVideoFrame &fr) {
+        if (!fr.isValid() || sent_.elapsed() < 66) return;
+        sent_.restart();
+        QImage img = fr.toImage();
+        if (img.isNull()) return;
+        img = img.convertToFormat(QImage::Format_RGBA8888);
+        if (img.width() > 640 || img.height() > 360) img = img.scaled(640, 360, Qt::KeepAspectRatio, Qt::FastTransformation); /* smaller than one-to-one: every connection encodes it */
+        core_->pushVideo(img);
+        tiles_->setLocal(img.mirrored(true, false));
+    });
+    connect(cam_, &QCamera::errorOccurred, this, [this](QCamera::Error, const QString &msg) {
+        camera_->setChecked(false);
+        camera_->setToolTip(msg);
+        stopCamera();
+        tiles_->setCamera(false);
+        core_->call("set_group_camera", {{"on", false}});
+    });
+    cam_->start();
+    tiles_->setCamera(true);
+    core_->call("set_group_camera", {{"on", true}});
+}
+
+void GroupCallDialog::setState(const QJsonObject &s)
+{
+    ended_ = s["state"].toString() == "ended";
+    const QJsonArray people = s["participants"].toArray();
+    tiles_->setPeople(people);
+    mute_->setChecked(s["muted"].toBool());
+    title_->setText(people.isEmpty() ? "Group call: waiting for others" : QString("Group call with %1 %2").arg(people.size() + 1).arg("people"));
+    if (ended_) { stopCamera(); QTimer::singleShot(300, this, &QDialog::close); }
+}
+
+void GroupCallDialog::closeEvent(QCloseEvent *ev)
+{
+    stopCamera();
+    if (!ended_) core_->call("leave_group_call");
+    ev->accept();
+}
+
 CallVideo::CallVideo(QWidget *parent) : QWidget(parent)
 {
     setMinimumSize(360, 240);
@@ -335,7 +492,8 @@ CallDialog::CallDialog(Core *core, QWidget *parent) : QDialog(parent), core_(cor
     connect(share_, &QPushButton::clicked, this, [this](bool on) { shareOn(on); });
     connect(addVideo_, &QPushButton::clicked, this, [this] { core_->call("add_call_video"); addVideo_->setEnabled(false); });
     connect(hangup_, &QPushButton::clicked, this, [this] { core_->call("hangup_call"); });
-    connect(core_, &Core::remoteFrame, this, [this](const QImage &img) {
+    connect(core_, &Core::remoteFrame, this, [this](const QString &who, const QImage &img) {
+        if (!who.isEmpty()) return; /* a group call's picture */
         gotRemote_ = true;
         video_->setRemote(img);
         if (remoteShows_) video_->setNote(QString());

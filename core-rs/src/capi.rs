@@ -37,17 +37,18 @@ pub extern "C" fn vcr_app_call(app: *mut App, method: *const c_char, args_json: 
     CString::new(out).unwrap_or_default().into_raw()
 }
 
-pub type VcrVideoFn = extern "C" fn(user: *mut c_void, width: i32, height: i32, rgba: *const u8);
+pub type VcrVideoFn = extern "C" fn(user: *mut c_void, who: *const c_char, width: i32, height: i32, rgba: *const u8);
 
-/// Receive the other side's pictures of a video call: RGBA, `width * height * 4` bytes, valid only during the callback,
-/// which runs on a decoder thread.
+/// Receive the other side's pictures of a video call: `who` is the user id the picture is from in a group call (empty in a
+/// one-to-one call), RGBA, `width * height * 4` bytes, valid only during the callback, which runs on a decoder thread.
 #[no_mangle]
 pub extern "C" fn vcr_video_set_sink(app: *mut App, cb: VcrVideoFn, user: *mut c_void) {
     if app.is_null() { return; }
     let user = User(user);
-    unsafe { &*app }.set_video_sink(Arc::new(move |f| {
+    unsafe { &*app }.set_video_sink(Arc::new(move |who, f| {
         let u = &user;
-        cb(u.0, f.w as i32, f.h as i32, f.rgba.as_ptr());
+        let who = CString::new(who).unwrap_or_default();
+        cb(u.0, who.as_ptr(), f.w as i32, f.h as i32, f.rgba.as_ptr());
     }));
 }
 

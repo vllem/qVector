@@ -171,6 +171,12 @@ private:
     QPointer<SavedDialog> savedDlg_;
     QPointer<VerifyDialog> verifyDlg_;
     QPointer<CallDialog> callDlg_;
+    QPointer<GroupCallDialog> groupDlg_;
+    QHash<QString, int> groupPeople_; /* room id -> how many others are in a call there */
+    bool inGroup_ = false;
+    QToolButton *groupBtn_ = nullptr;
+    void showGroupCall(const QJsonObject &state);
+    void updateGroupButton();
     QToolButton *callBtn_ = nullptr, *videoBtn_ = nullptr;
     QPointer<RecoveryDialog> recoveryDlg_;
     QPointer<StartDmDialog> startDm_;

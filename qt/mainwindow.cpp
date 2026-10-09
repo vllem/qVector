@@ -292,7 +292,16 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     videoBtn_->setToolTip("Video call");
     videoBtn_->hide();
     connect(videoBtn_, &QToolButton::clicked, this, [this] { if (!current_.isEmpty()) core_->call("place_call", {{"room_id", current_}, {"video", true}}); });
+    groupBtn_ = new QToolButton;
+    groupBtn_->setAutoRaise(true);
+    groupBtn_->hide();
+    connect(groupBtn_, &QToolButton::clicked, this, [this] {
+        if (current_.isEmpty()) return;
+        if (inGroup_ && groupDlg_) { groupDlg_->show(); groupDlg_->raise(); groupDlg_->activateWindow(); return; }
+        core_->call("join_group_call", {{"room_id", current_}});
+    });
     bar->addWidget(topic_, 1);
+    bar->addWidget(groupBtn_);
     bar->addWidget(callBtn_);
     bar->addWidget(videoBtn_);
     bar->addWidget(membersBtn_);
@@ -877,6 +886,12 @@ void MainWindow::onEvent(const QString &name, const QJsonValue &p)
         if (browse_) browse_->setRooms(p.toArray());
     } else if (name == "edit_history") {
         showEditHistory(this, p.toArray());
+    } else if (name == "group_call") {
+        showGroupCall(p.toObject());
+    } else if (name == "group_presence") {
+        const QJsonObject o = p.toObject();
+        groupPeople_[o["room_id"].toString()] = o["participants"].toArray().size();
+        updateGroupButton();
     } else if (name == "call") {
         showCall(p.toObject());
     } else if (name == "verification") {
@@ -1003,6 +1018,26 @@ void MainWindow::updateTopic()
     membersBtn_->setVisible(!current_.isEmpty());
     callBtn_->setVisible(!current_.isEmpty() && n == 2); /* a call needs exactly one other person */
     videoBtn_->setVisible(callBtn_->isVisible());
+    updateGroupButton();
+}
+
+/* "Group call" in a room with several people, "Join call (n)" while others are in one there */
+void MainWindow::updateGroupButton()
+{
+    const int others = groupPeople_.value(current_);
+    const int n = details_["members"].toArray().size();
+    groupBtn_->setVisible(!current_.isEmpty() && (n > 2 || others > 0));
+    groupBtn_->setText(inGroup_ ? "Back to call" : others > 0 ? QString("Join call (%1)").arg(others) : "Group call");
+    groupBtn_->setToolTip("A call with everybody in this room who uses qVector (Element cannot join it)");
+}
+
+void MainWindow::showGroupCall(const QJsonObject &state)
+{
+    inGroup_ = state["state"].toString() != "ended";
+    if (!groupDlg_) { groupDlg_ = new GroupCallDialog(core_, this); groupDlg_->setAttribute(Qt::WA_DeleteOnClose); }
+    groupDlg_->setState(state);
+    if (inGroup_) { groupDlg_->show(); groupDlg_->raise(); groupDlg_->activateWindow(); }
+    updateGroupButton();
 }
 
 void MainWindow::updateClock()
@@ -1420,6 +1455,18 @@ void MainWindow::dialogForDemo(const QString &which)
     }
     else if (which == "call") showCall(QJsonObject{{"state", "incoming"}, {"name", "Zach"}, {"user_id", "@zach:example.org"}, {"incoming", true}});
     else if (which == "callon") showCall(QJsonObject{{"state", "connected"}, {"name", "Zach"}, {"user_id", "@zach:example.org"}});
+    else if (which == "group") {
+        showGroupCall(QJsonObject{{"state", "active"}, {"muted", false}, {"camera", true}, {"participants", QJsonArray{
+            QJsonObject{{"user_id", "@zach:example.org"}, {"name", "Zach"}, {"connected", true}, {"remote_video", true}},
+            QJsonObject{{"user_id", "@bea:example.org"}, {"name", "Bea"}, {"connected", true}, {"remote_video", false}},
+            QJsonObject{{"user_id", "@cy:example.org"}, {"name", "Cy"}, {"connected", false}, {"remote_video", true}}}}});
+        QImage a(640, 360, QImage::Format_RGB32), me(320, 240, QImage::Format_RGB32);
+        for (int y = 0; y < a.height(); y++) for (int x = 0; x < a.width(); x++) a.setPixel(x, y, qRgb(40 + x * 120 / a.width(), 70 + y * 100 / a.height(), 140));
+        me.fill(QColor(200, 150, 60));
+        groupDlg_->tiles()->setFrame("@zach:example.org", a);
+        groupDlg_->tiles()->setLocal(me);
+        groupDlg_->tiles()->setCamera(true);
+    }
     else if (which == "videocall" || which == "videooff") { /* synthetic pictures: no camera here, and offscreen shows no video surfaces anyway */
         showCall(QJsonObject{{"state", "connected"}, {"name", "Zach"}, {"user_id", "@zach:example.org"}, {"video", true}, {"remote_video", which == "videocall"}, {"camera", true}});
         QImage remote(640, 360, QImage::Format_RGB32), self(320, 240, QImage::Format_RGB32);

@@ -35,7 +35,8 @@ struct Inner {
     secret: Mutex<Option<String>>,
     verifier: Mutex<Option<Verifier>>,
     calls: Mutex<Option<crate::calls::Calls>>,
-    video_sink: Mutex<Option<crate::rtc_peer::VideoDisplay>>,
+    video_sink: Mutex<Option<crate::group_calls::GroupVideoSink>>,
+    groups: Mutex<Option<crate::group_calls::GroupCalls>>,
     tasks: Mutex<Tasks>,
     timeline: tokio::sync::Mutex<Option<Arc<Timeline>>>,
     thread: tokio::sync::Mutex<Option<Arc<Timeline>>>,
@@ -120,7 +121,7 @@ impl App {
     pub fn new(data_dir: PathBuf, sink: Sink) -> App {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("tokio runtime");
         let inner = Arc::new(Inner {
-            sink, data_dir: Mutex::new(data_dir), client: Mutex::new(None), secret: Mutex::new(None), verifier: Mutex::new(None), calls: Mutex::new(None), video_sink: Mutex::new(None), tasks: Mutex::new(Tasks::default()),
+            sink, data_dir: Mutex::new(data_dir), client: Mutex::new(None), secret: Mutex::new(None), verifier: Mutex::new(None), calls: Mutex::new(None), video_sink: Mutex::new(None), groups: Mutex::new(None), tasks: Mutex::new(Tasks::default()),
             timeline: Default::default(), thread: Default::default(), images: Default::default(), previews: Default::default(), index: Default::default(), avatars: Default::default(), user_mxc: Default::default(),
             bookmarks: Default::default(), focused: AtomicBool::new(true), previews_on: AtomicBool::new(false), busy: AtomicBool::new(false),
             screen: Mutex::new("login".into()),
@@ -170,6 +171,10 @@ impl App {
             "set_room_notify" => { let (id, l) = (s(args, "room_id"), s(args, "level")); self.client_action("Notification level changed", move |c| async move { ui::set_room_notification_level(&c, &id, &l).await.map(|_| id) }) }
             "place_call" => { let (r, v) = (s(args, "room_id"), b(args, "video")); self.calls_action(move |c| async move { c.place(&r, v).await }) }
             "add_call_video" => self.calls_action(|c| async move { c.add_video().await }),
+            "join_group_call" => { let r = s(args, "room_id"); self.groups_action(move |g| async move { g.join(&r).await }) }
+            "leave_group_call" => self.groups_action(|g| async move { g.leave().await; Ok(()) }),
+            "set_group_muted" => { let m = b(args, "muted"); self.groups_action(move |g| async move { g.set_muted(m); Ok(()) }) }
+            "set_group_camera" => { let on = b(args, "on"); self.groups_action(move |g| async move { g.set_camera(on).await; Ok(()) }) }
             "set_call_camera" => { let on = b(args, "on"); self.calls_action(move |c| async move { c.set_camera(on).await; Ok(()) }) }
             "answer_call" => self.calls_action(|c| async move { c.answer().await }),
             "hangup_call" => self.calls_action(|c| async move { c.hangup().await; Ok(()) }),
@@ -290,15 +295,23 @@ impl App {
         Value::Null
     }
 
-    /// Where the other side's pictures go (called on a decoder thread).
-    pub fn set_video_sink(&self, sink: crate::rtc_peer::VideoDisplay) {
+    /// Where the other side's pictures go, with who they are from (empty in a one-to-one call); called on a decoder thread.
+    pub fn set_video_sink(&self, sink: crate::group_calls::GroupVideoSink) {
         *self.inner.video_sink.lock().unwrap() = Some(sink);
     }
 
-    /// A picture from the camera, for the current video call.
+    /// A picture from the camera, for the current call (group or one-to-one).
     pub fn push_video(&self, frame: crate::video::Frame) {
+        let g = self.inner.groups.lock().unwrap().clone();
+        if let Some(g) = g.filter(|g| g.is_active()) { g.push_video(frame); return; }
         let c = self.inner.calls.lock().unwrap().clone();
         if let Some(c) = c { c.push_video(frame); }
+    }
+
+    fn groups_action<F, Fut>(&self, f: F) -> Value where F: FnOnce(crate::group_calls::GroupCalls) -> Fut + Send + 'static, Fut: std::future::Future<Output = Result<(), String>> + Send + 'static {
+        let g = self.inner.groups.lock().unwrap().clone();
+        if let Some(g) = g { let i = self.inner.clone(); self.rt().spawn(async move { if let Err(e) = f(g).await { i.notice(format!("Call failed: {e}")); } }); }
+        Value::Null
     }
 
     fn calls_action<F, Fut>(&self, f: F) -> Value where F: FnOnce(crate::calls::Calls) -> Fut + Send + 'static, Fut: std::future::Future<Output = Result<(), String>> + Send + 'static {
@@ -377,6 +390,8 @@ impl App {
             *i.thread.lock().await = None;
             let calls = i.calls.lock().unwrap().take();
             if let Some(c) = calls { c.hangup().await; }
+            let groups = i.groups.lock().unwrap().take();
+            if let Some(g) = groups { g.leave().await; }
             if let Some(c) = client { let _ = c.matrix_auth().logout().await; }
             crate::session::forget(&dir);
         });
@@ -664,13 +679,28 @@ async fn start_session(i: Arc<Inner>, client: Client, secret: String) {
     *i.verifier.lock().unwrap() = Some(Verifier::new(client.clone(), move |json| sink.emit("verification", json)).with_qr());
     let sink = i.clone();
     let devices = i.clone();
-    let calls = crate::calls::Calls::new(client.clone(), crate::calls_audio::sound_card(Arc::new(move || (devices.pref("callMicrophone"), devices.pref("callSpeakers")))), move |json| sink.emit("call", json));
+    let card = move || { let d = devices.clone(); crate::calls_audio::sound_card(Arc::new(move || (d.pref("callMicrophone"), d.pref("callSpeakers")))) };
+    let calls = crate::calls::Calls::new(client.clone(), card(), move |json| sink.emit("call", json));
     let pictures = i.clone();
     calls.set_video_sink(Arc::new(move |f| {
         let sink = pictures.video_sink.lock().unwrap().clone();
-        if let Some(sink) = sink { sink(f); }
+        if let Some(sink) = sink { sink("", f); }
     }));
+    let sink = i.clone();
+    let in_group = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let groups = crate::group_calls::GroupCalls::new(client.clone(), card(), in_group.clone(), move |name, json| sink.emit(name, json));
+    let pictures = i.clone();
+    groups.set_video_sink(Arc::new(move |who, f| {
+        let sink = pictures.video_sink.lock().unwrap().clone();
+        if let Some(sink) = sink { sink(who, f); }
+    }));
+    calls.set_group_flag(in_group);
+    let one_to_one = calls.clone();
+    groups.set_one_to_one_busy(Arc::new(move || one_to_one.is_busy()));
     *i.calls.lock().unwrap() = Some(calls);
+    *i.groups.lock().unwrap() = Some(groups.clone());
+    let known = client.clone();
+    tokio::spawn(async move { for room in known.joined_rooms() { groups.refresh_presence(&room).await; } });
     if i.pref("messageIndex") == "1" { i.open_index(); }
     if i.pref("linkPreviews") == "1" { i.previews_on.store(true, Ordering::Relaxed); }
     match Bookmarks::open(&i.dir().join("bookmarks"), &secret) {

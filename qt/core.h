@@ -28,11 +28,11 @@ public:
 
 signals:
     void event(const QString &name, const QJsonValue &payload);
-    void remoteFrame(const QImage &picture);
+    void remoteFrame(const QString &who, const QImage &picture); /* who: user id in a group call, empty in a one-to-one call */
 
 private:
     static void trampoline(void *user, const char *name, const char *json);
-    static void pictureTrampoline(void *user, int width, int height, const unsigned char *rgba);
+    static void pictureTrampoline(void *user, const char *who, int width, int height, const unsigned char *rgba);
     ::App *app_ = nullptr;
 };
 

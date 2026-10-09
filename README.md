@@ -24,7 +24,7 @@ room), online status dots in the member list (and Tools > My status), exploring 
 Encryption: messages are end-to-end encrypted with who-wrote-this shields; interactive emoji verification of this session and of other people; recovery key
 entry and creation (secret storage and key backup); the list of your account's sessions; QR codes for the other device to scan (scanning with this computer's camera is not built).
 
-Not ported yet from the earlier all-C version: group calls (Element Call), plus sticker pack editing and scanning a QR code with a camera. Voice and video calls have only been tested between two instances of this app on the fake server (synthetic tone and pictures), never against Element, with a real sound card or a real camera. Video is VP8 (preferred) or H.264, whichever the other side takes. Everything has only been tested against the built-in fake homeserver so far, not against a real server.
+Group calls ("Group call" / "Join call" in a room with several people, up to 5) are a full mesh between qVector clients: Element cannot join them (Element Call uses a LiveKit server, which this app does not speak). Not ported yet from the earlier all-C version: Element Call, plus sticker pack editing and scanning a QR code with a camera. Voice and video calls have only been tested between two instances of this app on the fake server (synthetic tone and pictures), never against Element, with a real sound card or a real camera. Video is VP8 (preferred) or H.264, whichever the other side takes. Everything has only been tested against the built-in fake homeserver so far, not against a real server.
 This is a hobby project and has not been audited; do not rely on it for anything sensitive.
 
 ## Building

@@ -5,6 +5,8 @@
 #include <QDialog>
 #include <QElapsedTimer>
 #include <QTimer>
+#include <QHash>
+#include <QImage>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QLabel>
@@ -90,6 +92,26 @@ private:
     QString note_;
 };
 
+/* The tiles of a group call: everybody's picture (or a note), ours included, in a grid. */
+class GroupTiles : public QWidget {
+    Q_OBJECT
+public:
+    explicit GroupTiles(QWidget *parent = nullptr);
+    void setPeople(const QJsonArray &people);   /* [{user_id, name, connected, remote_video}] */
+    void setFrame(const QString &who, const QImage &img) { frames_[who] = img; update(); }
+    void setLocal(const QImage &img) { local_ = img; update(); }
+    QSize sizeHint() const override { return QSize(640, 400); }
+protected:
+    void paintEvent(QPaintEvent *) override;
+private:
+    QJsonArray people_;
+    QHash<QString, QImage> frames_;
+    QImage local_;
+    bool camera_ = false;
+public:
+    void setCamera(bool on) { camera_ = on; update(); }
+};
+
 class CallDialog : public QDialog {
     Q_OBJECT
 public:
@@ -141,6 +163,30 @@ private:
     QLabel *label_, *info_;
     QScrollArea *area_;
     double zoom_ = 0; /* 0 = fit the window, otherwise the scale (1 = actual size) */
+};
+
+/* A call with several people in one room (a mesh between qVector clients; Element does not join it). */
+class GroupCallDialog : public QDialog {
+    Q_OBJECT
+public:
+    GroupCallDialog(Core *core, QWidget *parent);
+    ~GroupCallDialog() override;
+    void setState(const QJsonObject &s);
+    GroupTiles *tiles() const { return tiles_; }
+protected:
+    void closeEvent(QCloseEvent *) override;
+private:
+    void cameraOn(bool on);
+    void stopCamera();
+    Core *core_;
+    QLabel *title_;
+    GroupTiles *tiles_;
+    QPushButton *mute_, *camera_, *leave_;
+    QCamera *cam_ = nullptr;
+    QMediaCaptureSession *session_ = nullptr;
+    QVideoSink *sink_ = nullptr;
+    QElapsedTimer sent_;
+    bool ended_ = false;
 };
 
 /* The contents of a text file in a window of its own (read-only, monospace): Save as, Copy, word wrap and find. */

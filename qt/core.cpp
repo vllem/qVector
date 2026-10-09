@@ -39,11 +39,12 @@ Core::~Core()
 }
 
 /* a decoder thread calls this; the buffer is only valid now, so copy the picture */
-void Core::pictureTrampoline(void *user, int width, int height, const unsigned char *rgba)
+void Core::pictureTrampoline(void *user, const char *who, int width, int height, const unsigned char *rgba)
 {
     Core *self = static_cast<Core *>(user);
     const QImage img = QImage(rgba, width, height, width * 4, QImage::Format_RGBA8888).copy();
-    QMetaObject::invokeMethod(self, [self, img] { emit self->remoteFrame(img); }, Qt::QueuedConnection);
+    const QString from = QString::fromUtf8(who);
+    QMetaObject::invokeMethod(self, [self, from, img] { emit self->remoteFrame(from, img); }, Qt::QueuedConnection);
 }
 
 void Core::pushVideo(const QImage &picture)

@@ -16,7 +16,7 @@ char *vcr_app_call(VcrApp *app, const char *method, const char *args_json); /* r
 void vcr_string_free(char *s);
 
 /* Video calls: pictures are RGBA, width * height * 4 bytes, rows top to bottom. */
-typedef void (*VcrVideoFn)(void *user, int width, int height, const unsigned char *rgba);
+typedef void (*VcrVideoFn)(void *user, const char *who, int width, int height, const unsigned char *rgba); /* who: user id in a group call, "" otherwise */
 void vcr_video_set_sink(VcrApp *app, VcrVideoFn cb, void *user); /* the other side's pictures; the buffer is valid during the callback only; decoder thread */
 void vcr_video_push(VcrApp *app, int width, int height, const unsigned char *rgba); /* one camera picture (copied); ignored unless the camera is on */
 void vcr_app_free(VcrApp *app);
