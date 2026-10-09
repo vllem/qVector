@@ -34,6 +34,7 @@ struct Inner {
     client: Mutex<Option<Client>>,
     secret: Mutex<Option<String>>,
     verifier: Mutex<Option<Verifier>>,
+    calls: Mutex<Option<crate::calls::Calls>>,
     tasks: Mutex<Tasks>,
     timeline: tokio::sync::Mutex<Option<Arc<Timeline>>>,
     thread: tokio::sync::Mutex<Option<Arc<Timeline>>>,
@@ -118,7 +119,7 @@ impl App {
     pub fn new(data_dir: PathBuf, sink: Sink) -> App {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("tokio runtime");
         let inner = Arc::new(Inner {
-            sink, data_dir: Mutex::new(data_dir), client: Mutex::new(None), secret: Mutex::new(None), verifier: Mutex::new(None), tasks: Mutex::new(Tasks::default()),
+            sink, data_dir: Mutex::new(data_dir), client: Mutex::new(None), secret: Mutex::new(None), verifier: Mutex::new(None), calls: Mutex::new(None), tasks: Mutex::new(Tasks::default()),
             timeline: Default::default(), thread: Default::default(), images: Default::default(), previews: Default::default(), index: Default::default(), avatars: Default::default(), user_mxc: Default::default(),
             bookmarks: Default::default(), focused: AtomicBool::new(true), previews_on: AtomicBool::new(false), busy: AtomicBool::new(false),
             screen: Mutex::new("login".into()),
@@ -166,6 +167,10 @@ impl App {
             "leave_room" => { let id = s(args, "room_id"); self.client_action("Left the room", move |c| async move { ui::leave_room(&c, &id).await.map(|_| id) }) }
             "set_room_tag" => { let (id, k) = (s(args, "room_id"), s(args, "kind")); self.client_action("Room updated", move |c| async move { ui::set_room_tag(&c, &id, &k).await.map(|_| id) }) }
             "set_room_notify" => { let (id, l) = (s(args, "room_id"), s(args, "level")); self.client_action("Notification level changed", move |c| async move { ui::set_room_notification_level(&c, &id, &l).await.map(|_| id) }) }
+            "place_call" => { let r = s(args, "room_id"); self.calls_action(move |c| async move { c.place(&r).await }) }
+            "answer_call" => self.calls_action(|c| async move { c.answer().await }),
+            "hangup_call" => self.calls_action(|c| async move { c.hangup().await; Ok(()) }),
+            "set_call_muted" => { let m = b(args, "muted"); self.calls_action(move |c| async move { c.set_muted(m); Ok(()) }) }
             "set_presence" => { let st = s(args, "state"); self.client_action("Status changed", move |c| async move { ui::set_own_presence(&c, &st).await.map(|_| String::new()) }) }
             "create_room" => {
                 let (n, t, e, p) = (s(args, "name"), s(args, "topic"), b(args, "encrypted"), b(args, "public"));
@@ -281,6 +286,12 @@ impl App {
         Value::Null
     }
 
+    fn calls_action<F, Fut>(&self, f: F) -> Value where F: FnOnce(crate::calls::Calls) -> Fut + Send + 'static, Fut: std::future::Future<Output = Result<(), String>> + Send + 'static {
+        let c = self.inner.calls.lock().unwrap().clone();
+        if let Some(c) = c { let i = self.inner.clone(); self.rt().spawn(async move { if let Err(e) = f(c).await { i.notice(format!("Call failed: {e}")); } }); }
+        Value::Null
+    }
+
     fn verification<F, Fut>(&self, f: F) -> Value where F: FnOnce(Verifier, Arc<Inner>) -> Fut + Send + 'static, Fut: std::future::Future<Output = ()> + Send + 'static {
         let v = self.inner.verifier.lock().unwrap().clone();
         if let Some(v) = v { let i = self.inner.clone(); self.rt().spawn(async move { f(v, i).await; }); }
@@ -349,6 +360,8 @@ impl App {
         self.rt().spawn(async move {
             *i.timeline.lock().await = None;
             *i.thread.lock().await = None;
+            let calls = i.calls.lock().unwrap().take();
+            if let Some(c) = calls { c.hangup().await; }
             if let Some(c) = client { let _ = c.matrix_auth().logout().await; }
             crate::session::forget(&dir);
         });
@@ -634,6 +647,8 @@ async fn start_session(i: Arc<Inner>, client: Client, secret: String) {
     *i.secret.lock().unwrap() = Some(secret.clone());
     let sink = i.clone();
     *i.verifier.lock().unwrap() = Some(Verifier::new(client.clone(), move |json| sink.emit("verification", json)).with_qr());
+    let sink = i.clone();
+    *i.calls.lock().unwrap() = Some(crate::calls::Calls::new(client.clone(), crate::calls_audio::sound_card(), move |json| sink.emit("call", json)));
     if i.pref("messageIndex") == "1" { i.open_index(); }
     if i.pref("linkPreviews") == "1" { i.previews_on.store(true, Ordering::Relaxed); }
     match Bookmarks::open(&i.dir().join("bookmarks"), &secret) {
