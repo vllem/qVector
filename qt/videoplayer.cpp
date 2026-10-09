@@ -1,5 +1,6 @@
 #include "qt/theme.h"
 #include "qt/videoplayer.h"
+#include <QPainter>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QMouseEvent>
@@ -59,6 +60,13 @@ void SeekSlider::mouseReleaseEvent(QMouseEvent *e)
 
 /* ---- the player ---- */
 
+void VideoPlayer::paintEvent(QPaintEvent *)
+{
+    QPainter p(this);
+    p.setPen(QColor(0x80, 0x80, 0x80));
+    p.drawRect(rect().adjusted(0, 0, -1, -1));
+}
+
 VideoPlayer::VideoPlayer(QWidget *parent) : QWidget(parent)
 {
     setFocusPolicy(Qt::StrongFocus);
@@ -67,7 +75,7 @@ VideoPlayer::VideoPlayer(QWidget *parent) : QWidget(parent)
     dark.setColor(QPalette::Window, Qt::black);
     setPalette(dark);
     auto *v = new QVBoxLayout(this);
-    v->setContentsMargins(0, 0, 0, 0);
+    v->setContentsMargins(1, 1, 1, 1); /* room for the frame drawn in paintEvent, like the one around pictures */
     v->setSpacing(0);
     video_ = new QVideoWidget(this);
     video_->setMinimumSize(40, 30);

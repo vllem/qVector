@@ -37,6 +37,7 @@ public:
     static constexpr int kControlsHeight = 34;
     explicit VideoPlayer(QWidget *parent = nullptr);
     ~VideoPlayer() override;
+    void paintEvent(QPaintEvent *) override;
     bool open(const QString &path);
     bool openUrl(const QUrl &url); /* a network stream */
     QString error() const { return error_; }
