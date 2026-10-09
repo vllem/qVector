@@ -428,6 +428,12 @@ impl CallPeer {
         Ok(())
     }
 
+    /// Drop our own pending offer (the other side's offer won a simultaneous negotiation).
+    pub async fn rollback(&self) -> Result<(), String> {
+        let d = RTCSessionDescription::rollback(None).map_err(|x| x.to_string())?;
+        self.pc.set_local_description(d).await.map_err(|x| x.to_string())
+    }
+
     /// A new offer on a running connection (after `add_video`).
     pub async fn renegotiate(&self) -> Result<String, String> {
         self.offer().await

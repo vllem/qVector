@@ -548,15 +548,24 @@ impl Calls {
                 }
                 let kind = content["description"]["type"].as_str().unwrap_or("");
                 let sdp = content["description"]["sdp"].as_str().unwrap_or("").to_string();
-                let (peer, negotiating, room_id, party) = {
+                let (peer, negotiating, room_id, party, polite) = {
                     let g = self.active.lock().unwrap();
                     match g.as_ref().filter(|a| a.call_id == call_id && a.phase == Phase::Connected) {
-                        Some(a) => (a.peer.clone(), a.negotiating, a.room_id.clone(), a.party.clone()),
+                        Some(a) => (a.peer.clone(), a.negotiating, a.room_id.clone(), a.party.clone(), a.incoming),
                         None => return,
                     }
                 };
                 let Some(peer) = peer else { return };
-                if kind == "offer" && !negotiating {
+                /* Both sides offered at once: the callee is polite and takes the caller's offer instead of its own, the caller ignores ours. */
+                if kind == "offer" && negotiating {
+                    if !polite || peer.rollback().await.is_err() {
+                        return;
+                    }
+                    if let Some(a) = self.active.lock().unwrap().as_mut().filter(|a| a.call_id == call_id) {
+                        a.negotiating = false;
+                    }
+                }
+                if kind == "offer" {
                     if has_video(&sdp) && !peer.has_video_out() && peer.add_video(self.display()).await.is_err() {
                         return;
                     }
@@ -804,5 +813,56 @@ mod tests {
         pump(&alice, &bob, &la, &lb, |a, _| a.last().map(|s| s == "ended").unwrap_or(false)).await;
         let unhandled: Vec<_> = hs.log().into_iter().filter(|l| l.contains("UNHANDLED") && !l.contains("well-known")).collect();
         assert!(unhandled.is_empty(), "{unhandled:?}");
+    }
+
+    /// Both people press "Add video" at the same moment: the callee yields, and both ends get pictures.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn simultaneous_video_offers_settle_with_the_caller_winning() {
+        use crate::video::tests::{luma, picture};
+        let hs = FakeHs::start().await;
+        let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let alice = crate::session::sign_in(da.path(), &hs.uri(), "alice", "x", None, "a").await.unwrap();
+        let bob = crate::session::sign_in(db.path(), &hs.uri(), "bob", "x", None, "b").await.unwrap();
+        crate::sync_once(&alice).await.unwrap();
+        crate::sync_once(&bob).await.unwrap();
+        let room = alice.joined_rooms().first().unwrap().room_id().to_string();
+
+        let (la, lb): (Arc<Mutex<Vec<Value>>>, Arc<Mutex<Vec<Value>>>) = Default::default();
+        let (ca, cb) = (la.clone(), lb.clone());
+        let lo = vec!["127.0.0.1:0".to_string()];
+        let quiet = || card(false, Arc::new(AtomicUsize::new(0)));
+        let ac = Calls::new(alice.clone(), quiet(), move |s| ca.lock().unwrap().push(serde_json::from_str(&s).unwrap())).with_bind(lo.clone());
+        let bc = Calls::new(bob.clone(), quiet(), move |s| cb.lock().unwrap().push(serde_json::from_str(&s).unwrap())).with_bind(lo);
+        let (seen_a, seen_b): (Arc<Mutex<Vec<f32>>>, Arc<Mutex<Vec<f32>>>) = Default::default();
+        let (sa, sb) = (seen_a.clone(), seen_b.clone());
+        ac.set_video_sink(Arc::new(move |f: Frame| sa.lock().unwrap().push(luma(&f))));
+        bc.set_video_sink(Arc::new(move |f: Frame| sb.lock().unwrap().push(luma(&f))));
+
+        ac.place(&room, false).await.unwrap();
+        pump(&alice, &bob, &la, &lb, |_, b| b.contains(&"incoming".to_string())).await;
+        bc.answer().await.unwrap();
+        pump(&alice, &bob, &la, &lb, |a, b| a.contains(&"connected".to_string()) && b.contains(&"connected".to_string())).await;
+
+        let (r1, r2) = tokio::join!(ac.add_video(), bc.add_video());
+        assert!(r1.is_ok() && r2.is_ok(), "{r1:?} {r2:?}");
+        for _ in 0..200 {
+            crate::sync_once(&alice).await.unwrap();
+            crate::sync_once(&bob).await.unwrap();
+            let idle = |c: &Calls| c.active.lock().unwrap().as_ref().map(|a| !a.negotiating).unwrap_or(false);
+            if idle(&ac) && idle(&bc) { break; }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(!ac.active.lock().unwrap().as_ref().unwrap().negotiating && !bc.active.lock().unwrap().as_ref().unwrap().negotiating, "still negotiating");
+        ac.set_camera(true).await;
+        bc.set_camera(true).await;
+        for n in 0..70 {
+            ac.push_video(picture(n, 320, 240));
+            bc.push_video(picture(n, 320, 240));
+            tokio::time::sleep(Duration::from_millis(66)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(seen_b.lock().unwrap().len() > 15, "bob saw {} pictures", seen_b.lock().unwrap().len());
+        assert!(seen_a.lock().unwrap().len() > 15, "alice saw {} pictures", seen_a.lock().unwrap().len());
+        bc.hangup().await;
     }
 }
