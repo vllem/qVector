@@ -219,17 +219,21 @@ impl Calls {
         };
         let early = {
             let mut g = self.active.lock().unwrap();
-            let Some(a) = g.as_mut().filter(|a| a.call_id == call_id) else {
-                drop(g);
-                peer.close().await;
-                return Err("The call ended".into());
-            };
-            a.peer = Some(peer.clone());
-            a.audio = Some(guard);
-            a.phase = Phase::Connecting;
-            a.remote_set = true;
-            self.emit("connecting", a, "");
-            std::mem::take(&mut a.early)
+            match g.as_mut().filter(|a| a.call_id == call_id) {
+                Some(a) => {
+                    a.peer = Some(peer.clone());
+                    a.audio = Some(guard);
+                    a.phase = Phase::Connecting;
+                    a.remote_set = true;
+                    self.emit("connecting", a, "");
+                    Some(std::mem::take(&mut a.early))
+                }
+                None => None,
+            }
+        };
+        let Some(early) = early else {
+            peer.close().await;
+            return Err("The call ended".into());
         };
         for c in early {
             Self::add_candidates(&peer, &c).await;
