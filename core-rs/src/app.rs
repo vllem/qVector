@@ -120,6 +120,8 @@ impl Inner {
 impl App {
     /// `data_dir`: where the saved session, caches and preferences live.
     pub fn new(data_dir: PathBuf, sink: Sink) -> App {
+        #[cfg(feature = "console")]
+        { static ONCE: std::sync::Once = std::sync::Once::new(); ONCE.call_once(|| console_subscriber::init()); } /* listens on 127.0.0.1:6669 for `tokio-console` */
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("tokio runtime");
         let inner = Arc::new(Inner {
             sink, data_dir: Mutex::new(data_dir), client: Mutex::new(None), secret: Mutex::new(None), verifier: Mutex::new(None), calls: Mutex::new(None), video_sink: Mutex::new(None), groups: Mutex::new(None), tasks: Mutex::new(Tasks::default()),
