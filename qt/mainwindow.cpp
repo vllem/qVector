@@ -1121,8 +1121,9 @@ void MainWindow::startEdit(const QString &eventId)
     composer_->setFocus();
 }
 
-void MainWindow::startSending()
+void MainWindow::startSending(const QString &what)
 {
+    sendLabel_->setText(what.isEmpty() ? QString("Sending...") : "Sending " + what + "...");
     sendStart_ = QDateTime::currentMSecsSinceEpoch();
     sendLabel_->show();
     sendBar_->show();
@@ -1157,7 +1158,7 @@ void MainWindow::send()
     if (!pending_.isEmpty()) {
         /* several files go out as one gallery message; the typed text is its caption */
         core_->call("send_files", {{"paths", QJsonArray::fromStringList(pending_)}, {"caption", text}});
-        startSending();
+        startSending(pending_.size() == 1 ? QFileInfo(pending_[0]).fileName() : QString::number(pending_.size()) + " files");
         composer_->clear(); drafts_.remove(current_);
         cancelAttachment();
         timeline_->stickToBottom();

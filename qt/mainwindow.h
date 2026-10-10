@@ -145,7 +145,7 @@ private:
     QProgressBar *sendBar_ = nullptr;
     QTimer *sendTimeout_ = nullptr;
     qint64 sendStart_ = 0;
-    void startSending();
+    void startSending(const QString &what = QString());
     void stopSending();
     void updateSending(const QJsonArray &rows);
     void updateClock();
