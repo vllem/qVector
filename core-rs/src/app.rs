@@ -121,7 +121,12 @@ impl App {
     /// `data_dir`: where the saved session, caches and preferences live.
     pub fn new(data_dir: PathBuf, sink: Sink) -> App {
         #[cfg(feature = "console")]
-        { static ONCE: std::sync::Once = std::sync::Once::new(); ONCE.call_once(|| console_subscriber::init()); } /* listens on 127.0.0.1:6669 for `tokio-console` */
+        { static ONCE: std::sync::Once = std::sync::Once::new(); ONCE.call_once(|| {
+            /* only task spans and waker events reach the console layer: it panics once a resource callsite set passes 32 entries (console-subscriber 0.5), so resources are left out */
+            use tracing_subscriber::{filter::{LevelFilter, Targets}, prelude::*};
+            let only_tokio = Targets::new().with_target("tokio::task", LevelFilter::TRACE).with_target("runtime::waker", LevelFilter::TRACE);
+            let _ = tracing_subscriber::registry().with(console_subscriber::ConsoleLayer::builder().with_default_env().spawn().with_filter(only_tokio)).try_init();
+        }); } /* listens on 127.0.0.1:6669 for `tokio-console` */
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("tokio runtime");
         let inner = Arc::new(Inner {
             sink, data_dir: Mutex::new(data_dir), client: Mutex::new(None), secret: Mutex::new(None), verifier: Mutex::new(None), calls: Mutex::new(None), video_sink: Mutex::new(None), groups: Mutex::new(None), tasks: Mutex::new(Tasks::default()),

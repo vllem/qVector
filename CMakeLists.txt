@@ -7,6 +7,7 @@ set(CMAKE_AUTOMOC ON)
 
 option(VC_DEMO "Include the fake homeserver so `qvector --demo` runs without an account (dev aid)" ON)
 
+option(VC_CONSOLE "Build the engine with tokio-console support (dev aid: run `tokio-console` while the app runs)" OFF)
 # ---- the Rust core (core-rs: matrix-sdk) as a static library ----
 find_program(VC_CARGO cargo REQUIRED)
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
@@ -23,10 +24,22 @@ set(VC_RUST_FEATURES "")
 if(VC_DEMO)
   set(VC_RUST_FEATURES --features testkit)
 endif()
+set(VC_RUST_ENV CARGO_TARGET_DIR=${VC_RUST_TARGET_DIR})
+if(VC_CONSOLE)
+  # tokio-console: its own target directory (tokio_unstable changes every dependency), see README "Diagnosing stalls"
+  set(VC_RUST_TARGET_DIR ${CMAKE_BINARY_DIR}/core-rs)
+  if(VC_RUST_PROFILE STREQUAL "dev")
+    set(VC_RUST_OUT ${VC_RUST_TARGET_DIR}/debug)
+  else()
+    set(VC_RUST_OUT ${VC_RUST_TARGET_DIR}/release)
+  endif()
+  set(VC_RUST_ENV CARGO_TARGET_DIR=${VC_RUST_TARGET_DIR} "RUSTFLAGS=--cfg tokio_unstable")
+  set(VC_RUST_FEATURES ${VC_RUST_FEATURES} --features console)
+endif()
 set(VC_RUST_LIB ${VC_RUST_OUT}/libvector_core.a)
 file(GLOB_RECURSE VC_RUST_SOURCES CONFIGURE_DEPENDS core-rs/src/*.rs core-rs/Cargo.toml Cargo.toml Cargo.lock)
 add_custom_command(OUTPUT ${VC_RUST_LIB}
-  COMMAND ${CMAKE_COMMAND} -E env CARGO_TARGET_DIR=${VC_RUST_TARGET_DIR} ${VC_CARGO} build --profile ${VC_RUST_PROFILE} --lib --locked -p vector-core ${VC_RUST_FEATURES} --manifest-path ${CMAKE_SOURCE_DIR}/Cargo.toml
+  COMMAND ${CMAKE_COMMAND} -E env ${VC_RUST_ENV} ${VC_CARGO} build --profile ${VC_RUST_PROFILE} --lib --locked -p vector-core ${VC_RUST_FEATURES} --manifest-path ${CMAKE_SOURCE_DIR}/Cargo.toml
   DEPENDS ${VC_RUST_SOURCES} COMMENT "Building the Rust core (cargo)" VERBATIM)
 add_custom_target(vc_rust_build DEPENDS ${VC_RUST_LIB})
 add_library(vc_rust STATIC IMPORTED GLOBAL)

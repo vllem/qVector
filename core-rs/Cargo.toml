@@ -21,7 +21,8 @@ serde = { version = "1", features = ["derive"] }
 matrix-sdk-ui = { version = "=0.19.1", default-features = false, features = ["unstable-msc4274"] }
 futures-util = "0.3"
 wiremock = { version = "0.6", optional = true }
-console-subscriber = { version = "0.4", optional = true }
+console-subscriber = { version = "0.5", optional = true }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"], optional = true }
 webrtc = "0.21.0"
 opus = "0.4.0"
 cpal = "0.18.2"
@@ -42,7 +43,7 @@ incremental = true
 
 [features]
 # tokio-console (see README "Diagnosing stalls"): needs RUSTFLAGS="--cfg tokio_unstable"; off in normal builds
-console = ["dep:console-subscriber", "tokio/tracing"]
+console = ["dep:console-subscriber", "dep:tracing-subscriber", "tokio/tracing"]
 # a tiny fake homeserver (wiremock) for tests and for running the UI without a real account
 testkit = ["dep:wiremock"]
 
