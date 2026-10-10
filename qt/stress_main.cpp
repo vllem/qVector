@@ -99,6 +99,11 @@ int main(int argc, char **argv)
     step("timeline: reveal a message 1500 rows back in 20k rows", 2500, [&] { tl.revealMessage("$e18500"); });
 
     tl.reset();
+    step("timeline: a 6000-character message of sentences and a link", 300, [&] {
+        QString b; for (int i = 0; i < 60; i++) b += "This is sentence number " + QString::number(i) + ", written the way people write.Some run on. See https://example.org/a/b?c=d for more (really).\n";
+        tl.setRows(QJsonArray{message(1, b)});
+    });
+    tl.reset();
     step("timeline: one 5 MB message body", 1500, [&] { tl.setRows(QJsonArray{message(1, QString(5000000, 'a'))}); });
     step("timeline: one 2 MB message of words", 1500, [&] { tl.setRows(QJsonArray{message(1, QString("lorem ipsum dolor sit amet ").repeated(80000))}); });
     step("timeline: 200 lines of 20 000 unbreakable characters", 1500, [&] {

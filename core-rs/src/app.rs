@@ -147,7 +147,7 @@ impl App {
             "select_room" => self.select_room(&s(args, "room_id")),
             "send" => { let (t, r) = (s(args, "text"), s(args, "reply_to")); if !t.trim().is_empty() { self.on_timeline(move |i, tl| async move {
                 let emoji = match i.client() { Some(c) if t.contains(':') => crate::emotes::emoji_map(&crate::emotes::emote_packs(&c, tl.room().room_id().as_str()).await), _ => Default::default() };
-                let _ = ui::send_text_with_emoji(&tl, &t, Some(r.as_str()), &emoji).await; }); } Value::Null }
+                if let Err(e) = ui::send_text_with_emoji(&tl, &t, Some(r.as_str()), &emoji).await { i.notice(format!("Cannot send the message: {e}")); } }); } Value::Null }
             "emote_packs" => self.send_emote_packs(&s(args, "room_id")),
             "send_sticker" => { let (m, b, w, h, mime) = (s(args, "mxc"), s(args, "body"), args["width"].as_u64().unwrap_or(0) as u32, args["height"].as_u64().unwrap_or(0) as u32, s(args, "mime")); self.on_timeline(move |i, tl| async move { if let Err(e) = ui::send_sticker(&tl, &m, &b, w, h, &mime).await { i.notice(format!("Cannot send the sticker: {e}")); } }); Value::Null }
             "send_file" => { let p = PathBuf::from(s(args, "path").trim_start_matches("file://")); let cap = s(args, "caption"); self.on_timeline(move |i, tl| async move { if let Err(e) = ui::send_file(&tl, &p, Some(&cap)).await { i.notice(format!("Cannot send the file: {e}")); } }); Value::Null }
@@ -462,6 +462,8 @@ impl App {
             let me = client.user_id().map(|u| u.to_string()).unwrap_or_default();
             let (initial, mut stream) = timeline.subscribe().await;
             let mut items: Vec<_> = initial.iter().cloned().collect();
+            let fetching: Arc<Mutex<std::collections::HashSet<String>>> = Default::default(); /* links whose preview is being fetched */
+            let wake = Arc::new(tokio::sync::Notify::new());
             loop {
                 if items.iter().any(|x| x.as_event().map(|e| e.content().is_unable_to_decrypt()).unwrap_or(false)) { ui::retry_undecryptable(&timeline).await; }
                 let have = i.images.lock().unwrap().clone();
@@ -487,26 +489,52 @@ impl App {
                     for r in rows.iter_mut() { if let Some(u) = ui::first_url(&r.body) { r.preview = known.get(&u).cloned().flatten(); } }
                 }
                 i.emit("timeline", json!({"room_id": id, "rows": rows}).to_string());
-                if i.focused.load(Ordering::Relaxed) { let _ = ui::mark_read(&timeline).await; }
                 if let Some(index) = i.index.lock().unwrap().clone() { let _ = index.lock().map(|mut x| x.add_items(&id, &items)); }
-                let added = ui::fetch_images(&client, &items, &cache, &have).await;
-                if !added.is_empty() { i.images.lock().unwrap().extend(added); continue; } /* show the pictures that just arrived */
-                {
-                    let wanted: Vec<String> = { let known = i.user_mxc.lock().unwrap(); rows.iter().filter_map(|r| known.get(&format!("{id}|{}", r.sender_id)).cloned().flatten()).filter(|m| i.avatars.wanted(m)).take(4).collect() };
-                    for m in &wanted { i.avatars.fetch(&client, m, &i.avatar_dir()).await; }
-                    if !wanted.is_empty() { continue; }
+                /* Everything below waits for the network (read receipt, pictures, avatars, link previews: a homeserver can take half a minute to
+                   fetch a page). A new event must never wait for it, so the work races the stream and is simply started again for the next pass.
+                   `true`: something arrived that should be shown, run another pass. */
+                let interrupted = { let work = async {
+                    let t = std::time::Instant::now();
+                    let slow = |what: &str| { let ms = t.elapsed().as_millis(); if ms > 1500 { eprintln!("timeline: {what} took {ms} ms"); } };
+                    if i.focused.load(Ordering::Relaxed) { let _ = ui::mark_read(&timeline).await; slow("read receipt"); }
+                    let added = ui::fetch_images(&client, &items, &cache, &have).await;
+                    slow("pictures");
+                    if !added.is_empty() { i.images.lock().unwrap().extend(added); return true; } /* show the pictures that just arrived */
+                    {
+                        let wanted: Vec<String> = { let known = i.user_mxc.lock().unwrap(); rows.iter().filter_map(|r| known.get(&format!("{id}|{}", r.sender_id)).cloned().flatten()).filter(|m| i.avatars.wanted(m)).take(4).collect() };
+                        for m in &wanted { i.avatars.fetch(&client, m, &i.avatar_dir()).await; }
+                        slow("avatars");
+                        if !wanted.is_empty() { return true; }
+                    }
+                    {   /* the custom emoji shown in messages, a few per pass like the pictures of people */
+                        let wanted: Vec<String> = rows.iter().rev().flat_map(|r| r.emoji.iter()).map(|e| e.mxc.clone()).filter(|m| i.avatars.wanted(m)).take(6).collect();
+                        for m in &wanted { i.avatars.fetch(&client, m, &i.avatar_dir()).await; }
+                        slow("custom emoji");
+                        if !wanted.is_empty() { return true; }
+                    }
+                    if previews_on { /* a few new links per pass, the newest messages first; each in its own task, the pass does not wait for them */
+                        let wanted: Vec<String> = { let known = i.previews.lock().unwrap(); let busy = fetching.lock().unwrap(); rows.iter().rev().take(30).filter_map(|r| ui::first_url(&r.body)).filter(|u| !known.contains_key(u) && !busy.contains(u)).take(3).collect() };
+                        for u in wanted {
+                            fetching.lock().unwrap().insert(u.clone());
+                            let (i, client, cache, fetching, wake) = (i.clone(), client.clone(), cache.clone(), fetching.clone(), wake.clone());
+                            tokio::spawn(async move {
+                                let p = tokio::time::timeout(Duration::from_secs(45), ui::link_preview(&client, &u, &cache)).await.ok().flatten();
+                                i.previews.lock().unwrap().insert(u.clone(), p);
+                                fetching.lock().unwrap().remove(&u);
+                                wake.notify_one();
+                            });
+                        }
+                    }
+                    false
+                };
+                tokio::pin!(work);
+                tokio::select! {
+                    rerun = &mut work => { if rerun { continue; } false },
+                    n = stream.next() => { if n.is_none() { break; } true },
+                } };
+                if !interrupted { /* nothing left to fetch: wait for the next change, or for a link preview that has arrived */
+                    tokio::select! { n = stream.next() => { if n.is_none() { break; } }, _ = wake.notified() => {} }
                 }
-                {   /* the custom emoji shown in messages, a few per pass like the pictures of people */
-                    let wanted: Vec<String> = rows.iter().rev().flat_map(|r| r.emoji.iter()).map(|e| e.mxc.clone()).filter(|m| i.avatars.wanted(m)).take(6).collect();
-                    for m in &wanted { i.avatars.fetch(&client, m, &i.avatar_dir()).await; }
-                    if !wanted.is_empty() { continue; }
-                }
-                if previews_on { /* a few new links per pass, the newest messages first */
-                    let wanted: Vec<String> = { let known = i.previews.lock().unwrap(); rows.iter().rev().take(30).filter_map(|r| ui::first_url(&r.body)).filter(|u| !known.contains_key(u)).take(3).collect() };
-                    for u in &wanted { let p = ui::link_preview(&client, u, &cache).await; i.previews.lock().unwrap().insert(u.clone(), p); }
-                    if !wanted.is_empty() { continue; }
-                }
-                if stream.next().await.is_none() { break; }
                 items = timeline.items().await.iter().cloned().collect();
             }
         });

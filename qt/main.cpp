@@ -112,7 +112,7 @@ int main(int argc, char **argv)
         QApplication::setPalette(p);
     }
     bool demo = false, members = false;
-    QString shot, room, dataDir, dialog, search, thread, server, user, password, sendFile;
+    QString shot, room, dataDir, dialog, search, thread, server, user, password, sendFile, sendText;
     bool verify = false, confirm = false;
     int delay = 6000;
     const QStringList args = app.arguments();
@@ -128,6 +128,7 @@ int main(int argc, char **argv)
         else if (args[i] == "--user" && i + 1 < args.size()) user = args[++i];
         else if (args[i] == "--password" && i + 1 < args.size()) password = args[++i];
         else if (args[i] == "--send-file" && i + 1 < args.size()) sendFile = args[++i]; /* dev aid: send this file into the room that --room opens */
+        else if (args[i] == "--send-text" && i + 1 < args.size()) sendText = args[++i]; /* dev aid: send the text of this file as a message into the room that --room opens */
         else if (args[i] == "--verify") verify = true;
         else if (args[i] == "--confirm") confirm = true;
         else if (args[i] == "--thread" && i + 1 < args.size()) thread = args[++i];
@@ -159,6 +160,7 @@ int main(int argc, char **argv)
         if (!room.isEmpty()) QTimer::singleShot(delay / 2, &w, [&] { w.openRoomByTitle(room); });
         if (!thread.isEmpty()) QTimer::singleShot(delay / 2 + 500, &w, [&] { w.threadForDemo(thread); });
         if (!sendFile.isEmpty()) QTimer::singleShot(delay / 2 + 4000, &w, [&] { core.call("send_files", {{"paths", QJsonArray::fromStringList(sendFile.split(','))}, {"caption", "a gallery"}}); });
+        if (!sendText.isEmpty()) QTimer::singleShot(delay / 2 + 1000, &w, [&] { QFile f(sendText); if (f.open(QIODevice::ReadOnly)) core.call("send", {{"text", QString::fromUtf8(f.readAll())}, {"reply_to", ""}}); });
         if (members) QTimer::singleShot(delay / 2 + 500, &w, [&] { w.membersForDemo(); });
         if (!search.isEmpty()) QTimer::singleShot(delay / 2 + 500, &w, [&] { w.searchForDemo(search); });
         if (!dialog.isEmpty()) QTimer::singleShot(delay / 2 + 500, &w, [&] { w.dialogForDemo(dialog); });
