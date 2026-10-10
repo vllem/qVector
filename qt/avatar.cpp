@@ -48,7 +48,9 @@ QPixmap profilePixmap(const QString &imagePath, const QString &seed, const QStri
     QImage img;
     if (!imagePath.isEmpty()) {
         auto it = decoded.constFind(imagePath);
-        if (it == decoded.cend()) { QImageReader rd(imagePath); rd.setAutoTransform(true); it = decoded.insert(imagePath, rd.read()); }
+        if (it == decoded.cend()) { QImageReader rd(imagePath); rd.setAutoTransform(true); const QSize full = rd.size(); /* avatars are drawn at 100 px at most */
+            if (full.isValid() && qMin(full.width(), full.height()) > 320) rd.setScaledSize(full.scaled(QSize(320, 320), Qt::KeepAspectRatioByExpanding));
+            it = decoded.insert(imagePath, rd.read()); }
         img = it.value();
     }
     if (img.isNull()) return avatarPixmap(seed, label, size, dpr, pal);

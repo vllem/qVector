@@ -98,6 +98,8 @@ const QImage *TimelineView::picture(const QString &path)
     if (it != pictures_.cend()) return it->isNull() ? nullptr : &*it;
     QImageReader rd(path);
     rd.setAutoTransform(true);
+    const QSize full = rd.size(); /* the timeline never draws more than ~1000 px: do not keep a 50-megapixel photo in memory */
+    if (full.isValid() && qMax(full.width(), full.height()) > 1200) rd.setScaledSize(full.scaled(1200, 1200, Qt::KeepAspectRatio));
     pictures_.insert(path, rd.read());
     const QImage &img = pictures_[path];
     return img.isNull() ? nullptr : &img;

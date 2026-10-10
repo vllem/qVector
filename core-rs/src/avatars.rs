@@ -44,7 +44,7 @@ impl Avatars {
     pub async fn fetch(&self, client: &Client, mxc: &str, dir: &Path) {
         let uri = <&matrix_sdk::ruma::MxcUri>::from(mxc);
         let req = MediaRequestParameters { source: matrix_sdk::ruma::events::room::MediaSource::Plain(uri.to_owned()), format: MediaFormat::File };
-        let got = match client.media().get_media_content(&req, true).await {
+        let got = match client.media().get_media_content(&req, false).await {
             Ok(bytes) => {
                 let _ = std::fs::create_dir_all(dir);
                 let path = dir.join(file_name(mxc));

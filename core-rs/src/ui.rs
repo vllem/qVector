@@ -686,7 +686,7 @@ pub async fn link_preview(client: &Client, url: &str, cache: &Path) -> Option<Ui
     if p.title.is_empty() && p.description.is_empty() { return None; }
     if let Some(mxc) = og["og:image"].as_str().and_then(|m| <&matrix_sdk::ruma::MxcUri>::try_from(m).ok()) {
         let req = MediaRequestParameters { source: matrix_sdk::ruma::events::room::MediaSource::Plain(mxc.to_owned()), format: MediaFormat::File };
-        if let Ok(bytes) = client.media().get_media_content(&req, true).await {
+        if let Ok(bytes) = client.media().get_media_content(&req, false).await {
             let _ = std::fs::create_dir_all(cache);
             let name: String = url.chars().filter(|c| c.is_ascii_alphanumeric()).take(60).collect();
             let path = cache.join(format!("preview-{name}.img"));
@@ -730,7 +730,7 @@ pub async fn fetch_images(client: &Client, items: &[Arc<TimelineItem>], cache: &
         if let Some(st) = ev.content().as_sticker() { /* a sticker is a picture of its own */
             if !have.contains_key(&id) && !added.contains_key(&id) {
                 let req = MediaRequestParameters { source: st.content().source.clone().into(), format: MediaFormat::File };
-                if let Ok(bytes) = client.media().get_media_content(&req, true).await {
+                if let Ok(bytes) = client.media().get_media_content(&req, false).await {
                     let safe: String = id.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
                     let path = cache.join(format!("{safe}.img"));
                     if std::fs::write(&path, bytes).is_ok() { added.insert(id.clone(), path); }
@@ -751,7 +751,7 @@ pub async fn fetch_images(client: &Client, items: &[Arc<TimelineItem>], cache: &
         for (key, source, name) in wanted {
             if have.contains_key(&key) || added.contains_key(&key) { continue; }
             let req = MediaRequestParameters { source, format: MediaFormat::File };
-            if let Ok(bytes) = client.media().get_media_content(&req, true).await {
+            if let Ok(bytes) = client.media().get_media_content(&req, false).await {
                 let ext = name.rsplit('.').next().filter(|e| e.len() <= 5 && !e.contains('/')).unwrap_or("img");
                 let safe: String = key.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
                 let path = cache.join(format!("{safe}.{ext}"));
@@ -809,7 +809,7 @@ pub async fn save_attachment(client: &Client, timeline: &Timeline, event_id: &st
         MessageType::File(c) => c.source.clone(),
         _ => return Err("that message has no attachment".into()),
     };
-    let bytes = client.media().get_media_content(&MediaRequestParameters { source, format: MediaFormat::File }, true).await.map_err(|e| e.to_string())?;
+    let bytes = client.media().get_media_content(&MediaRequestParameters { source, format: MediaFormat::File }, false).await.map_err(|e| e.to_string())?;
     std::fs::write(dest, &bytes).map_err(|e| format!("cannot write {}: {e}", dest.display()))?;
     Ok(bytes.len() as u64)
 }
