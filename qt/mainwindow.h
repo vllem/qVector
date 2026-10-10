@@ -12,6 +12,7 @@
 #include "qt/notifier.h"
 #include "qt/sidebar.h"
 #include "qt/timelineview.h"
+#include <QProgressBar>
 #include <QAction>
 #include <QCloseEvent>
 #include <QHash>
@@ -140,6 +141,13 @@ private:
     QToolButton *plus_;
     QFrame *statusSep1_ = nullptr, *statusSep2_ = nullptr, *statusSep3_ = nullptr;
     QLabel *statusClock_ = nullptr;
+    QLabel *sendLabel_ = nullptr; /* "Sending..." with a moving bar while a message of ours has not reached the server */
+    QProgressBar *sendBar_ = nullptr;
+    QTimer *sendTimeout_ = nullptr;
+    qint64 sendStart_ = 0;
+    void startSending();
+    void stopSending();
+    void updateSending(const QJsonArray &rows);
     void updateClock();
     QLabel *topic_, *banner_, *statusLeft_, *statusRight_, *typingLabel_;
     QToolButton *membersBtn_;

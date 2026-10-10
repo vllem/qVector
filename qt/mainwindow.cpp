@@ -7,6 +7,7 @@
 #include "qt/avatar.h"
 #include "qt/theme.h"
 #include <QApplication>
+#include <QProgressBar>
 #include <QClipboard>
 #include <QDesktopServices>
 #include <QDragEnterEvent>
@@ -543,6 +544,18 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     statusSep3_->setFixedSize(1, 16);
     statusClock_ = new QLabel;
     statusClock_->setContentsMargins(0, 0, 8, 0);
+    sendLabel_ = new QLabel("Sending...");
+    sendBar_ = new QProgressBar;
+    sendBar_->setRange(0, 0); /* moving, no percentage: the size of a send is not known */
+    sendBar_->setTextVisible(false);
+    sendBar_->setFixedSize(110, 10);
+    sendTimeout_ = new QTimer(this);
+    sendTimeout_->setSingleShot(true);
+    connect(sendTimeout_, &QTimer::timeout, this, &MainWindow::stopSending);
+    sendLabel_->hide();
+    sendBar_->hide();
+    statusBar()->addPermanentWidget(sendLabel_);
+    statusBar()->addPermanentWidget(sendBar_);
     statusBar()->addPermanentWidget(statusSep3_);
     statusBar()->addPermanentWidget(statusClock_);
     auto *clockTimer = new QTimer(this);
@@ -855,6 +868,7 @@ void MainWindow::onEvent(const QString &name, const QJsonValue &p)
         if (S(o, "room_id") != current_) return;
         timeline_->setMe(user_);
         timeline_->setRows(o["rows"].toArray());
+        updateSending(o["rows"].toArray());
         pinned_.clear();
         for (const QJsonValue &v : o["rows"].toArray()) if (v.toObject()["pinned"].toBool()) pinned_.append(v.toObject());
         updatePinBar();
@@ -881,6 +895,7 @@ void MainWindow::onEvent(const QString &name, const QJsonValue &p)
         timeline_->refresh();
     } else if (name == "notice") {
         statusBar()->showMessage(p.toString(), 6000);
+        if (p.toString().startsWith("Cannot send")) stopSending(); /* the send failed: nothing is on its way any more */
     } else if (name == "session") {
         session_ = p.toObject();
         updateStatus();
@@ -946,6 +961,7 @@ void MainWindow::onEvent(const QString &name, const QJsonValue &p)
 
 void MainWindow::openRoom(const QString &id)
 {
+    stopSending();
     if (id.isEmpty()) return;
     cancelAttachment();
     if (!current_.isEmpty()) drafts_[current_] = composer_->text();
@@ -1105,6 +1121,35 @@ void MainWindow::startEdit(const QString &eventId)
     composer_->setFocus();
 }
 
+void MainWindow::startSending()
+{
+    sendStart_ = QDateTime::currentMSecsSinceEpoch();
+    sendLabel_->show();
+    sendBar_->show();
+    sendTimeout_->start(120000); /* never leave the bar up forever */
+}
+
+void MainWindow::stopSending()
+{
+    sendTimeout_->stop();
+    sendLabel_->hide();
+    sendBar_->hide();
+}
+
+/* Hide the bar once our message shows up in the room and no message of ours is still pending. */
+void MainWindow::updateSending(const QJsonArray &rows)
+{
+    if (!sendBar_->isVisible()) return;
+    bool pending = false, done = false;
+    for (const QJsonValue &v : rows) {
+        const QJsonObject r = v.toObject();
+        if (!r["own"].toBool()) continue;
+        if (r["pending"].toBool()) pending = true;
+        else if (qint64(r["ts"].toDouble()) >= sendStart_ - 5000) done = true;
+    }
+    if (!pending && done) stopSending();
+}
+
 void MainWindow::send()
 {
     const QString text = composer_->text();
@@ -1112,6 +1157,7 @@ void MainWindow::send()
     if (!pending_.isEmpty()) {
         /* several files go out as one gallery message; the typed text is its caption */
         core_->call("send_files", {{"paths", QJsonArray::fromStringList(pending_)}, {"caption", text}});
+        startSending();
         composer_->clear(); drafts_.remove(current_);
         cancelAttachment();
         timeline_->stickToBottom();
@@ -1124,6 +1170,7 @@ void MainWindow::send()
         return;
     }
     core_->call("send", {{"text", text}, {"reply_to", replyTo_}});
+    startSending();
     replyTo_.clear(); composer_->clear(); showContextBar(QString()); drafts_.remove(current_);
     timeline_->stickToBottom();
 }
