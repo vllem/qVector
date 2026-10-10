@@ -38,9 +38,6 @@ lto = false
 codegen-units = 16
 incremental = true
 
-[profile.release]
-opt-level = 2
-lto = "thin"
 
 [features]
 # a tiny fake homeserver (wiremock) for tests and for running the UI without a real account

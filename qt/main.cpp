@@ -12,6 +12,10 @@
 #include <QImage>
 #include <QJsonObject>
 #include <QPainter>
+#include <QPixmapCache>
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 #include <QStandardPaths>
 #include <QStyleHints>
 #include <QTimer>
@@ -81,7 +85,18 @@ static void ensureEmojiFont()
 
 int main(int argc, char **argv)
 {
+#ifdef __GLIBC__
+    mallopt(M_ARENA_MAX, 2); /* by default every thread gets an arena that keeps its freed memory */
+#endif
     QApplication app(argc, argv);
+#ifdef __GLIBC__
+    { /* give freed heap pages back to the system now and then */
+        auto *trim = new QTimer(&app);
+        QObject::connect(trim, &QTimer::timeout, [] { malloc_trim(0); });
+        trim->start(30000);
+    }
+#endif
+    QPixmapCache::setCacheLimit(8 * 1024); /* KiB */
     QApplication::setApplicationName("vector");
     QApplication::setOrganizationName("vector");
     QApplication::setApplicationDisplayName("qVector");
