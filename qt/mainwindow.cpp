@@ -1128,11 +1128,13 @@ void MainWindow::startSending(const QString &what)
     sendLabel_->show();
     sendBar_->show();
     sendTimeout_->start(120000); /* never leave the bar up forever */
+    if (qEnvironmentVariableIsSet("VC_SEND_LOG")) fprintf(stderr, "sendbar: shown '%s'\n", qUtf8Printable(sendLabel_->text()));
 }
 
 void MainWindow::stopSending()
 {
     sendTimeout_->stop();
+    if (sendBar_->isVisible() && qEnvironmentVariableIsSet("VC_SEND_LOG")) fprintf(stderr, "sendbar: hidden after %lld ms\n", QDateTime::currentMSecsSinceEpoch() - sendStart_);
     sendLabel_->hide();
     sendBar_->hide();
 }

@@ -73,6 +73,7 @@ public:
     void start();
     void openRoomByTitle(const QString &title); /* dev aid: opens the first room with this name */
     void dialogForDemo(const QString &which);   /* dev aid */
+    void sendForDemo(const QString &text) { composer_->setText(text); send(); } /* through the composer, like a person pressing Enter */
     void membersForDemo() { toggleMembers(); }
     void setAutoConfirm(bool on) { autoConfirm_ = on; } /* dev aid: confirm the emoji by itself */
     void verifyForDemo() { core_->call("request_verification"); }

@@ -160,7 +160,7 @@ int main(int argc, char **argv)
         if (!room.isEmpty()) QTimer::singleShot(delay / 2, &w, [&] { w.openRoomByTitle(room); });
         if (!thread.isEmpty()) QTimer::singleShot(delay / 2 + 500, &w, [&] { w.threadForDemo(thread); });
         if (!sendFile.isEmpty()) QTimer::singleShot(delay / 2 + 4000, &w, [&] { core.call("send_files", {{"paths", QJsonArray::fromStringList(sendFile.split(','))}, {"caption", "a gallery"}}); });
-        if (!sendText.isEmpty()) QTimer::singleShot(delay / 2 + 1000, &w, [&] { QFile f(sendText); if (f.open(QIODevice::ReadOnly)) core.call("send", {{"text", QString::fromUtf8(f.readAll())}, {"reply_to", ""}}); });
+        if (!sendText.isEmpty()) QTimer::singleShot(delay / 2 + 1000, &w, [&] { QFile f(sendText); if (f.open(QIODevice::ReadOnly)) w.sendForDemo(QString::fromUtf8(f.readAll())); });
         if (members) QTimer::singleShot(delay / 2 + 500, &w, [&] { w.membersForDemo(); });
         if (!search.isEmpty()) QTimer::singleShot(delay / 2 + 500, &w, [&] { w.searchForDemo(search); });
         if (!dialog.isEmpty()) QTimer::singleShot(delay / 2 + 500, &w, [&] { w.dialogForDemo(dialog); });
