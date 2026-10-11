@@ -10,6 +10,7 @@
 #include <QJsonObject>
 #include <QScrollBar>
 #include <QTextBrowser>
+#include <QWheelEvent>
 #include <cstdio>
 #include "qt/memberlist.h"
 #include "qt/sidebar.h"
@@ -155,6 +156,27 @@ int main(int argc, char **argv)
     step("timeline: resize the window 100 times with 100 rows", 3000, [&] {
         tl.setRows(messages(100));
         for (int i = 0; i < 100; i++) { tl.resize(500 + (i * 37) % 700, 400 + (i * 53) % 400); app.processEvents(); }
+    });
+    step("timeline: older messages arriving leave the reader where they were", 2000, [&] {
+        tl.reset();
+        tl.setHistoryState(true, false);
+        tl.setRows(messages(100, 1000));
+        settle();
+        auto *br = tl.findChild<QTextBrowser *>();
+        QWheelEvent w(QPointF(50, 50), QPointF(50, 50), QPoint(), QPoint(0, 120), Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+        QApplication::sendEvent(br->viewport(), &w); /* the reader's own input, or the view ignores the scrollbar */
+        br->verticalScrollBar()->setValue(0);
+        QApplication::processEvents();
+        auto top = [&] { return tl.eventAt(QPoint(24, 100)); }; /* what is shown 100 px down must stay there */
+        const QString before = top();
+        tl.setHistoryState(true, true);
+        settle();
+        tl.setHistoryState(true, false);
+        tl.setRows(messages(200, 900)); /* 100 older messages arrive: $e900..$e999 */
+        settle();
+        const QString after = top();
+        std::printf("    top before %s, after %s (value %d of %d)\n", qPrintable(before), qPrintable(after), br->verticalScrollBar()->value(), br->verticalScrollBar()->maximum());
+        if (after != before) failures++;
     });
     step("timeline: the same rows set 500 times (must be skipped)", 300, [&] { const QJsonArray rows = messages(100); for (int i = 0; i < 500; i++) tl.setRows(rows); });
     /* Spec conformance of the renderer: a spoiler hides its text until clicked, colours become CSS (Client-Server API: Spoiler messages, formatted text). */

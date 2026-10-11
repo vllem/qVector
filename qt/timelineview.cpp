@@ -196,6 +196,11 @@ void TimelineView::setRows(const QJsonArray &rows)
     const int old = rows_.size();
     const bool grew = old > 0 && rows.size() >= old && rows[old - 1].toObject().value("id") == rows_[old - 1].toObject().value("id")
         && rows[0].toObject().value("id") == rows_[0].toObject().value("id");
+    /* Older messages arrived (rows were added in front): show them now. Left to the window rule they would sit folded away above until the next
+       scroll, and the reader would see nothing happen. */
+    const int added = old > 0 && !grew && rows.size() > old && rows[rows.size() - 1].toObject().value("id") == rows_[old - 1].toObject().value("id")
+        ? rows.size() - old : 0;
+    if (added > 0 && loadingMore_ && !thread_) { shownLimit_ += size_t(added); windowStart_ = rows[0].toObject().value("id").toString(); }
     rows_ = rows;
     if (!grew) rowIndex_.clear();
     for (int i = grew ? old : 0; i < rows.size(); i++) rowIndex_.insert(rows[i].toObject().value("id").toString(), i); /* first of equal ids wins */
@@ -284,7 +289,7 @@ void TimelineView::refresh()
     if (!isVisible()) { stale_ = true; return; } /* rendering a room nobody looks at is wasted work */
     /* Laying the document out takes tens to hundreds of milliseconds: a burst of changes is drawn once. */
     const qint64 since = lastRender_.isValid() ? lastRender_.elapsed() : 1000;
-    if (since < 150) {
+    if (since < 150 && !loadingMore_) { /* the reader is waiting at the top for older messages: no merging */
         if (!renderQueued_) {
             renderQueued_ = true;
             QTimer::singleShot(int(150 - since), this, [this] { renderQueued_ = false; if (isVisible()) render(); });
@@ -320,6 +325,14 @@ void TimelineView::render()
 {
     stale_ = false;
     lastRender_.start();
+    /* What the reader is looking at: the message at the top of the view and how far into it the view is. This is read now, while the rows and the
+       maps of the document still describe what is shown; after the redraw that message is put back at the same place, so the text does not jump. */
+    QString topEvent;
+    int delta = 0;
+    if (!stick_) {
+        for (int y : {2, 14, 30, 60, 100}) { topEvent = eventAt(QPoint(24, y)); if (!topEvent.isEmpty()) break; }
+        if (!topEvent.isEmpty()) delta = view_->verticalScrollBar()->value() - anchorY(topEvent);
+    }
     const QPalette pal = palette();
     const QString muted = hex(pal.color(QPalette::PlaceholderText)), link = hex(pal.color(QPalette::Link));
     QTextDocument *doc = view_->document();
@@ -703,12 +716,6 @@ void TimelineView::render()
 
     /* What the reader is looking at: the message at the top of the view and how far into it the view is. After the redraw that message is put back at
        the same place, so the text does not jump. */
-    QString topEvent;
-    int delta = 0;
-    if (!stick && value > 0) {
-        for (int y : {2, 14, 30, 60, 100}) { topEvent = eventAt(QPoint(24, y)); if (!topEvent.isEmpty()) break; }
-        if (!topEvent.isEmpty()) delta = value - anchorY(topEvent);
-    }
     {   /* The new page is built and laid out in a document of its own and swapped in: setHtml on the shown document blanks it first (a flash). */
         QTextDocument *old = view_->document(), *nd = new QTextDocument(this);
         nd->setDocumentMargin(old->documentMargin());
