@@ -135,6 +135,15 @@ pub struct UiMember { pub user_id: String, pub name: String, pub role: String, p
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct UiRoomDetails { pub id: String, pub name: String, pub topic: String, pub encrypted: bool, pub can_edit: bool, pub can_set_roles: bool, pub can_pin: bool, pub can_invite: bool, pub members: Vec<UiMember>, pub banned: Vec<UiMember> }
 
+/// The name to show for a room member; one that another member also has comes with the user id (spec: "Calculating the display name for a user").
+fn member_name(m: &matrix_sdk::room::RoomMember) -> String {
+    match m.display_name() {
+        Some(n) if m.name_ambiguous() => format!("{n} ({})", m.user_id()),
+        Some(n) => n.to_string(),
+        None => m.user_id().localpart().to_string(),
+    }
+}
+
 /// Name, topic, encryption and the joined members (fetched in full: the sync only brings the ones it needs) of a room.
 pub async fn room_details(client: &Client, room_id: &str) -> Result<UiRoomDetails, String> {
     use matrix_sdk::RoomMemberships;
@@ -147,7 +156,7 @@ pub async fn room_details(client: &Client, room_id: &str) -> Result<UiRoomDetail
     let allowed = |f: &dyn Fn(&matrix_sdk::ruma::events::room::power_levels::RoomPowerLevels) -> bool| levels.as_ref().map(f).unwrap_or(false);
     let mut members: Vec<UiMember> = room.members(RoomMemberships::JOIN).await.map_err(|e| e.to_string())?.iter().map(|m| UiMember {
         user_id: m.user_id().to_string(),
-        name: m.display_name().map(String::from).unwrap_or_else(|| m.user_id().localpart().to_string()),
+        name: member_name(m),
         role: match m.suggested_role_for_power_level() { matrix_sdk::room::RoomMemberRole::Creator => "Creator", matrix_sdk::room::RoomMemberRole::Administrator => "Admin", matrix_sdk::room::RoomMemberRole::Moderator => "Moderator", _ => "" }.into(),
         can_kick: m.user_id() != me && allowed(&|l| l.user_can_kick_user(&me, m.user_id())),
         can_ban: m.user_id() != me && allowed(&|l| l.user_can_ban_user(&me, m.user_id())),
@@ -164,7 +173,7 @@ pub async fn room_details(client: &Client, room_id: &str) -> Result<UiRoomDetail
     let can_set_roles = allowed(&|l| l.user_can_send_state(&me, StateEventType::RoomPowerLevels));
     let banned: Vec<UiMember> = room.members(RoomMemberships::BAN).await.map(|v| v.iter().map(|m| UiMember {
         user_id: m.user_id().to_string(),
-        name: m.display_name().map(String::from).unwrap_or_else(|| m.user_id().localpart().to_string()),
+        name: member_name(m),
         role: String::new(), can_kick: false, can_ban: allowed(&|l| l.user_can_ban(&me)), verified: false, avatar_mxc: m.avatar_url().map(|u| u.to_string()).unwrap_or_default(), avatar_path: String::new(),
     }).collect()).unwrap_or_default();
     Ok(UiRoomDetails { id: room_id.into(), name, topic: room.topic().unwrap_or_default(), encrypted, can_edit, can_set_roles, can_pin, can_invite, members, banned })
@@ -442,8 +451,9 @@ pub async fn ui_rooms_with_spaces(client: &Client, spaces: &matrix_sdk_ui::space
 fn clock(ms: u64) -> String { let s = ms / 1000; format!("{:02}:{:02}", (s / 3600) % 24, (s / 60) % 60) }
 
 fn name_of(profile: &TimelineDetails<matrix_sdk_ui::timeline::Profile>, id: &str) -> String {
-    match profile { TimelineDetails::Ready(p) => p.display_name.clone(), _ => None }
-        .unwrap_or_else(|| id.trim_start_matches('@').split(':').next().unwrap_or(id).to_string())
+    /* spec: "Calculating the display name for a user": a name two members share is shown with the user id, so nobody can pass as somebody else */
+    let name = match profile { TimelineDetails::Ready(p) => p.display_name.clone().map(|n| if p.display_name_ambiguous { format!("{n} ({id})") } else { n }), _ => None };
+    name.unwrap_or_else(|| id.trim_start_matches('@').split(':').next().unwrap_or(id).to_string())
 }
 
 /// The HTML of a message: only what the specification allows, no reply fallback, and empty when the message is plain text.
@@ -857,7 +867,7 @@ fn mentions_name(text: &str, label: &str) -> bool {
 
 pub fn with_mentions(text: &str, html: Option<&str>, mentions: &[(String, String)]) -> Option<String> {
     let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
-    let mut used: Vec<&(String, String)> = mentions.iter().filter(|(_, l)| !l.is_empty() && mentions_name(text, l)).collect();
+    let mut used: Vec<&(String, String)> = mentions.iter().filter(|(i, l)| !l.is_empty() && i != "@room" && mentions_name(text, l)).collect();
     if used.is_empty() { return None; }
     used.sort_by(|a, b| b.1.len().cmp(&a.1.len())); /* longer names first, so `@Bob Smith` is not eaten by `@Bob` */
     let mut out = match html { Some(h) => h.to_string(), None => esc(text).replace('\n', "<br>") };
@@ -886,10 +896,10 @@ pub fn with_mentions(text: &str, html: Option<&str>, mentions: &[(String, String
 /// `send_text_with_emoji`, with the people the user picked from the `@` list as `(user id, name)`: they get `m.mentions` (what makes the
 /// other clients notify them) and a link in the formatted body.
 pub async fn send_text_full(timeline: &Timeline, text: &str, reply_to: Option<&str>, emoji: &HashMap<String, String>, mentions: &[(String, String)]) -> Result<(), String> {
-    let (msgtype, ids) = text_content(text, emoji, mentions);
-    let m = matrix_sdk::ruma::events::Mentions::with_user_ids(ids.clone());
+    let (msgtype, m) = text_content(text, emoji, mentions);
+    let any = m.room || !m.user_ids.is_empty();
     let mut content = RoomMessageEventContentWithoutRelation::new(msgtype.clone());
-    if !ids.is_empty() { content = content.add_mentions(m.clone()); }
+    if any { content = content.add_mentions(m.clone()); }
     match reply_to.filter(|r| !r.is_empty()) {
         Some(id) => {
             let id: OwnedEventId = id.try_into().map_err(|e| format!("bad event id: {e}"))?;
@@ -897,7 +907,7 @@ pub async fn send_text_full(timeline: &Timeline, text: &str, reply_to: Option<&s
         }
         None => {
             let mut plain = RoomMessageEventContent::new(msgtype);
-            if !ids.is_empty() { plain = plain.add_mentions(m); }
+            if any { plain = plain.add_mentions(m); }
             timeline.send(plain.into()).await.map_err(|e| e.to_string())?; }
     }
     Ok(())
@@ -905,17 +915,22 @@ pub async fn send_text_full(timeline: &Timeline, text: &str, reply_to: Option<&s
 
 /// The message a typed text becomes: Markdown as formatted text, `:shortcode:` custom emoji as pictures, picked `@names` as links; and
 /// the user ids those links mention.
-fn text_content(text: &str, emoji: &HashMap<String, String>, mentions: &[(String, String)]) -> (MessageType, Vec<matrix_sdk::ruma::OwnedUserId>) {
+fn text_content(text: &str, emoji: &HashMap<String, String>, mentions: &[(String, String)]) -> (MessageType, matrix_sdk::ruma::events::Mentions) {
     use matrix_sdk::ruma::events::room::message::FormattedBody;
-    let mut msgtype = RoomMessageEventContent::text_markdown(text).msgtype;
-    if let MessageType::Text(t) = &mut msgtype {
-        let html = t.formatted.as_ref().map(|f| f.body.clone());
-        if let Some(h) = crate::emotes::with_custom_emoji(text, html.as_deref(), emoji) { t.formatted = Some(FormattedBody::html(h)); }
-        let html = t.formatted.as_ref().map(|f| f.body.clone());
-        if let Some(h) = with_mentions(text, html.as_deref(), mentions) { t.formatted = Some(FormattedBody::html(h)); }
+    /* "/me waves" is an emote (m.emote): shown as "* name waves" */
+    let (text, emote) = match text.strip_prefix("/me ") { Some(rest) if !rest.trim().is_empty() => (rest, true), _ => (text, false) };
+    let mut msgtype = if emote { RoomMessageEventContent::emote_markdown(text).msgtype } else { RoomMessageEventContent::text_markdown(text).msgtype };
+    let formatted = match &mut msgtype { MessageType::Text(t) => Some(&mut t.formatted), MessageType::Emote(t) => Some(&mut t.formatted), _ => None };
+    if let Some(formatted) = formatted {
+        let html = formatted.as_ref().map(|f| f.body.clone());
+        if let Some(h) = crate::emotes::with_custom_emoji(text, html.as_deref(), emoji) { *formatted = Some(FormattedBody::html(h)); }
+        let html = formatted.as_ref().map(|f| f.body.clone());
+        if let Some(h) = with_mentions(text, html.as_deref(), mentions) { *formatted = Some(FormattedBody::html(h)); }
     }
-    let ids = mentions.iter().filter(|(_, l)| mentions_name(text, l)).filter_map(|(i, _)| i.as_str().try_into().ok()).collect();
-    (msgtype, ids)
+    let ids: Vec<matrix_sdk::ruma::OwnedUserId> = mentions.iter().filter(|(i, l)| i != "@room" && mentions_name(text, l)).filter_map(|(i, _)| i.as_str().try_into().ok()).collect();
+    let mut m = matrix_sdk::ruma::events::Mentions::with_user_ids(ids);
+    m.room = mentions.iter().any(|(i, l)| i == "@room" && mentions_name(text, l)); /* @room: notifies everybody (m.mentions.room) */
+    (msgtype, m)
 }
 
 /// Send a file (a picture when it looks like one) into the timeline's room; encrypted rooms get an encrypted upload.
@@ -1032,9 +1047,9 @@ pub async fn edit_text(timeline: &Timeline, event_id: &str, text: &str) -> Resul
 /// `m.mentions` and all of them in `m.new_content` (spec: "Edits of events with mentions").
 pub async fn edit_text_full(timeline: &Timeline, event_id: &str, text: &str, emoji: &HashMap<String, String>, mentions: &[(String, String)]) -> Result<(), String> {
     let id: OwnedEventId = event_id.try_into().map_err(|e| format!("bad event id: {e}"))?;
-    let (msgtype, ids) = text_content(text, emoji, mentions);
+    let (msgtype, m) = text_content(text, emoji, mentions);
     let mut content = RoomMessageEventContentWithoutRelation::new(msgtype);
-    if !ids.is_empty() { content = content.add_mentions(matrix_sdk::ruma::events::Mentions::with_user_ids(ids)); }
+    if m.room || !m.user_ids.is_empty() { content = content.add_mentions(m); }
     timeline.edit(&TimelineEventItemId::EventId(id), matrix_sdk::room::edit::EditedContent::RoomMessage(content)).await.map_err(|e| e.to_string())
 }
 
@@ -1217,6 +1232,35 @@ mod tests {
         for _ in 0..20 { if mark_read(&f.timeline).await.unwrap_or(false) { break; } tokio::time::sleep(std::time::Duration::from_millis(100)).await; }
         let log = f.hs.log();
         assert!(log.iter().any(|l| l.starts_with("read_markers") && l.contains("m.fully_read") && l.contains(&id)), "m.fully_read is what other devices use for \"unread since here\": {log:#?}");
+    }
+
+    #[tokio::test]
+    async fn spec_at_room_sets_m_mentions_room_and_no_link() {
+        let f = fixture().await;
+        send_text_full(&f.timeline, "@room dinner", None, &HashMap::new(), &[("@room".to_string(), "room".to_string())]).await.unwrap();
+        let msgs = wait_for(&f, |m| m.len() == 1 && !m[0].pending).await;
+        assert!(!msgs[0].html.contains("matrix.to"), "{}", msgs[0].html);
+        let items = f.timeline.items().await;
+        let ev = items.iter().filter_map(|i| i.as_event()).next().unwrap();
+        assert!(ev.content().as_message().unwrap().mentions().map_or(false, |m| m.room), "m.mentions.room is what notifies the whole room");
+    }
+
+    #[test]
+    fn spec_a_display_name_two_people_share_is_shown_with_the_user_id() {
+        use matrix_sdk_ui::timeline::Profile;
+        let p = |ambiguous| TimelineDetails::Ready(Profile { display_name: Some("Alice".into()), display_name_ambiguous: ambiguous, avatar_url: None });
+        assert_eq!(name_of(&p(false), "@a:hs"), "Alice");
+        assert_eq!(name_of(&p(true), "@a2:evil.example"), "Alice (@a2:evil.example)");
+    }
+
+    #[tokio::test]
+    async fn spec_slash_me_is_sent_as_an_emote() {
+        let f = fixture().await;
+        send_text(&f.timeline, "/me waves **hard**", None).await.unwrap();
+        let msgs = wait_for(&f, |m| m.len() == 1 && !m[0].pending).await;
+        assert_eq!(msgs[0].kind, "emote");
+        assert_eq!(msgs[0].body, "waves **hard**", "{:?}", msgs[0]);
+        assert!(msgs[0].html.contains("<strong>hard</strong>"), "{}", msgs[0].html);
     }
 
     #[tokio::test]

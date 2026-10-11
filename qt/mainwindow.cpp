@@ -654,6 +654,7 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
             if (S(m, "user_id") == user_) continue;
             out.append({S(m, "user_id"), "@" + S(m, "name"), QString()});
         }
+        out.append({"@room", "@room", QString()}); /* notifies everybody in the room (m.mentions.room) */
         const QString p = prefix.toLower();
         QList<Composer::Candidate> hits;
         for (const Composer::Candidate &c : out)
@@ -1165,6 +1166,7 @@ QJsonArray MainWindow::mentionsIn(const QString &text)
     };
     for (const auto &m : mentioned_) add(m.first, m.second);
     mentioned_.clear();
+    add("@room", "@room");
     for (const QJsonValue &v : details_["members"].toArray()) {
         const QJsonObject m = v.toObject();
         if (S(m, "user_id") != user_) add(S(m, "user_id"), "@" + S(m, "name"));
