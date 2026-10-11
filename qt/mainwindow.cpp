@@ -1154,6 +1154,24 @@ void MainWindow::updateSending(const QJsonArray &rows)
     if (!pending && done) stopSending();
 }
 
+/* The people a text mentions: those picked from the @ list whose name is still in it, and (so an edited message keeps its mentions) room members
+   whose "@name" is typed out in full. Clears the picked ones. */
+QJsonArray MainWindow::mentionsIn(const QString &text)
+{
+    QJsonArray out;
+    QSet<QString> seen;
+    auto add = [&](const QString &id, const QString &at) {
+        if (at.size() > 1 && text.contains(at) && !seen.contains(id)) { seen.insert(id); out.append(QJsonObject{{"id", id}, {"label", at.mid(1)}}); }
+    };
+    for (const auto &m : mentioned_) add(m.first, m.second);
+    mentioned_.clear();
+    for (const QJsonValue &v : details_["members"].toArray()) {
+        const QJsonObject m = v.toObject();
+        if (S(m, "user_id") != user_) add(S(m, "user_id"), "@" + S(m, "name"));
+    }
+    return out;
+}
+
 void MainWindow::send()
 {
     const QString text = composer_->text();
@@ -1169,14 +1187,11 @@ void MainWindow::send()
     }
     if (text.isEmpty()) return;
     if (!editing_.isEmpty()) {
-        core_->call("edit", {{"event_id", editing_}, {"text", text}});
+        core_->call("edit", {{"event_id", editing_}, {"text", text}, {"mentions", mentionsIn(text)}});
         editing_.clear(); composer_->clear(); showContextBar(QString());
         return;
     }
-    QJsonArray mentions; /* the people picked from the @ list whose name is still in the text */
-    for (const auto &m : mentioned_) if (text.contains(m.second)) mentions.append(QJsonObject{{"id", m.first}, {"label", m.second.mid(1)}});
-    mentioned_.clear();
-    core_->call("send", {{"text", text}, {"reply_to", replyTo_}, {"mentions", mentions}});
+    core_->call("send", {{"text", text}, {"reply_to", replyTo_}, {"mentions", mentionsIn(text)}});
     startSending();
     replyTo_.clear(); composer_->clear(); showContextBar(QString()); drafts_.remove(current_);
     timeline_->stickToBottom();

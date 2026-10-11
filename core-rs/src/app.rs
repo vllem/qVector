@@ -165,7 +165,11 @@ impl App {
                 let cap = s(args, "caption");
                 self.on_timeline(move |i, tl| async move { if let Err(e) = ui::send_gallery(&tl, &ps, Some(&cap)).await { i.notice(format!("Cannot send the files: {e}")); } }); Value::Null }
             "react" => { let (e, k) = (s(args, "event_id"), s(args, "key")); self.on_timeline(move |_, tl| async move { let _ = ui::toggle_reaction(&tl, &e, &k).await; }); Value::Null }
-            "edit" => { let (e, t) = (s(args, "event_id"), s(args, "text")); self.on_timeline(move |_, tl| async move { let _ = ui::edit_text(&tl, &e, &t).await; }); Value::Null }
+            "edit" => { let (e, t) = (s(args, "event_id"), s(args, "text"));
+                let mentions: Vec<(String, String)> = args.get("mentions").and_then(|v| v.as_array()).map(|a| a.iter().map(|m| (s(m, "id"), s(m, "label"))).collect()).unwrap_or_default();
+                self.on_timeline(move |i, tl| async move {
+                    let emoji = match i.client() { Some(c) if t.contains(':') => crate::emotes::emoji_map(&crate::emotes::emote_packs(&c, tl.room().room_id().as_str()).await), _ => Default::default() };
+                    if let Err(e) = ui::edit_text_full(&tl, &e, &t, &emoji, &mentions).await { i.notice(format!("Cannot edit the message: {e}")); } }); Value::Null }
             "redact" => { let e = s(args, "event_id"); self.on_timeline(move |_, tl| async move { let _ = ui::redact(&tl, &e).await; }); Value::Null }
             "load_reply" => { let e = s(args, "event_id"); self.on_timeline(move |_, tl| async move { let _ = ui::load_reply(&tl, &e).await; }); Value::Null }
             "load_older" => { self.on_timeline(move |i, tl| async move { let reached = ui::load_older(&tl).await.unwrap_or(false); i.emit_json("older", &json!({"reached": reached})); }); Value::Null }

@@ -92,6 +92,7 @@ private:
     void updateTopic();
     void updateTabs();
     void showMain(bool main);
+    QJsonArray mentionsIn(const QString &text);
     void send();
     void cancelContext();
     void showContextBar(const QString &text);

@@ -849,9 +849,15 @@ pub async fn send_text_with_emoji(timeline: &Timeline, text: &str, reply_to: Opt
 
 /// The formatted body of a message that mentions people: every `@label` of `mentions` (user id, label) becomes a matrix.to link (a "pill" in
 /// Element and Cinny). Starts from the Markdown's HTML, or from the escaped text when it had none.
+/// Does `@label` occur in the text as a whole word (not as the start of a longer name)?
+fn mentions_name(text: &str, label: &str) -> bool {
+    let at = format!("@{label}");
+    text.match_indices(&at).any(|(i, _)| text[i + at.len()..].chars().next().map_or(true, |c| !c.is_alphanumeric()))
+}
+
 pub fn with_mentions(text: &str, html: Option<&str>, mentions: &[(String, String)]) -> Option<String> {
     let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
-    let mut used: Vec<&(String, String)> = mentions.iter().filter(|(_, l)| !l.is_empty() && text.contains(&format!("@{l}"))).collect();
+    let mut used: Vec<&(String, String)> = mentions.iter().filter(|(_, l)| !l.is_empty() && mentions_name(text, l)).collect();
     if used.is_empty() { return None; }
     used.sort_by(|a, b| b.1.len().cmp(&a.1.len())); /* longer names first, so `@Bob Smith` is not eaten by `@Bob` */
     let mut out = match html { Some(h) => h.to_string(), None => esc(text).replace('\n', "<br>") };
@@ -865,7 +871,7 @@ pub fn with_mentions(text: &str, html: Option<&str>, mentions: &[(String, String
         let c = rest.chars().next().unwrap();
         if c == '<' { in_tag = true; } else if c == '>' { in_tag = false; }
         if c == '@' && !in_tag {
-            if let Some((at, id)) = names.iter().find(|(at, _)| rest.starts_with(at.as_str())) {
+            if let Some((at, id)) = names.iter().find(|(at, _)| rest.starts_with(at.as_str()) && rest[at.len()..].chars().next().map_or(true, |c| !c.is_alphanumeric())) {
                 out.push_str(&format!("<a href=\"https://matrix.to/#/{id}\">{at}</a>"));
                 i += at.len();
                 continue;
@@ -880,14 +886,7 @@ pub fn with_mentions(text: &str, html: Option<&str>, mentions: &[(String, String
 /// `send_text_with_emoji`, with the people the user picked from the `@` list as `(user id, name)`: they get `m.mentions` (what makes the
 /// other clients notify them) and a link in the formatted body.
 pub async fn send_text_full(timeline: &Timeline, text: &str, reply_to: Option<&str>, emoji: &HashMap<String, String>, mentions: &[(String, String)]) -> Result<(), String> {
-    let mut msgtype = RoomMessageEventContent::text_markdown(text).msgtype;
-    if let MessageType::Text(t) = &mut msgtype {
-        let html = t.formatted.as_ref().map(|f| f.body.clone());
-        if let Some(h) = crate::emotes::with_custom_emoji(text, html.as_deref(), emoji) { t.formatted = Some(matrix_sdk::ruma::events::room::message::FormattedBody::html(h)); }
-        let html = t.formatted.as_ref().map(|f| f.body.clone());
-        if let Some(h) = with_mentions(text, html.as_deref(), mentions) { t.formatted = Some(matrix_sdk::ruma::events::room::message::FormattedBody::html(h)); }
-    }
-    let ids: Vec<matrix_sdk::ruma::OwnedUserId> = mentions.iter().filter(|(_, l)| text.contains(&format!("@{l}"))).filter_map(|(i, _)| i.as_str().try_into().ok()).collect();
+    let (msgtype, ids) = text_content(text, emoji, mentions);
     let m = matrix_sdk::ruma::events::Mentions::with_user_ids(ids.clone());
     let mut content = RoomMessageEventContentWithoutRelation::new(msgtype.clone());
     if !ids.is_empty() { content = content.add_mentions(m.clone()); }
@@ -902,6 +901,21 @@ pub async fn send_text_full(timeline: &Timeline, text: &str, reply_to: Option<&s
             timeline.send(plain.into()).await.map_err(|e| e.to_string())?; }
     }
     Ok(())
+}
+
+/// The message a typed text becomes: Markdown as formatted text, `:shortcode:` custom emoji as pictures, picked `@names` as links; and
+/// the user ids those links mention.
+fn text_content(text: &str, emoji: &HashMap<String, String>, mentions: &[(String, String)]) -> (MessageType, Vec<matrix_sdk::ruma::OwnedUserId>) {
+    use matrix_sdk::ruma::events::room::message::FormattedBody;
+    let mut msgtype = RoomMessageEventContent::text_markdown(text).msgtype;
+    if let MessageType::Text(t) = &mut msgtype {
+        let html = t.formatted.as_ref().map(|f| f.body.clone());
+        if let Some(h) = crate::emotes::with_custom_emoji(text, html.as_deref(), emoji) { t.formatted = Some(FormattedBody::html(h)); }
+        let html = t.formatted.as_ref().map(|f| f.body.clone());
+        if let Some(h) = with_mentions(text, html.as_deref(), mentions) { t.formatted = Some(FormattedBody::html(h)); }
+    }
+    let ids = mentions.iter().filter(|(_, l)| mentions_name(text, l)).filter_map(|(i, _)| i.as_str().try_into().ok()).collect();
+    (msgtype, ids)
 }
 
 /// Send a file (a picture when it looks like one) into the timeline's room; encrypted rooms get an encrypted upload.
@@ -1003,9 +1017,15 @@ pub async fn set_typing(client: &Client, room_id: &str, typing: bool) -> Result<
 }
 
 /// Replace the text of one of our messages (Markdown becomes formatted text).
-pub async fn edit_text(timeline: &Timeline, event_id: &str, text: &str) -> Result<(), String> {
+pub async fn edit_text(timeline: &Timeline, event_id: &str, text: &str) -> Result<(), String> { edit_text_full(timeline, event_id, text, &HashMap::new(), &[]).await }
+
+/// `edit_text` with custom emoji and picked mentions, like `send_text_full`. The SDK puts only the newly mentioned people in the edit's own
+/// `m.mentions` and all of them in `m.new_content` (spec: "Edits of events with mentions").
+pub async fn edit_text_full(timeline: &Timeline, event_id: &str, text: &str, emoji: &HashMap<String, String>, mentions: &[(String, String)]) -> Result<(), String> {
     let id: OwnedEventId = event_id.try_into().map_err(|e| format!("bad event id: {e}"))?;
-    let content = RoomMessageEventContentWithoutRelation::new(RoomMessageEventContent::text_markdown(text).msgtype);
+    let (msgtype, ids) = text_content(text, emoji, mentions);
+    let mut content = RoomMessageEventContentWithoutRelation::new(msgtype);
+    if !ids.is_empty() { content = content.add_mentions(matrix_sdk::ruma::events::Mentions::with_user_ids(ids)); }
     timeline.edit(&TimelineEventItemId::EventId(id), matrix_sdk::room::edit::EditedContent::RoomMessage(content)).await.map_err(|e| e.to_string())
 }
 
@@ -1053,6 +1073,7 @@ mod tests {
         let m = vec![("@bob:hs".to_string(), "Bob".to_string()), ("@bs:hs".to_string(), "Bob Smith".to_string())];
         let h = with_mentions("hi @Bob Smith and @Bob <3", None, &m).unwrap();
         assert_eq!(h, "hi <a href=\"https://matrix.to/#/@bs:hs\">@Bob Smith</a> and <a href=\"https://matrix.to/#/@bob:hs\">@Bob</a> &lt;3");
+        assert!(with_mentions("hi @Bobby", None, &m).is_none(), "@Bobby is not a mention of Bob");
         assert!(with_mentions("no names here", None, &m).is_none(), "an edited-away mention is not linked");
         let md = with_mentions("**hey** @Bob", Some("<strong>hey</strong> @Bob"), &m).unwrap();
         assert!(md.starts_with("<strong>hey</strong> <a href="));
@@ -1081,6 +1102,91 @@ mod tests {
         let ev = items.iter().filter_map(|i| i.as_event()).next().unwrap();
         let ids = ev.content().as_message().unwrap().mentions().map(|m| m.user_ids.iter().map(|u| u.to_string()).collect::<Vec<_>>());
         assert_eq!(ids, Some(vec!["@bob:hs".to_string()]), "other clients notify from m.mentions, not from the text");
+    }
+
+    /// The event JSON as the client saw it after decryption (what other clients get to see), of the item at `index` among the events.
+    async fn raw_event(f: &Fixture, index: usize) -> serde_json::Value {
+        let ev = f.timeline.items().await.iter().filter_map(|i| i.as_event().cloned()).nth(index).unwrap();
+        serde_json::from_str(ev.original_json().expect("a sent event has its JSON").json().get()).unwrap()
+    }
+
+    // ---- conformance with the Client-Server API v1.19 (https://spec.matrix.org/v1.19/client-server-api/) ----
+
+    #[tokio::test]
+    async fn spec_an_edit_keeps_the_mentions_and_links_of_the_text() {
+        let f = fixture().await;
+        send_text(&f.timeline, "hello", None).await.unwrap();
+        let first = wait_for(&f, |m| m.len() == 1 && !m[0].pending).await[0].id.clone();
+        edit_text_full(&f.timeline, &first, "hello @Bob", &HashMap::new(), &[("@bob:hs".to_string(), "Bob".to_string())]).await.unwrap();
+        let msgs = wait_for(&f, |m| m.len() == 1 && m[0].edited && !m[0].pending).await;
+        assert!(msgs[0].html.contains("href=\"https://matrix.to/#/@bob:hs\""), "the edited text links the mention: {}", msgs[0].html);
+        let items = f.timeline.items().await;
+        let ev = items.iter().filter_map(|i| i.as_event()).next().unwrap();
+        let ids = ev.content().as_message().unwrap().mentions().map(|m| m.user_ids.iter().map(|u| u.to_string()).collect::<Vec<_>>());
+        assert_eq!(ids, Some(vec!["@bob:hs".to_string()]), "m.new_content carries the mention of the final text");
+    }
+
+    #[tokio::test]
+    async fn spec_a_thread_reply_relates_to_the_root_with_a_reply_fallback() {
+        let f = fixture().await;
+        let room = f.client.get_room(<&matrix_sdk::ruma::RoomId>::try_from(ROOM).unwrap()).unwrap();
+        let main = Arc::new(open_timeline(&room).await.unwrap());
+        let _ = main.subscribe().await;
+        send_text(&main, "root", None).await.unwrap();
+        let root = wait_for(&f, |m| m.len() == 1 && !m[0].pending).await[0].id.clone();
+        let thread = Arc::new(open_thread(&room, &root).await.unwrap());
+        let _ = thread.subscribe().await;
+        send_text(&thread, "in the thread", None).await.unwrap();
+        let mut rel = serde_json::Value::Null;
+        for _ in 0..120 {
+            crate::sync_once(&f.client).await.unwrap();
+            for it in thread.items().await.iter() {
+                if let Some(e) = it.as_event() {
+                    if e.content().as_message().map(|m| m.body() == "in the thread").unwrap_or(false) && e.event_id().is_some() {
+                        if let Some(j) = e.original_json() { rel = serde_json::from_str::<serde_json::Value>(j.json().get()).unwrap()["content"]["m.relates_to"].clone(); }
+                    }
+                }
+            }
+            if !rel.is_null() { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(rel["rel_type"], "m.thread", "{rel}");
+        assert_eq!(rel["event_id"], root.as_str(), "always the thread root");
+        assert_eq!(rel["is_falling_back"], true, "unthreaded clients get a reply chain: {rel}");
+        assert!(rel["m.in_reply_to"]["event_id"].is_string(), "{rel}");
+    }
+
+    #[tokio::test]
+    async fn spec_a_caption_is_the_body_with_the_file_name_in_filename() {
+        let f = fixture().await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dog.png");
+        std::fs::write(&path, PNG).unwrap();
+        send_file(&f.timeline, &path, Some("this is a **cat**")).await.unwrap();
+        let mut v = serde_json::Value::Null;
+        for _ in 0..200 {
+            crate::sync_once(&f.client).await.unwrap();
+            let evs: Vec<_> = f.timeline.items().await.iter().filter_map(|i| i.as_event().cloned()).collect();
+            if let Some(e) = evs.first().filter(|e| e.event_id().is_some()) { v = serde_json::from_str(e.original_json().unwrap().json().get()).unwrap(); break; }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let c = &v["content"];
+        assert_eq!(c["msgtype"], "m.image", "{v}");
+        assert_eq!(c["filename"], "dog.png", "the file name travels in filename (v1.10): {c}");
+        assert_eq!(c["body"], "this is a **cat**", "body is the caption: {c}");
+        assert!(c["formatted_body"].as_str().unwrap_or("").contains("<strong>cat</strong>"), "{c}");
+    }
+
+    #[tokio::test]
+    async fn spec_the_reply_fallback_of_older_clients_is_removed_before_showing() {
+        let f = fixture().await;
+        send_text(&f.timeline, "the original", None).await.unwrap();
+        let first = wait_for(&f, |m| m.len() == 1 && !m[0].pending).await[0].id.clone();
+        let content = RoomMessageEventContent::text_html("> <@alice:hs> the original\n\nthe answer", "<mx-reply><blockquote>the original</blockquote></mx-reply>the answer");
+        f.timeline.send_reply(RoomMessageEventContentWithoutRelation::new(content.msgtype), first.as_str().try_into().unwrap()).await.unwrap();
+        let msgs = wait_for(&f, |m| m.len() == 2 && !m[1].pending).await;
+        assert!(!msgs[1].html.contains("mx-reply") && !msgs[1].html.contains("blockquote"), "{}", msgs[1].html);
+        assert_eq!(msgs[1].body, "the answer", "the quoted lines of the plain body are stripped too");
     }
 
     #[tokio::test]
