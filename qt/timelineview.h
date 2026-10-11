@@ -95,6 +95,7 @@ private:
     QTextDocument *ownDoc_ = nullptr;
     size_t shownLimit_ = 100;
     QString windowStart_;
+    QSet<QString> revealed_; /* spoilers the user clicked open: "<event id>/<n>" */
     QStringList lastChunks_, rowEvents_;
     QVector<int> chunkRowStart_;
     QString lastStyle_;

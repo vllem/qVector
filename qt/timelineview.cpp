@@ -258,6 +258,7 @@ void TimelineView::onAnchor(const QUrl &u)
     }
     else if (s.startsWith("vc:img:") || s.startsWith("vc:open:")) emit openRequested(QUrl::fromPercentEncoding(s.mid(s.indexOf(':', 3) + 1).toUtf8())); /* a gallery item is "<event>#<n>" */
     else if (s.startsWith("vc:save:")) emit saveRequested(QUrl::fromPercentEncoding(s.mid(8).toUtf8()));
+    else if (s.startsWith("vc:spoiler/")) { const QString k = QUrl::fromPercentEncoding(s.mid(11).toUtf8()); if (!revealed_.remove(k)) revealed_.insert(k); render(); }
     else if (s.startsWith("vc:text:")) emit textRequested(s.mid(8));
     else if (s.startsWith("vc:thread:")) emit threadRequested(s.mid(10));
     else if (s.startsWith("vc:goto/")) { /* vc:goto/<answered event>[/<the reply, when the original is not loaded>] */
@@ -529,6 +530,20 @@ void TimelineView::render()
                     }
                 }
                 shown.replace("<del>", "<s>").replace("</del>", "</s>"); /* Qt knows <s> */
+                /* colours (data-mx-color / data-mx-bg-color) are not CSS for Qt; spoilers (data-mx-spoiler) stay hidden until clicked (spec: Spoiler messages) */
+                static const QRegularExpression colour("<(font|span|a)([^>]*?)\\sdata-mx-(bg-)?color=\"(#[0-9a-fA-F]{6})\"");
+                for (QRegularExpressionMatch m = colour.match(shown); m.hasMatch(); m = colour.match(shown))
+                    shown.replace(m.capturedStart(), m.capturedLength(), "<" + m.captured(1) + m.captured(2) + " style=\"" + (m.captured(3).isEmpty() ? "color:" : "background-color:") + m.captured(4) + "\"");
+                static const QRegularExpression spoiler("<span\\s+data-mx-spoiler(?:=(?:\"([^\"]*)\"|'([^']*)'))?\\s*>(.*?)</span>", QRegularExpression::DotMatchesEverythingOption);
+                int n = 0;
+                for (QRegularExpressionMatch m = spoiler.match(shown); m.hasMatch(); m = spoiler.match(shown, 0)) {
+                    const QString key = eid + "/" + QString::number(n++), reason = m.captured(1) + m.captured(2);
+                    const QString repl = revealed_.contains(key)
+                        ? "<a href=\"vc:spoiler/" + esc(key) + "\" style=\"text-decoration:none;color:" + hex(pal.color(QPalette::Text)) + ";background-color:" + hex(pal.color(QPalette::Button)) + "\">" + m.captured(3) + "</a>"
+                        : "<a href=\"vc:spoiler/" + esc(key) + "\" style=\"text-decoration:none;color:" + hex(pal.color(QPalette::Window)) + ";background-color:" + hex(pal.color(QPalette::WindowText)) + "\">&nbsp;" + (reason.isEmpty() ? QStringLiteral("spoiler") : esc(reason)) + "&nbsp;</a>";
+                    shown.replace(m.capturedStart(), m.capturedLength(), repl);
+                    if (n > 200) break;
+                }
                 if (kind == "emote") shown = "* " + esc(name) + " " + shown;
             }
             content = "<span style=\"" + style + "\">" + shown + "</span>";

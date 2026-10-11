@@ -149,6 +149,18 @@ int main(int argc, char **argv)
         for (int i = 0; i < 100; i++) { tl.resize(500 + (i * 37) % 700, 400 + (i * 53) % 400); app.processEvents(); }
     });
     step("timeline: the same rows set 500 times (must be skipped)", 300, [&] { const QJsonArray rows = messages(100); for (int i = 0; i < 500; i++) tl.setRows(rows); });
+    /* Spec conformance of the renderer: a spoiler hides its text until clicked, colours become CSS (Client-Server API: Spoiler messages, formatted text). */
+    step("timeline: spoilers stay hidden until clicked; colours are applied", 300, [&] {
+        tl.reset();
+        tl.setRows(QJsonArray{message(1, "x", "The answer is <span data-mx-spoiler=\"plot\">forty-two</span> and <font data-mx-color=\"#ff0000\">red</font>")});
+        app.processEvents();
+        auto *b = tl.findChild<QTextBrowser *>();
+        if (b->toPlainText().contains("forty-two") || !b->toPlainText().contains("plot")) { std::printf("  spoiler text is visible or its reason is missing\n"); failures++; }
+        if (!b->toHtml().contains("color:#ff0000")) { std::printf("  data-mx-color not applied\n"); failures++; }
+        emit b->anchorClicked(QUrl("vc:spoiler/$e1/0"));
+        app.processEvents();
+        if (!b->toPlainText().contains("forty-two")) { std::printf("  spoiler did not open\n"); failures++; }
+    });
     step("timeline: malformed rows (missing and wrong-typed fields)", 300, [&] {
         QJsonArray a;
         a.append(QJsonObject());
