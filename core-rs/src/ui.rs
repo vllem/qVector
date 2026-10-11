@@ -1008,7 +1008,16 @@ pub async fn load_older(timeline: &Timeline) -> Result<bool, String> { timeline.
 
 /// Tell the room we have read up to its newest message (so the server's unread counts and other people's receipts follow). True if a receipt was sent.
 pub async fn mark_read(timeline: &Timeline) -> Result<bool, String> {
-    timeline.mark_as_read(matrix_sdk::ruma::api::client::receipt::create_receipt::v3::ReceiptType::Read).await.map_err(|e| e.to_string())
+    let sent = timeline.mark_as_read(matrix_sdk::ruma::api::client::receipt::create_receipt::v3::ReceiptType::Read).await.map_err(|e| e.to_string())?;
+    if sent {
+        /* the public receipt tells other people; m.fully_read ("unread since here") is what the user's other devices and clients follow */
+        let newest = timeline.items().await.iter().rev().filter_map(|i| i.as_event()).find_map(|e| e.event_id().map(|i| i.to_owned()));
+        if let Some(id) = newest {
+            let r = matrix_sdk::room::Receipts::new().fully_read_marker(id);
+            timeline.room().send_multiple_receipts(r).await.map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(sent)
 }
 
 /// Say that we are (or are no longer) typing in a room.
@@ -1198,6 +1207,16 @@ mod tests {
         assert!(!h.contains("onclick") && !h.contains("position") && !h.contains("javascript:"), "{h}");
         assert!(h.contains("magnet:"), "magnet links are allowed by the spec: {h}");
         assert!(h.contains("start=\"5\""), "a numbered list keeps its start (v1.18): {h}");
+    }
+
+    #[tokio::test]
+    async fn spec_reading_also_moves_the_fully_read_marker() {
+        let f = fixture().await;
+        send_text(&f.timeline, "hello", None).await.unwrap();
+        let id = wait_for(&f, |m| m.len() == 1 && !m[0].pending).await[0].id.clone();
+        for _ in 0..20 { if mark_read(&f.timeline).await.unwrap_or(false) { break; } tokio::time::sleep(std::time::Duration::from_millis(100)).await; }
+        let log = f.hs.log();
+        assert!(log.iter().any(|l| l.starts_with("read_markers") && l.contains("m.fully_read") && l.contains(&id)), "m.fully_read is what other devices use for \"unread since here\": {log:#?}");
     }
 
     #[tokio::test]
