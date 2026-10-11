@@ -161,6 +161,12 @@ int main(int argc, char **argv)
         app.processEvents();
         if (!b->toPlainText().contains("forty-two")) { std::printf("  spoiler did not open\n"); failures++; }
     });
+    step("timeline: a numbered list keeps its start number (spec v1.18)", 300, [&] {
+        tl.reset();
+        tl.setRows(QJsonArray{message(1, "x", "<ol start=\"5\"><li>five</li><li>six</li></ol>")});
+        app.processEvents();
+        if (!tl.findChild<QTextBrowser *>()->toHtml().contains("start=\"5\"")) { std::printf("  the list start number is lost\n"); failures++; }
+    });
     step("timeline: malformed rows (missing and wrong-typed fields)", 300, [&] {
         QJsonArray a;
         a.append(QJsonObject());

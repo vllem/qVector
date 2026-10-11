@@ -1192,11 +1192,12 @@ mod tests {
     #[test]
     fn spec_spoilers_colours_and_only_those_survive_the_sanitizer() {
         let t = MessageType::Text(matrix_sdk::ruma::events::room::message::TextMessageEventContent::html("x",
-            "<span data-mx-spoiler=\"why\">secret</span> <font data-mx-color=\"#ff0000\" onclick=\"x()\">red</font> <span style=\"position:fixed\">s</span> <a href=\"javascript:x()\">j</a> <a href=\"magnet:?xt=urn:btih:1\">m</a>"));
+            "<span data-mx-spoiler=\"why\">secret</span> <font data-mx-color=\"#ff0000\" onclick=\"x()\">red</font> <span style=\"position:fixed\">s</span> <a href=\"javascript:x()\">j</a> <a href=\"magnet:?xt=urn:btih:1\">m</a><ol start=\"5\"><li>five</li></ol>"));
         let h = html_of(&t);
         assert!(h.contains("data-mx-spoiler=\"why\"") && h.contains("data-mx-color=\"#ff0000\""), "{h}");
         assert!(!h.contains("onclick") && !h.contains("position") && !h.contains("javascript:"), "{h}");
         assert!(h.contains("magnet:"), "magnet links are allowed by the spec: {h}");
+        assert!(h.contains("start=\"5\""), "a numbered list keeps its start (v1.18): {h}");
     }
 
     #[tokio::test]
