@@ -41,6 +41,14 @@ template <class F> static void step(const char *name, double budgetMs, F f)
     if (!ok) failures++;
 }
 
+/* The view merges redraws that come within 150 ms of each other, so a check of what it shows waits for the deferred one. */
+static void settle()
+{
+    QElapsedTimer w;
+    w.start();
+    while (w.elapsed() < 300) QApplication::processEvents(QEventLoop::AllEvents, 20);
+}
+
 static QJsonObject message(int i, const QString &body, const QString &html = QString())
 {
     static const char *const who[] = {"zach", "ben", "matt", "ruben", "kab"};
@@ -150,21 +158,29 @@ int main(int argc, char **argv)
     });
     step("timeline: the same rows set 500 times (must be skipped)", 300, [&] { const QJsonArray rows = messages(100); for (int i = 0; i < 500; i++) tl.setRows(rows); });
     /* Spec conformance of the renderer: a spoiler hides its text until clicked, colours become CSS (Client-Server API: Spoiler messages, formatted text). */
-    step("timeline: spoilers stay hidden until clicked; colours are applied", 300, [&] {
+    step("timeline: spoilers stay hidden until clicked; colours are applied", 1500, [&] {
         tl.reset();
         tl.setRows(QJsonArray{message(1, "x", "The answer is <span data-mx-spoiler=\"plot\">forty-two</span> and <font data-mx-color=\"#ff0000\">red</font>")});
-        app.processEvents();
+        settle();
         auto *b = tl.findChild<QTextBrowser *>();
         if (b->toPlainText().contains("forty-two") || !b->toPlainText().contains("plot")) { std::printf("  spoiler text is visible or its reason is missing\n"); failures++; }
         if (!b->toHtml().contains("color:#ff0000")) { std::printf("  data-mx-color not applied\n"); failures++; }
         emit b->anchorClicked(QUrl("vc:spoiler/$e1/0"));
-        app.processEvents();
+        settle();
         if (!b->toPlainText().contains("forty-two")) { std::printf("  spoiler did not open\n"); failures++; }
     });
-    step("timeline: a numbered list keeps its start number (spec v1.18)", 300, [&] {
+    step("timeline: markup inside a spoiler cannot end it early", 1500, [&] {
+        tl.reset();
+        tl.setRows(QJsonArray{message(2, "x", "<span data-mx-spoiler><span data-mx-color=\"#ff0000\">red</span> secret <span>deep <span>deeper</span> still</span> tail</span> after")});
+        settle();
+        const QString t = tl.findChild<QTextBrowser *>()->toPlainText();
+        for (const char *w : {"red", "secret", "deeper", "still", "tail"}) if (t.contains(w)) { std::printf("  '%s' leaks out of the spoiler\n", w); failures++; }
+        if (!t.contains("after")) { std::printf("  text after the spoiler is lost\n"); failures++; }
+    });
+    step("timeline: a numbered list keeps its start number (spec v1.18)", 1500, [&] {
         tl.reset();
         tl.setRows(QJsonArray{message(1, "x", "<ol start=\"5\"><li>five</li><li>six</li></ol>")});
-        app.processEvents();
+        settle();
         if (!tl.findChild<QTextBrowser *>()->toHtml().contains("start=\"5\"")) { std::printf("  the list start number is lost\n"); failures++; }
     });
     step("timeline: malformed rows (missing and wrong-typed fields)", 300, [&] {

@@ -530,20 +530,30 @@ void TimelineView::render()
                     }
                 }
                 shown.replace("<del>", "<s>").replace("</del>", "</s>"); /* Qt knows <s> */
-                /* colours (data-mx-color / data-mx-bg-color) are not CSS for Qt; spoilers (data-mx-spoiler) stay hidden until clicked (spec: Spoiler messages) */
+                /* spoilers (data-mx-spoiler) stay hidden until clicked (spec: Spoiler messages); the span is closed by counting nested spans, so
+                   markup inside cannot end it early and show the text */
+                static const QRegularExpression spoilerOpen("<span\\s+data-mx-spoiler(?:=(?:\"([^\"]*)\"|'([^']*)'))?\\s*>");
+                for (int n = 0; n < 200; n++) {
+                    const QRegularExpressionMatch m = spoilerOpen.match(shown);
+                    if (!m.hasMatch()) break;
+                    int depth = 1, at = m.capturedEnd();
+                    while (depth > 0) {
+                        const int open = shown.indexOf("<span", at), close = shown.indexOf("</span>", at);
+                        if (close < 0) { at = shown.size(); depth = 0; break; }
+                        if (open >= 0 && open < close) { depth++; at = open + 5; } else { depth--; at = close + 7; }
+                    }
+                    const int innerEnd = depth == 0 && at >= 7 && shown.mid(at - 7, 7) == "</span>" ? at - 7 : shown.size();
+                    const QString inner = shown.mid(m.capturedEnd(), innerEnd - m.capturedEnd()), reason = m.captured(1) + m.captured(2);
+                    const QString key = eid + "/" + QString::number(n);
+                    const QString repl = revealed_.contains(key)
+                        ? "<a href=\"vc:spoiler/" + esc(key) + "\" style=\"text-decoration:none;color:" + hex(pal.color(QPalette::Text)) + ";background-color:" + hex(pal.color(QPalette::Button)) + "\">" + inner + "</a>"
+                        : "<a href=\"vc:spoiler/" + esc(key) + "\" style=\"text-decoration:none;color:" + hex(pal.color(QPalette::Window)) + ";background-color:" + hex(pal.color(QPalette::WindowText)) + "\">&nbsp;" + (reason.isEmpty() ? QStringLiteral("spoiler") : esc(reason)) + "&nbsp;</a>";
+                    shown.replace(m.capturedStart(), at - m.capturedStart(), repl);
+                }
+                /* colours (data-mx-color / data-mx-bg-color) are not CSS for Qt */
                 static const QRegularExpression colour("<(font|span|a)([^>]*?)\\sdata-mx-(bg-)?color=\"(#[0-9a-fA-F]{6})\"");
                 for (QRegularExpressionMatch m = colour.match(shown); m.hasMatch(); m = colour.match(shown))
                     shown.replace(m.capturedStart(), m.capturedLength(), "<" + m.captured(1) + m.captured(2) + " style=\"" + (m.captured(3).isEmpty() ? "color:" : "background-color:") + m.captured(4) + "\"");
-                static const QRegularExpression spoiler("<span\\s+data-mx-spoiler(?:=(?:\"([^\"]*)\"|'([^']*)'))?\\s*>(.*?)</span>", QRegularExpression::DotMatchesEverythingOption);
-                int n = 0;
-                for (QRegularExpressionMatch m = spoiler.match(shown); m.hasMatch(); m = spoiler.match(shown, 0)) {
-                    const QString key = eid + "/" + QString::number(n++), reason = m.captured(1) + m.captured(2);
-                    const QString repl = revealed_.contains(key)
-                        ? "<a href=\"vc:spoiler/" + esc(key) + "\" style=\"text-decoration:none;color:" + hex(pal.color(QPalette::Text)) + ";background-color:" + hex(pal.color(QPalette::Button)) + "\">" + m.captured(3) + "</a>"
-                        : "<a href=\"vc:spoiler/" + esc(key) + "\" style=\"text-decoration:none;color:" + hex(pal.color(QPalette::Window)) + ";background-color:" + hex(pal.color(QPalette::WindowText)) + "\">&nbsp;" + (reason.isEmpty() ? QStringLiteral("spoiler") : esc(reason)) + "&nbsp;</a>";
-                    shown.replace(m.capturedStart(), m.capturedLength(), repl);
-                    if (n > 200) break;
-                }
                 if (kind == "emote") shown = "* " + esc(name) + " " + shown;
             }
             content = "<span style=\"" + style + "\">" + shown + "</span>";

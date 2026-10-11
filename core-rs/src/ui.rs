@@ -897,9 +897,8 @@ pub fn with_mentions(text: &str, html: Option<&str>, mentions: &[(String, String
 /// other clients notify them) and a link in the formatted body.
 pub async fn send_text_full(timeline: &Timeline, text: &str, reply_to: Option<&str>, emoji: &HashMap<String, String>, mentions: &[(String, String)]) -> Result<(), String> {
     let (msgtype, m) = text_content(text, emoji, mentions);
-    let any = m.room || !m.user_ids.is_empty();
-    let mut content = RoomMessageEventContentWithoutRelation::new(msgtype.clone());
-    if any { content = content.add_mentions(m.clone()); }
+    /* always present, empty when nobody is mentioned: servers and clients that still have the old body-matching push rules would otherwise notify on a name in the text */
+    let mut content = RoomMessageEventContentWithoutRelation::new(msgtype.clone()).add_mentions(m.clone());
     match reply_to.filter(|r| !r.is_empty()) {
         Some(id) => {
             let id: OwnedEventId = id.try_into().map_err(|e| format!("bad event id: {e}"))?;
@@ -907,7 +906,7 @@ pub async fn send_text_full(timeline: &Timeline, text: &str, reply_to: Option<&s
         }
         None => {
             let mut plain = RoomMessageEventContent::new(msgtype);
-            if any { plain = plain.add_mentions(m); }
+            plain = plain.add_mentions(m);
             timeline.send(plain.into()).await.map_err(|e| e.to_string())?; }
     }
     Ok(())
@@ -1043,13 +1042,13 @@ pub async fn set_typing(client: &Client, room_id: &str, typing: bool) -> Result<
 /// Replace the text of one of our messages (Markdown becomes formatted text).
 pub async fn edit_text(timeline: &Timeline, event_id: &str, text: &str) -> Result<(), String> { edit_text_full(timeline, event_id, text, &HashMap::new(), &[]).await }
 
-/// `edit_text` with custom emoji and picked mentions, like `send_text_full`. The SDK puts only the newly mentioned people in the edit's own
-/// `m.mentions` and all of them in `m.new_content` (spec: "Edits of events with mentions").
+/// `edit_text` with custom emoji and picked mentions, like `send_text_full`. The SDK puts the people not mentioned by the *original* message in
+/// the edit's own `m.mentions` and all of them in `m.new_content` (spec: "Edits of events with mentions"); a later edit therefore repeats
+/// people an earlier edit added (known limit: the SDK does not compare with the previous edit).
 pub async fn edit_text_full(timeline: &Timeline, event_id: &str, text: &str, emoji: &HashMap<String, String>, mentions: &[(String, String)]) -> Result<(), String> {
     let id: OwnedEventId = event_id.try_into().map_err(|e| format!("bad event id: {e}"))?;
     let (msgtype, m) = text_content(text, emoji, mentions);
-    let mut content = RoomMessageEventContentWithoutRelation::new(msgtype);
-    if m.room || !m.user_ids.is_empty() { content = content.add_mentions(m); }
+    let content = RoomMessageEventContentWithoutRelation::new(msgtype).add_mentions(m);
     timeline.edit(&TimelineEventItemId::EventId(id), matrix_sdk::room::edit::EditedContent::RoomMessage(content)).await.map_err(|e| e.to_string())
 }
 
@@ -1141,13 +1140,37 @@ mod tests {
         let f = fixture().await;
         send_text(&f.timeline, "hello", None).await.unwrap();
         let first = wait_for(&f, |m| m.len() == 1 && !m[0].pending).await[0].id.clone();
-        edit_text_full(&f.timeline, &first, "hello @Bob", &HashMap::new(), &[("@bob:hs".to_string(), "Bob".to_string())]).await.unwrap();
+        let bob = [("@bob:hs".to_string(), "Bob".to_string())];
+        edit_text_full(&f.timeline, &first, "hello @Bob", &HashMap::new(), &bob).await.unwrap();
         let msgs = wait_for(&f, |m| m.len() == 1 && m[0].edited && !m[0].pending).await;
         assert!(msgs[0].html.contains("href=\"https://matrix.to/#/@bob:hs\""), "the edited text links the mention: {}", msgs[0].html);
-        let items = f.timeline.items().await;
-        let ev = items.iter().filter_map(|i| i.as_event()).next().unwrap();
-        let ids = ev.content().as_message().unwrap().mentions().map(|m| m.user_ids.iter().map(|u| u.to_string()).collect::<Vec<_>>());
-        assert_eq!(ids, Some(vec!["@bob:hs".to_string()]), "m.new_content carries the mention of the final text");
+        let edit = latest_edit(&f).await;
+        assert_eq!(edit["content"]["m.mentions"]["user_ids"], serde_json::json!(["@bob:hs"]), "Bob is newly mentioned: {edit}");
+        assert_eq!(edit["content"]["m.new_content"]["m.mentions"]["user_ids"], serde_json::json!(["@bob:hs"]), "{edit}");
+    }
+
+    /// The JSON of the newest edit of the first message, as the client sees it.
+    async fn latest_edit(f: &Fixture) -> serde_json::Value {
+        for _ in 0..200 {
+            crate::sync_once(&f.client).await.unwrap();
+            let items = f.timeline.items().await;
+            if let Some(j) = items.iter().filter_map(|i| i.as_event()).next().and_then(|e| e.latest_edit_json().cloned()) { return serde_json::from_str(j.json().get()).unwrap(); }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("no edit arrived");
+    }
+
+    #[tokio::test]
+    async fn spec_every_message_carries_m_mentions_even_when_empty() {
+        let f = fixture().await;
+        send_text(&f.timeline, "hello Bob, plain", None).await.unwrap();
+        for _ in 0..200 {
+            crate::sync_once(&f.client).await.unwrap();
+            if f.timeline.items().await.iter().filter_map(|i| i.as_event()).any(|e| e.event_id().is_some() && e.original_json().is_some()) { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let v = raw_event(&f, 0).await;
+        assert_eq!(v["content"]["m.mentions"], serde_json::json!({}), "an empty m.mentions keeps old push rules from matching names in the text: {v}");
     }
 
     #[tokio::test]

@@ -209,6 +209,13 @@ void Composer::keyPressEvent(QKeyEvent *e)
 
 static QString S(const QJsonObject &o, const char *k) { return o.value(QLatin1String(k)).toString(); }
 
+/* The member's own display name: the engine adds " (@id:server)" to a name somebody else also has, but a mention's text is the plain name. */
+static QString plainName(const QJsonObject &m)
+{
+    const QString name = S(m, "name"), suffix = " (" + S(m, "user_id") + ")";
+    return name.endsWith(suffix) ? name.chopped(suffix.size()) : name;
+}
+
 MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
 {
     setWindowTitle("qVector");
@@ -652,7 +659,7 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
         for (const QJsonValue &v : details_["members"].toArray()) {
             const QJsonObject m = v.toObject();
             if (S(m, "user_id") == user_) continue;
-            out.append({S(m, "user_id"), "@" + S(m, "name"), QString()});
+            out.append({S(m, "user_id"), "@" + plainName(m), QString()});
         }
         out.append({"@room", "@room", QString()}); /* notifies everybody in the room (m.mentions.room) */
         const QString p = prefix.toLower();
@@ -1169,7 +1176,7 @@ QJsonArray MainWindow::mentionsIn(const QString &text)
     add("@room", "@room");
     for (const QJsonValue &v : details_["members"].toArray()) {
         const QJsonObject m = v.toObject();
-        if (S(m, "user_id") != user_) add(S(m, "user_id"), "@" + S(m, "name"));
+        if (S(m, "user_id") != user_) add(S(m, "user_id"), "@" + plainName(m));
     }
     return out;
 }
