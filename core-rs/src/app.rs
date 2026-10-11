@@ -152,9 +152,11 @@ impl App {
             #[cfg(feature = "testkit")]
             "start_fake_server" => self.start_fake_server(),
             "select_room" => self.select_room(&s(args, "room_id")),
-            "send" => { let (t, r) = (s(args, "text"), s(args, "reply_to")); if !t.trim().is_empty() { self.on_timeline(move |i, tl| async move {
+            "send" => { let (t, r) = (s(args, "text"), s(args, "reply_to"));
+                let mentions: Vec<(String, String)> = args.get("mentions").and_then(|v| v.as_array()).map(|a| a.iter().map(|m| (s(m, "id"), s(m, "label"))).collect()).unwrap_or_default();
+                if !t.trim().is_empty() { self.on_timeline(move |i, tl| async move {
                 let emoji = match i.client() { Some(c) if t.contains(':') => crate::emotes::emoji_map(&crate::emotes::emote_packs(&c, tl.room().room_id().as_str()).await), _ => Default::default() };
-                if let Err(e) = ui::send_text_with_emoji(&tl, &t, Some(r.as_str()), &emoji).await { i.notice(format!("Cannot send the message: {e}")); } }); } Value::Null }
+                if let Err(e) = ui::send_text_full(&tl, &t, Some(r.as_str()), &emoji, &mentions).await { i.notice(format!("Cannot send the message: {e}")); } }); } Value::Null }
             "emote_packs" => self.send_emote_packs(&s(args, "room_id")),
             "send_sticker" => { let (m, b, w, h, mime) = (s(args, "mxc"), s(args, "body"), args["width"].as_u64().unwrap_or(0) as u32, args["height"].as_u64().unwrap_or(0) as u32, s(args, "mime")); self.on_timeline(move |i, tl| async move { if let Err(e) = ui::send_sticker(&tl, &m, &b, w, h, &mime).await { i.notice(format!("Cannot send the sticker: {e}")); } }); Value::Null }
             "send_file" => { let p = PathBuf::from(s(args, "path").trim_start_matches("file://")); let cap = s(args, "caption"); self.on_timeline(move |i, tl| async move { if let Err(e) = ui::send_file(&tl, &p, Some(&cap)).await { i.notice(format!("Cannot send the file: {e}")); } }); Value::Null }

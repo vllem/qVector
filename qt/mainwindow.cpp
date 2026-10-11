@@ -661,6 +661,7 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
         if (hits.size() > 8) hits = hits.mid(0, 8);
         return hits;
     };
+    connect(composer_, &Composer::mentionPicked, this, [this](const QString &id, const QString &label) { mentioned_.append({id, label}); });
     loadDrafts();
 }
 
@@ -1172,7 +1173,10 @@ void MainWindow::send()
         editing_.clear(); composer_->clear(); showContextBar(QString());
         return;
     }
-    core_->call("send", {{"text", text}, {"reply_to", replyTo_}});
+    QJsonArray mentions; /* the people picked from the @ list whose name is still in the text */
+    for (const auto &m : mentioned_) if (text.contains(m.second)) mentions.append(QJsonObject{{"id", m.first}, {"label", m.second.mid(1)}});
+    mentioned_.clear();
+    core_->call("send", {{"text", text}, {"reply_to", replyTo_}, {"mentions", mentions}});
     startSending();
     replyTo_.clear(); composer_->clear(); showContextBar(QString()); drafts_.remove(current_);
     timeline_->stickToBottom();

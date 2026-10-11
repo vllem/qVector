@@ -199,6 +199,7 @@ private:
     Notifier *notifier_ = nullptr;
     QSystemTrayIcon *tray_ = nullptr;
     QString current_, replyTo_, editing_, reactEvent_;
+    QList<QPair<QString, QString>> mentioned_; /* (user id, "@name") picked from the composer popup since the last send */
     QString user_, workspace_;
     QJsonArray rooms_;
     QJsonObject details_, session_;

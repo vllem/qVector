@@ -844,18 +844,62 @@ pub async fn send_text(timeline: &Timeline, text: &str, reply_to: Option<&str>) 
 
 /// `send_text`, with `:shortcode:`s of the given custom emoji (shortcode -> `mxc://` address) sent as pictures.
 pub async fn send_text_with_emoji(timeline: &Timeline, text: &str, reply_to: Option<&str>, emoji: &HashMap<String, String>) -> Result<(), String> {
+    send_text_full(timeline, text, reply_to, emoji, &[]).await
+}
+
+/// The formatted body of a message that mentions people: every `@label` of `mentions` (user id, label) becomes a matrix.to link (a "pill" in
+/// Element and Cinny). Starts from the Markdown's HTML, or from the escaped text when it had none.
+pub fn with_mentions(text: &str, html: Option<&str>, mentions: &[(String, String)]) -> Option<String> {
+    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+    let mut used: Vec<&(String, String)> = mentions.iter().filter(|(_, l)| !l.is_empty() && text.contains(&format!("@{l}"))).collect();
+    if used.is_empty() { return None; }
+    used.sort_by(|a, b| b.1.len().cmp(&a.1.len())); /* longer names first, so `@Bob Smith` is not eaten by `@Bob` */
+    let mut out = match html { Some(h) => h.to_string(), None => esc(text).replace('\n', "<br>") };
+    /* one pass, longest name first at each '@', and never inside a tag */
+    let src = std::mem::take(&mut out);
+    let names: Vec<(String, String)> = used.iter().map(|(id, l)| (format!("@{}", esc(l)), esc(id))).collect();
+    let mut i = 0;
+    let mut in_tag = false;
+    while i < src.len() {
+        let rest = &src[i..];
+        let c = rest.chars().next().unwrap();
+        if c == '<' { in_tag = true; } else if c == '>' { in_tag = false; }
+        if c == '@' && !in_tag {
+            if let Some((at, id)) = names.iter().find(|(at, _)| rest.starts_with(at.as_str())) {
+                out.push_str(&format!("<a href=\"https://matrix.to/#/{id}\">{at}</a>"));
+                i += at.len();
+                continue;
+            }
+        }
+        out.push(c);
+        i += c.len_utf8();
+    }
+    Some(out)
+}
+
+/// `send_text_with_emoji`, with the people the user picked from the `@` list as `(user id, name)`: they get `m.mentions` (what makes the
+/// other clients notify them) and a link in the formatted body.
+pub async fn send_text_full(timeline: &Timeline, text: &str, reply_to: Option<&str>, emoji: &HashMap<String, String>, mentions: &[(String, String)]) -> Result<(), String> {
     let mut msgtype = RoomMessageEventContent::text_markdown(text).msgtype;
     if let MessageType::Text(t) = &mut msgtype {
         let html = t.formatted.as_ref().map(|f| f.body.clone());
         if let Some(h) = crate::emotes::with_custom_emoji(text, html.as_deref(), emoji) { t.formatted = Some(matrix_sdk::ruma::events::room::message::FormattedBody::html(h)); }
+        let html = t.formatted.as_ref().map(|f| f.body.clone());
+        if let Some(h) = with_mentions(text, html.as_deref(), mentions) { t.formatted = Some(matrix_sdk::ruma::events::room::message::FormattedBody::html(h)); }
     }
-    let content = RoomMessageEventContentWithoutRelation::new(msgtype);
+    let ids: Vec<matrix_sdk::ruma::OwnedUserId> = mentions.iter().filter(|(_, l)| text.contains(&format!("@{l}"))).filter_map(|(i, _)| i.as_str().try_into().ok()).collect();
+    let m = matrix_sdk::ruma::events::Mentions::with_user_ids(ids.clone());
+    let mut content = RoomMessageEventContentWithoutRelation::new(msgtype.clone());
+    if !ids.is_empty() { content = content.add_mentions(m.clone()); }
     match reply_to.filter(|r| !r.is_empty()) {
         Some(id) => {
             let id: OwnedEventId = id.try_into().map_err(|e| format!("bad event id: {e}"))?;
             timeline.send_reply(content, id).await.map_err(|e| e.to_string())?;
         }
-        None => { timeline.send(RoomMessageEventContent::new(content.msgtype).into()).await.map_err(|e| e.to_string())?; }
+        None => {
+            let mut plain = RoomMessageEventContent::new(msgtype);
+            if !ids.is_empty() { plain = plain.add_mentions(m); }
+            timeline.send(plain.into()).await.map_err(|e| e.to_string())?; }
     }
     Ok(())
 }
@@ -1004,6 +1048,16 @@ mod tests {
         panic!("the timeline never looked as expected: {last:#?}");
     }
 
+    #[test]
+    fn a_picked_mention_becomes_a_matrix_to_link_and_only_when_its_name_is_still_in_the_text() {
+        let m = vec![("@bob:hs".to_string(), "Bob".to_string()), ("@bs:hs".to_string(), "Bob Smith".to_string())];
+        let h = with_mentions("hi @Bob Smith and @Bob <3", None, &m).unwrap();
+        assert_eq!(h, "hi <a href=\"https://matrix.to/#/@bs:hs\">@Bob Smith</a> and <a href=\"https://matrix.to/#/@bob:hs\">@Bob</a> &lt;3");
+        assert!(with_mentions("no names here", None, &m).is_none(), "an edited-away mention is not linked");
+        let md = with_mentions("**hey** @Bob", Some("<strong>hey</strong> @Bob"), &m).unwrap();
+        assert!(md.starts_with("<strong>hey</strong> <a href="));
+    }
+
     #[tokio::test]
     async fn markdown_goes_out_formatted_and_incoming_html_is_sanitized() {
         let f = fixture().await;
@@ -1015,6 +1069,18 @@ mod tests {
         assert!(msgs[1].html.contains("<b>ok</b>"));
         assert!(!msgs[1].html.contains("script") && !msgs[1].html.contains("javascript:") && !msgs[1].html.contains("tracker.example"), "dangerous markup is removed: {}", msgs[1].html);
         assert!(f.hs.room_events().iter().any(|e| e["type"] == "m.room.encrypted"), "in an encrypted room it travels as ciphertext");
+    }
+
+    #[tokio::test]
+    async fn a_picked_mention_is_sent_in_m_mentions_and_as_a_link() {
+        let f = fixture().await;
+        send_text_full(&f.timeline, "hello @Bob, **welcome**", None, &HashMap::new(), &[("@bob:hs".to_string(), "Bob".to_string())]).await.unwrap();
+        let msgs = wait_for(&f, |m| m.len() == 1 && !m[0].pending).await;
+        assert!(msgs[0].html.contains("href=\"https://matrix.to/#/@bob:hs\"") && msgs[0].html.contains("<strong>welcome</strong>"), "{}", msgs[0].html);
+        let items = f.timeline.items().await;
+        let ev = items.iter().filter_map(|i| i.as_event()).next().unwrap();
+        let ids = ev.content().as_message().unwrap().mentions().map(|m| m.user_ids.iter().map(|u| u.to_string()).collect::<Vec<_>>());
+        assert_eq!(ids, Some(vec!["@bob:hs".to_string()]), "other clients notify from m.mentions, not from the text");
     }
 
     #[tokio::test]
