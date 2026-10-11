@@ -370,6 +370,7 @@ void TimelineView::render()
     }
     QSet<QString> haveAvatars;
     QString lastSender;
+    bool lastMedia = false; /* the previous message was a picture or video */
     qint64 lastTs = 0;
     for (int i = firstShown; i < n; i++) {
         const QJsonObject r = rows_[i].toObject();
@@ -381,6 +382,9 @@ void TimelineView::render()
         const bool pending = B(r, "pending");
         const bool grouped = sender == lastSender && ts - lastTs < 5 * 60 * 1000 && ts >= lastTs;
         lastSender = sender; lastTs = ts;
+        const bool media = kind == "image" || kind == "sticker" || kind == "gallery" || kind == "video";
+        const bool gapAbove = grouped && (media || lastMedia); /* pictures sent one after another need a gap between them */
+        lastMedia = media;
         const QDateTime dt = QDateTime::fromMSecsSinceEpoch(ts);
         QString when = formatWhen(dt);
         if (bookmarks_.contains(eid)) when = QStringLiteral("★︎ ") + when; /* saved by the user */
@@ -634,7 +638,7 @@ void TimelineView::render()
                     "<tr><td " + hl + " colspan=2>" + content + "</td></tr>";
         } else {
             rowEvents_ << eid;
-            html += "<tr><td width=40></td><td " + hl + " colspan=2>" + anchor + content + "</td></tr>";
+            html += "<tr><td width=40></td><td " + hl + " colspan=2" + (gapAbove ? " style=\"padding-top:8px\"" : "") + ">" + anchor + content + "</td></tr>";
         }
         const QJsonArray seen = r.value("seen_by").toArray();
         if (!seen.isEmpty()) {
