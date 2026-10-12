@@ -88,7 +88,7 @@ AudioPlayer::AudioPlayer(const QString &path, const QString &title, QWidget *par
     art_->setAlignment(Qt::AlignCenter);
     art_->hide();
     auto *top = new QHBoxLayout;
-    top->addWidget(art_);
+    top->addWidget(art_, 0, Qt::AlignVCenter);
     top->addWidget(wave_, 1);
     v->addLayout(top, 1);
     auto *row = new QHBoxLayout;
