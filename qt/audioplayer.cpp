@@ -13,6 +13,7 @@
 #include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <algorithm>
 #include <cmath>
 
 namespace vc {
@@ -55,9 +56,9 @@ void WaveformView::paintEvent(QPaintEvent *)
         float v = 0.03f; /* a thin line while the file is still being read */
         if (!peaks_.isEmpty()) {
             const int a = int(double(i) * peaks_.size() / n), b = qMax(a + 1, int(double(i + 1) * peaks_.size() / n));
-            v = 0;
-            for (int k = a; k < b && k < peaks_.size(); k++) v = qMax(v, peaks_[k]);
-            v = qMax(0.03f, v);
+            double sum = 0; int cnt = 0;
+            for (int k = a; k < b && k < peaks_.size(); k++) { sum += peaks_[k]; cnt++; }
+            v = qMax(0.03f, cnt ? float(sum / cnt) : 0.0f);
         }
         const int x = i * step;
         const bool done = x + barW <= px;
@@ -135,8 +136,12 @@ AudioPlayer::AudioPlayer(const QString &path, const QString &title, QWidget *par
     decoder_ = new QAudioDecoder(this);
     connect(decoder_, &QAudioDecoder::bufferReady, this, &AudioPlayer::onBuffer);
     connect(decoder_, &QAudioDecoder::finished, this, [this] {
-        float top = 0; for (float x : peaks_) top = qMax(top, x);
-        if (top > 0) for (float &x : peaks_) x = std::pow(x / top, 0.8f); /* the loudest bar reaches the top; quiet parts stay visible */
+        if (!peaks_.isEmpty()) { /* scale so the loud parts (the 98th percentile, ignoring one-off spikes) reach the top and the dynamics show */
+            QVector<float> sorted = peaks_;
+            std::sort(sorted.begin(), sorted.end());
+            const float top = sorted[qMin(sorted.size() - 1, int(sorted.size() * 0.98))];
+            if (top > 0) for (float &x : peaks_) x = qMin(1.0f, std::pow(x / top, 1.3f));
+        }
         wave_->setPeaks(peaks_, true);
     });
     connect(decoder_, qOverload<QAudioDecoder::Error>(&QAudioDecoder::error), this, [this](QAudioDecoder::Error) { wave_->setPeaks(peaks_, true); });
@@ -156,10 +161,10 @@ void AudioPlayer::onBuffer()
     const int ch = qMax(1, fmt.channelCount()), frames = b.frameCount(), slice = 1024;
     auto scan = [&](auto *data, double scale) {
         for (int f0 = 0; f0 < frames; f0 += slice) {
-            float peak = 0;
+            double sum = 0; /* RMS, not the peak: mastered music peaks near full scale all the time, which made every bar the same height */
             const int end = qMin(frames, f0 + slice);
-            for (int i = f0 * ch; i < end * ch; i++) peak = qMax(peak, float(std::abs(double(data[i])) / scale));
-            peaks_.append(qMin(1.0f, peak));
+            for (int i = f0 * ch; i < end * ch; i++) { const double x = double(data[i]) / scale; sum += x * x; }
+            peaks_.append(float(std::sqrt(sum / double(qMax(1, (end - f0) * ch)))));
         }
     };
     switch (fmt.sampleFormat()) {
