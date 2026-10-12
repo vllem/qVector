@@ -136,11 +136,11 @@ AudioPlayer::AudioPlayer(const QString &path, const QString &title, QWidget *par
     decoder_ = new QAudioDecoder(this);
     connect(decoder_, &QAudioDecoder::bufferReady, this, &AudioPlayer::onBuffer);
     connect(decoder_, &QAudioDecoder::finished, this, [this] {
-        if (!peaks_.isEmpty()) { /* scale so the loud parts (the 98th percentile, ignoring one-off spikes) reach the top and the dynamics show */
+        if (!peaks_.isEmpty()) { /* scale so the loud parts (the 90th percentile, ignoring spikes) reach the top and the dynamics show */
             QVector<float> sorted = peaks_;
             std::sort(sorted.begin(), sorted.end());
-            const float top = sorted[qMin(sorted.size() - 1, int(sorted.size() * 0.98))];
-            if (top > 0) for (float &x : peaks_) x = qMin(1.0f, std::pow(x / top, 1.3f));
+            const float top = sorted[qMin(sorted.size() - 1, int(sorted.size() * 0.9))];
+            if (top > 0) for (float &x : peaks_) x = qMin(1.0f, std::pow(x / top, 0.9f));
         }
         wave_->setPeaks(peaks_, true);
     });
