@@ -142,7 +142,8 @@ AudioPlayer::AudioPlayer(const QString &path, const QString &title, QWidget *par
     connect(decoder_, qOverload<QAudioDecoder::Error>(&QAudioDecoder::error), this, [this](QAudioDecoder::Error) { wave_->setPeaks(peaks_, true); });
     decoder_->setSource(QUrl::fromLocalFile(path));
     decoder_->start();
-    resize(560, minimumSizeHint().height()); /* opens as short as the layout allows */
+    resize(560, minimumSizeHint().height());
+    setFixedHeight(minimumSizeHint().height()); /* as short as the layout allows, and only the width can be changed (the cover art is no taller than the waveform, so showing it later does not change this) */
     refresh();
     player_->play(); /* clicked to be heard */
 }
