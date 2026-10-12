@@ -10,9 +10,7 @@ EXE="$BUILD/qvector.exe"
 [ -f "$EXE" ] || { echo "no $EXE: build first (see README.md)" >&2; exit 1; }
 OUT=dist/qVector
 rm -rf "$OUT"
-mkdir -p "$OUT/fonts"
 cp "$EXE" "$OUT/qVector.exe"
-cp third_party/fonts/NotoColorEmoji-Regular.ttf third_party/fonts/OFL.txt "$OUT/fonts/"
 cp LICENSE "$OUT/" 2>/dev/null || true
 DEPLOY="$(command -v windeployqt-qt6 || command -v windeployqt6 || command -v windeployqt || true)"
 [ -n "$DEPLOY" ] || { echo "windeployqt not found (install mingw-w64-ucrt-x86_64-qt6-tools)" >&2; exit 1; }

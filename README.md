@@ -74,5 +74,4 @@ picker's data (`qt/emoji_data.h`), `scripts/gen_emoji_json.py` the engine's (`co
 
 ## License
 
-[MIT](LICENSE). Third-party: [Noto Color Emoji](https://github.com/googlefonts/noto-emoji) (SIL Open Font License 1.1, `third_party/fonts/OFL.txt`) is used for emoji when the
-system has no colour emoji font. Qt is used under its LGPL terms (dynamic linking).
+[MIT](LICENSE). Third-party: Qt is used under its LGPL terms (dynamic linking).

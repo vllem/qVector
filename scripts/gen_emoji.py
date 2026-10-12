@@ -22,7 +22,7 @@ for line in open(src, encoding="utf-8"):
         continue
     if group < 0 or groups[group] == "Component":
         continue
-    items.append((glyph, name, group))
+    items.append((glyph, name, [g for g in groups[:group + 1] if g != "Component"].__len__() - 1))
 
 def cstr(s):
     return '"' + "".join("\\%03o" % b if b >= 0x80 or b < 0x20 or chr(b) in '"\\' else chr(b) for b in s.encode("utf-8")) + '"'
