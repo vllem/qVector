@@ -4,6 +4,7 @@
 #include <QAudioBuffer>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMediaMetaData>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QSettings>
@@ -82,7 +83,14 @@ AudioPlayer::AudioPlayer(const QString &path, const QString &title, QWidget *par
     status_ = new QLabel(this);
     status_->setEnabled(false);
     v->addWidget(name);
-    v->addWidget(wave_, 1);
+    art_ = new QLabel(this); /* cover art from the file's tags, left of the waveform; hidden when there is none */
+    art_->setFixedSize(110, 110);
+    art_->setAlignment(Qt::AlignCenter);
+    art_->hide();
+    auto *top = new QHBoxLayout;
+    top->addWidget(art_);
+    top->addWidget(wave_, 1);
+    v->addLayout(top, 1);
     auto *row = new QHBoxLayout;
     btn_ = new QToolButton(this);
     btn_->setIconSize(QSize(24, 24));
@@ -111,6 +119,16 @@ AudioPlayer::AudioPlayer(const QString &path, const QString &title, QWidget *par
     connect(player_, &QMediaPlayer::playbackStateChanged, this, [this] { refresh(); });
     connect(player_, &QMediaPlayer::mediaStatusChanged, this, [this] { refresh(); });
     connect(player_, &QMediaPlayer::errorOccurred, this, [this](QMediaPlayer::Error, const QString &msg) { status_->setText("Cannot play: " + msg); });
+    connect(player_, &QMediaPlayer::metaDataChanged, this, [this] {
+        const QMediaMetaData md = player_->metaData();
+        QImage img = md.value(QMediaMetaData::ThumbnailImage).value<QImage>();
+        if (img.isNull()) img = md.value(QMediaMetaData::CoverArtImage).value<QImage>();
+        if (img.isNull()) return;
+        QPixmap pm = QPixmap::fromImage(img.scaled(QSize(110, 110) * devicePixelRatioF(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        pm.setDevicePixelRatio(devicePixelRatioF());
+        art_->setPixmap(pm);
+        art_->show();
+    });
     player_->setSource(QUrl::fromLocalFile(path));
 
     /* the waveform: decode the file once into loudness slices of about 1024 frames */

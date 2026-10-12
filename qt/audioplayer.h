@@ -52,7 +52,7 @@ private:
     QAudioDecoder *decoder_;
     WaveformView *wave_;
     QToolButton *btn_;
-    QLabel *time_, *status_;
+    QLabel *time_, *status_, *art_;
     QSlider *volume_;
     QVector<float> peaks_;
 };
