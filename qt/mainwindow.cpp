@@ -565,9 +565,9 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     statusBar()->addPermanentWidget(sendBar_);
     statusBar()->addPermanentWidget(statusSep3_);
     statusBar()->addPermanentWidget(statusClock_);
-    auto *clockTimer = new QTimer(this);
-    connect(clockTimer, &QTimer::timeout, this, &MainWindow::updateClock);
-    clockTimer->start(1000);
+    clockTimer_ = new QTimer(this);
+    clockTimer_->setSingleShot(true);
+    connect(clockTimer_, &QTimer::timeout, this, &MainWindow::updateClock);
     updateClock();
     applyChrome();
     buildMenus();
@@ -1076,7 +1076,11 @@ void MainWindow::showGroupCall(const QJsonObject &state)
 
 void MainWindow::updateClock()
 {
-    statusClock_->setText(formatWhen(QDateTime::currentDateTime(), true, false));
+    const QDateTime now = QDateTime::currentDateTime();
+    statusClock_->setText(formatWhen(now, true, false));
+    /* wake up when the shown time can change: the next minute, or the next second when the format has seconds */
+    const int next = timeFormat().contains("s") ? 1000 - now.time().msec() : 60000 - (now.time().second() * 1000 + now.time().msec());
+    clockTimer_->start(next + 20);
 }
 
 void MainWindow::updateStatus()

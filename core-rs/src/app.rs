@@ -35,6 +35,10 @@ struct Inner {
     sink: Sink,
     /// Held by a sign-out until its clean-up (logout, deleting the data directory) is over; a new login waits for it.
     signout: Arc<tokio::sync::Mutex<()>>,
+    /// Poked when the local work of `housekeeping` should run now (a sync came back, a recovery or verification moved on).
+    wake: tokio::sync::Notify,
+    /// Our own identity has to be asked for again (after a verification or a recovery).
+    identity_due: AtomicBool,
     data_dir: Mutex<PathBuf>,
     client: Mutex<Option<Client>>,
     secret: Mutex<Option<String>>,
@@ -69,7 +73,10 @@ fn s(v: &Value, k: &str) -> String { v[k].as_str().unwrap_or("").to_string() }
 fn b(v: &Value, k: &str) -> bool { v[k].as_bool().unwrap_or(false) }
 
 impl Inner {
-    fn emit(&self, name: &str, payload: impl Into<String>) { (self.sink)(name, payload.into()); }
+    fn emit(&self, name: &str, payload: impl Into<String>) {
+        if matches!(name, "verification" | "recovery" | "sessions") { self.identity_due.store(true, Ordering::Relaxed); self.wake.notify_one(); } /* the trust state may have changed */
+        (self.sink)(name, payload.into());
+    }
     fn emit_json(&self, name: &str, v: &impl serde::Serialize) { self.emit(name, serde_json::to_string(v).unwrap_or_else(|_| "null".into())); }
     fn notice(&self, text: impl Into<String>) { self.emit("notice", text); }
     fn dir(&self) -> PathBuf { self.data_dir.lock().unwrap().clone() }
@@ -134,7 +141,7 @@ impl App {
         }); } /* listens on 127.0.0.1:6669 for `tokio-console` */
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("tokio runtime");
         let inner = Arc::new(Inner {
-            sink, signout: Default::default(), data_dir: Mutex::new(data_dir), client: Mutex::new(None), secret: Mutex::new(None), verifier: Mutex::new(None), calls: Mutex::new(None), video_sink: Mutex::new(None), groups: Mutex::new(None), tasks: Mutex::new(Tasks::default()),
+            sink, signout: Default::default(), wake: Default::default(), identity_due: AtomicBool::new(true), data_dir: Mutex::new(data_dir), client: Mutex::new(None), secret: Mutex::new(None), verifier: Mutex::new(None), calls: Mutex::new(None), video_sink: Mutex::new(None), groups: Mutex::new(None), tasks: Mutex::new(Tasks::default()),
             timeline: Default::default(), thread: Default::default(), images: Default::default(), opening: Default::default(), previews: Default::default(), index: Default::default(), avatars: Default::default(), user_mxc: Default::default(),
             bookmarks: Default::default(), focused: AtomicBool::new(true), previews_on: AtomicBool::new(false), busy: AtomicBool::new(false),
             screen: Mutex::new("login".into()),
@@ -507,7 +514,7 @@ impl App {
                     for r in rows.iter_mut() { if let Some(u) = ui::first_url(&r.body) { r.preview = known.get(&u).cloned().flatten(); } }
                 }
                 i.emit("timeline", json!({"room_id": id, "rows": rows}).to_string());
-                if let Some(index) = i.index.lock().unwrap().clone() { let _ = index.lock().map(|mut x| x.add_items(&id, &items)); }
+                if let Some(index) = i.index.lock().unwrap().clone() { let _ = index.lock().map(|mut x| x.add_messages(&id, &rows)); }
                 /* Everything below waits for the network (read receipt, pictures, avatars, link previews: a homeserver can take half a minute to
                    fetch a page). A new event must never wait for it, so the work races the stream and is simply started again for the next pass.
                    `true`: something arrived that should be shown, run another pass. */
@@ -788,19 +795,31 @@ async fn start_session(i: Arc<Inner>, client: Client, secret: String) {
 /// Pages of 30 events fetched per room in the background: about 1000 messages deep.
 const PREFETCH_PAGES: usize = 34;
 
-/// Sync, then tell the UI about the room list, alerts and the session's trust state; also feeds the message index.
+/// How long the homeserver may hold a sync request open waiting for news (the request returns at once when something happens).
+const SYNC_TIMEOUT: Duration = Duration::from_secs(30);
+/// Syncs follow each other at least this far apart, whatever the server does with the timeout (a busy account, a server that ignores it).
+const MIN_SYNC_GAP: Duration = Duration::from_millis(700);
+/// The local work below also runs this often without news, for the things that change without a sync (a recovery key entered, a download finished).
+const HOUSEKEEPING_EVERY: Duration = Duration::from_secs(5);
+/// Our own identity and sessions are asked for again at least this often (and at once after a verification or recovery).
+const IDENTITY_EVERY: Duration = Duration::from_secs(600);
+
+/// Keep the account in sync, and tell the UI about the room list, alerts and the session's trust state; also feeds the message index.
+/// Two halves in one task (aborting it stops both): the network half long-polls the homeserver, the local half runs when a sync has brought
+/// something, or when an action pokes `Inner::wake`.
 async fn sync_loop(i: Arc<Inner>, client: Client) {
-    let mut last_status = String::new();
-    let (mut last_save, mut crawled) = (std::time::Instant::now(), HashSet::<String>::new());
-    let mut seen_unread = None;
-    let prefetching = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let mut keys_restored = false;
-    i.avatars.use_dir(&i.avatar_dir());
-    let spaces = matrix_sdk_ui::spaces::SpaceService::new(client.clone()).await;
+    let network = network_loop(i.clone(), client.clone());
+    let local = housekeeping(i.clone(), client);
+    tokio::pin!(network, local);
+    tokio::select! { _ = &mut network => {}, _ = &mut local => {} }
+}
+
+async fn network_loop(i: Arc<Inner>, client: Client) {
     let mut failures = 0u32;
     loop {
-        match client.sync_once(SyncSettings::default().timeout(Duration::from_secs(0))).await {
-            Ok(_) => failures = 0,
+        let started = std::time::Instant::now();
+        match client.sync_once(SyncSettings::default().timeout(SYNC_TIMEOUT)).await {
+            Ok(_) => { failures = 0; i.wake.notify_one(); }
             Err(e) => {
                 if matches!(e.client_api_error_kind(), Some(matrix_sdk::ruma::api::error::ErrorKind::UnknownToken { .. } | matrix_sdk::ruma::api::error::ErrorKind::UserDeactivated)) {
                     /* the server ended this session (signed out elsewhere, token revoked, account deactivated): back to the sign-in */
@@ -819,8 +838,26 @@ async fn sync_loop(i: Arc<Inner>, client: Client) {
                 tokio::time::sleep(Duration::from_secs(1u64 << failures)).await; /* back off: 2 s, 4 s ... 64 s */
             }
         }
+        if let Some(rest) = MIN_SYNC_GAP.checked_sub(started.elapsed()) { tokio::time::sleep(rest).await; }
+    }
+}
+
+async fn housekeeping(i: Arc<Inner>, client: Client) {
+    let mut last_status = String::new();
+    let mut last_rooms = String::new();
+    let (mut last_save, mut crawled) = (std::time::Instant::now(), HashSet::<String>::new());
+    let mut last_identity: Option<std::time::Instant> = None;
+    let mut seen_unread = None;
+    let prefetching = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut keys_restored = false;
+    i.avatars.use_dir(&i.avatar_dir());
+    let spaces = matrix_sdk_ui::spaces::SpaceService::new(client.clone()).await;
+    loop {
+        /* nothing to show before the first sync has come back */
+        tokio::select! { _ = i.wake.notified() => {}, _ = tokio::time::sleep(HOUSEKEEPING_EVERY) => {} }
         let mut rooms = ui::ui_rooms_with_spaces(&client, &spaces).await;
-        for m in rooms.iter().map(|r| r.avatar_mxc.clone()).filter(|m| i.avatars.wanted(m)).take(3).collect::<Vec<_>>() { i.avatars.fetch(&client, &m, &i.avatar_dir()).await; }
+        let mut more = false; /* pictures still to fetch: come back soon instead of waiting for news */
+        for m in rooms.iter().map(|r| r.avatar_mxc.clone()).filter(|m| i.avatars.wanted(m)).take(3).collect::<Vec<_>>() { i.avatars.fetch(&client, &m, &i.avatar_dir()).await; more = true; }
         for r in rooms.iter_mut() { r.avatar_path = i.avatars.path(&r.avatar_mxc); }
         let index = i.index.lock().unwrap().clone();
         /* Keep about a thousand messages of every room on the computer (the SDK's event cache is on disk): one room at a time in the background, so
@@ -830,24 +867,29 @@ async fn sync_loop(i: Arc<Inner>, client: Client) {
                 crawled.insert(r.id.clone());
                 if let Some(room) = <&matrix_sdk::ruma::RoomId>::try_from(r.id.as_str()).ok().and_then(|id| client.get_room(id)) {
                     prefetching.store(true, Ordering::Relaxed);
-                    let (flag, index) = (prefetching.clone(), index.clone());
-                    tokio::spawn(async move { let _ = crate::index::crawl_room(&room, index.as_deref(), PREFETCH_PAGES).await; flag.store(false, Ordering::Relaxed); });
+                    let (flag, index, wake) = (prefetching.clone(), index.clone(), i.clone());
+                    tokio::spawn(async move { let _ = crate::index::crawl_room(&room, index.as_deref(), PREFETCH_PAGES).await; flag.store(false, Ordering::Relaxed); wake.wake.notify_one(); /* on to the next room */ });
                 }
             }
         }
         if let Some(index) = &index {
             if last_save.elapsed() > Duration::from_secs(20) { last_save = std::time::Instant::now(); let _ = index.lock().map(|mut x| x.save()); }
         }
-        i.emit_json("rooms", &rooms);
+        let json = serde_json::to_string(&rooms).unwrap_or_else(|_| "[]".into());
+        if json != last_rooms { last_rooms = json.clone(); i.emit("rooms", json); } /* the list rarely changes: the UI rebuilds its sidebar for every event */
         let open = i.open_timeline_of().await.map(|t| t.room().room_id().to_string());
         let focused = i.focused.load(Ordering::Relaxed);
         let alerts = ui::new_alerts(&mut seen_unread, &rooms, if focused { open.as_deref() } else { None });
         if !alerts.is_empty() { i.emit_json("alerts", &alerts); }
-        if let Some(me) = client.user_id() { let _ = client.encryption().request_user_identity(me).await; } /* learn about our other sessions' identity */
+        /* learn about our other sessions' identity: at the start, after a verification or recovery, and now and then; the SDK follows device changes itself */
+        if i.identity_due.swap(false, Ordering::Relaxed) || last_identity.map_or(true, |t| t.elapsed() > IDENTITY_EVERY) {
+            last_identity = Some(std::time::Instant::now());
+            if let Some(me) = client.user_id() { let _ = client.encryption().request_user_identity(me).await; }
+        }
         if !keys_restored { if let Some(n) = crate::crypto::restore_keys(&client).await { keys_restored = true; i.notice(format!("Restoring old messages from your key backup ({n} rooms)...")); } } /* once the backup is usable here: after a recovery key, a verification, at start */
         let status = crate::crypto::session_status(&client).await.to_string();
         if status != last_status { last_status = status.clone(); i.emit("session", status); }
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        if more { tokio::time::sleep(Duration::from_millis(300)).await; i.wake.notify_one(); }
     }
 }
 

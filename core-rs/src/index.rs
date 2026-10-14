@@ -36,6 +36,9 @@ fn contains_ci(hay: &str, needle: &str) -> bool {
     false
 }
 
+/// A search looks at this many different words of the query at most.
+const MAX_QUERY_WORDS: usize = 16;
+
 pub struct MessageIndex {
     file: PathBuf,
     cipher: StoreCipher,
@@ -78,10 +81,13 @@ impl MessageIndex {
     pub(crate) fn insert_row(&mut self, row: IndexRow) { self.rows.insert(format!("{}|{}", row.room_id, row.event_id), row); self.dirty = true; }
 
     /// Add the readable messages of these timeline items (what is not decrypted yet, pending or empty is skipped).
-    pub fn add_items(&mut self, room_id: &str, items: &[Arc<TimelineItem>]) -> usize {
+    pub fn add_items(&mut self, room_id: &str, items: &[Arc<TimelineItem>]) -> usize { self.add_messages(room_id, &ui_messages(items, "")) }
+
+    /// `add_items` for rows that are already made (the open timeline has just turned its items into rows for the UI: no second pass over them).
+    pub fn add_messages(&mut self, room_id: &str, messages: &[UiMessage]) -> usize {
         let mut added = 0;
-        for m in ui_messages(items, "") {
-            if let Some(row) = self.row_of(room_id, &m) {
+        for m in messages {
+            if let Some(row) = self.row_of(room_id, m) {
                 let key = format!("{}|{}", row.room_id, row.event_id);
                 if self.rows.get(&key) != Some(&row) { self.rows.insert(key, row); self.dirty = true; added += 1; }
             }
@@ -96,7 +102,12 @@ impl MessageIndex {
 
     /// Messages containing every word of `query` (case-insensitive), in one room or all, newest first, at most `limit`.
     pub fn search(&self, query: &str, room_id: Option<&str>, limit: usize) -> Vec<IndexRow> {
-        let words: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
+        let mut words: Vec<String> = Vec::new();
+        for w in query.split_whitespace().map(|w| w.to_lowercase()) {
+            if !words.contains(&w) { words.push(w); } /* a word said twice asks nothing more (a pasted "rust rust rust ..." cost seconds per search) */
+            if words.len() == MAX_QUERY_WORDS { break; }
+        }
+        words.sort_by_key(|w| std::cmp::Reverse(w.len())); /* the longest word is the most selective: most rows fail on it first */
         if words.is_empty() || limit == 0 { return Vec::new(); }
         let mut hits: Vec<&IndexRow> = self.rows.values().filter(|r| room_id.map(|id| id == r.room_id).unwrap_or(true)
             && words.iter().all(|w| contains_ci(&r.body, w) || contains_ci(&r.sender, w))).collect();
@@ -144,6 +155,28 @@ mod tests {
     use super::*;
     use crate::testkit::{FakeHs, ROOM};
     use matrix_sdk_ui::timeline::RoomExt;
+
+    #[test]
+    fn repeated_query_words_cost_nothing_and_long_queries_are_cut() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut idx = MessageIndex::open(dir.path(), "s").unwrap();
+        for (n, body) in ["the quick brown fox", "the lazy dog", "Brown FOX jumps"].iter().enumerate() {
+            let row = IndexRow { room_id: "!r:hs".into(), event_id: format!("$e{n}"), sender: "alice".into(), time: String::new(), ts: n as u64, body: body.to_string() };
+            idx.rows.insert(format!("!r:hs|$e{n}"), row);
+        }
+        let ids = |q: &str| idx.search(q, None, 10).into_iter().map(|r| r.event_id).collect::<Vec<_>>();
+        assert_eq!(ids("fox"), ids(&"fox ".repeat(5000)));
+        assert_eq!(ids("brown fox"), vec!["$e2", "$e0"]);
+        assert_eq!(ids("FOX brown fox Brown"), ids("brown fox"));
+        assert!(ids("fox dog").is_empty());
+        // only the first 16 different words count
+        let many: Vec<String> = (0..MAX_QUERY_WORDS).map(|n| format!("word{n}")).collect();
+        let row = IndexRow { room_id: "!r:hs".into(), event_id: "$many".into(), sender: "alice".into(), time: String::new(), ts: 9, body: many.join(" ") };
+        idx.rows.insert("!r:hs|$many".into(), row);
+        assert_eq!(idx.search(&many.join(" "), None, 10).len(), 1);
+        assert_eq!(idx.search(&format!("{} nowhere", many.join(" ")), None, 10).len(), 1, "the 17th different word is not looked at");
+        assert!(idx.search(&format!("nowhere {}", many[..MAX_QUERY_WORDS - 1].join(" ")), None, 10).is_empty(), "the first 16 still have to match");
+    }
 
     #[test]
     fn the_cipher_key_is_stretched_and_old_key_files_are_upgraded() {

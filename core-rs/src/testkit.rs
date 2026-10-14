@@ -47,6 +47,7 @@ struct State {
     emoji_pack: bool, /* the demo room has a custom emoji pack (media emoji_cat / emoji_wave are seeded with it) */
     presence: BTreeMap<String, String>, /* user local part -> presence state set by the user (bob is online unless set) */
     members: Vec<String>, /* who has joined ROOM (local parts): alice and bob, plus whoever `add_member` added */
+    sync_mark: BTreeMap<String, (usize, u64)>, /* per user and device: (events, counter) when its last /sync was answered, to tell an idle poll from a busy one */
 }
 
 #[derive(Clone)]
@@ -73,7 +74,16 @@ impl Respond for Handler {
         st.log.push(format!("{} {} ({})", req.method, req.url.path(), who));
         let v = (self.f)(&mut st, &who, req);
         let status = if v.get("flows").is_some() { 401 } else { match v["errcode"].as_str() { Some("M_NOT_FOUND") => 404, Some(_) => 400, None => 200 } };
-        ResponseTemplate::new(status).set_body_json(v)
+        let mut answer = ResponseTemplate::new(status).set_body_json(v.clone());
+        /* A client that asks for a long poll (`timeout` above zero) and has nothing new waits a little, like a real homeserver does (which holds
+           the request up to the timeout); the tests' own syncs ask for none. */
+        if req.url.path().ends_with("/sync") {
+            let wait_ms: u64 = req.url.query_pairs().find(|(k, _)| k == "timeout").and_then(|(_, t)| t.parse().ok()).unwrap_or(0);
+            let mark = (st.events.len(), st.counter);
+            let idle = st.sync_mark.insert(who.clone(), mark) == Some(mark) && v["to_device"]["events"].as_array().map_or(true, |a| a.is_empty());
+            if wait_ms > 0 && idle { answer = answer.set_delay(std::time::Duration::from_millis(wait_ms.min(1500))); }
+        }
+        answer
     }
 }
 

@@ -32,6 +32,7 @@
 #include <QStackedWidget>
 #include <QSystemTrayIcon>
 #include <QTabBar>
+#include <QTimer>
 #include <QToolButton>
 #include <functional>
 
@@ -151,6 +152,7 @@ private:
     void stopSending();
     void updateSending(const QJsonArray &rows);
     void updateClock();
+    QTimer *clockTimer_ = nullptr; /* ticks once a minute (every second only while the time format shows seconds) */
     QLabel *topic_, *banner_, *statusLeft_, *statusRight_, *typingLabel_;
     QToolButton *membersBtn_;
     TimelineView *timeline_;
