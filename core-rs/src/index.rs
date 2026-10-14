@@ -43,22 +43,24 @@ pub struct MessageIndex {
     dirty: bool,
 }
 
-fn key_of(secret: &str) -> [u8; 32] { Sha256::digest(secret.as_bytes()).into() }
+/// The key files written before the secret was stretched (one bare SHA-256, which makes a passphrase cheap to guess); still read, then rewritten.
+fn old_key_of(secret: &str) -> [u8; 32] { Sha256::digest(secret.as_bytes()).into() }
 
-/// The cipher for the sealed file `<stem>.enc` in `dir`, kept (itself sealed with the secret) in `<stem>-cipher.bin`. When the secret does not open
-/// it, a new cipher replaces it and the old sealed data is dropped.
+/// The cipher for the sealed file `<stem>.enc` in `dir`, kept (itself sealed with the secret, through a salted key derivation) in `<stem>-cipher.bin`.
+/// When the secret does not open it, a new cipher replaces it and the old sealed data is dropped.
 pub(crate) fn open_cipher(dir: &Path, stem: &str, secret: &str) -> Result<StoreCipher, String> {
     let _ = std::fs::create_dir_all(dir);
     let cipher_file = dir.join(format!("{stem}-cipher.bin"));
-    match std::fs::read(&cipher_file).ok().and_then(|b| StoreCipher::import_with_key(&key_of(secret), &b).ok()) {
-        Some(c) => Ok(c),
-        None => {
-            let c = StoreCipher::new().map_err(|e| e.to_string())?;
-            std::fs::write(&cipher_file, c.export_with_key(&key_of(secret)).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-            let _ = std::fs::remove_file(dir.join(format!("{stem}.enc"))); /* sealed with the old cipher: unreadable now */
-            Ok(c)
-        }
+    let bytes = std::fs::read(&cipher_file).ok();
+    if let Some(c) = bytes.as_deref().and_then(|b| StoreCipher::import(secret, b).ok()) { return Ok(c); }
+    if let Some(c) = bytes.as_deref().and_then(|b| StoreCipher::import_with_key(&old_key_of(secret), b).ok()) {
+        std::fs::write(&cipher_file, c.export(secret).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?; /* upgrade in place */
+        return Ok(c);
     }
+    let c = StoreCipher::new().map_err(|e| e.to_string())?;
+    std::fs::write(&cipher_file, c.export(secret).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(dir.join(format!("{stem}.enc"))); /* sealed with the old cipher: unreadable now */
+    Ok(c)
 }
 
 impl MessageIndex {
@@ -142,6 +144,24 @@ mod tests {
     use super::*;
     use crate::testkit::{FakeHs, ROOM};
     use matrix_sdk_ui::timeline::RoomExt;
+
+    #[test]
+    fn the_cipher_key_is_stretched_and_old_key_files_are_upgraded() {
+        let dir = tempfile::tempdir().unwrap();
+        // a file written the old way (bare SHA-256 of the secret) still opens, and is rewritten
+        let c = StoreCipher::new().unwrap();
+        std::fs::write(dir.path().join("x-cipher.bin"), c.export_with_key(&old_key_of("pass")).unwrap()).unwrap();
+        let sealed = c.encrypt_value(&"hello".to_string()).unwrap();
+        let opened = open_cipher(dir.path(), "x", "pass").unwrap();
+        assert_eq!(opened.decrypt_value::<String>(&sealed).unwrap(), "hello");
+        let bytes = std::fs::read(dir.path().join("x-cipher.bin")).unwrap();
+        assert!(StoreCipher::import_with_key(&old_key_of("pass"), &bytes).is_err(), "still sealed with the bare hash");
+        assert!(StoreCipher::import("pass", &bytes).is_ok());
+        assert_eq!(open_cipher(dir.path(), "x", "pass").unwrap().decrypt_value::<String>(&sealed).unwrap(), "hello");
+        // a wrong secret starts over
+        let fresh = open_cipher(dir.path(), "x", "other").unwrap();
+        assert!(fresh.decrypt_value::<String>(&sealed).is_err());
+    }
 
     async fn client_with_room(hs: &FakeHs, dir: &Path) -> (matrix_sdk::Client, matrix_sdk::Room) {
         let client = crate::session::sign_in(dir, &hs.uri(), "alice", "pw", None, "Vector").await.unwrap();

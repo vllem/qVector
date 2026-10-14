@@ -449,6 +449,9 @@ impl Calls {
                 if from_me && content["invitee"].as_str() != Some(&self.me()) {
                     return; /* we rang from another device of ours */
                 }
+                if content["invitee"].as_str().map(|i| i != self.me()).unwrap_or(false) {
+                    return; /* somebody else is being called: not our call to answer, and not ours to send "busy" to */
+                }
                 if self.active.lock().unwrap().as_ref().map(|a| a.call_id == call_id).unwrap_or(false) {
                     return; /* the echo of our own invite */
                 }
@@ -461,7 +464,7 @@ impl Calls {
                 if sdp.is_empty() {
                     return;
                 }
-                if self.active.lock().unwrap().is_some() {
+                if self.active.lock().unwrap().is_some() || self.group_flag.lock().unwrap().load(std::sync::atomic::Ordering::Relaxed) {
                     self.send(room.room_id().as_str(), "m.call.hangup", json!({"reason": "user_busy"}), &call_id, "busy").await;
                     return;
                 }

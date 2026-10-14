@@ -24,12 +24,17 @@ use crate::ui;
 /// Where events go: `(name, json)`. Called from engine threads: a UI must hand the event over to its own thread.
 pub type Sink = Arc<dyn Fn(&str, String) + Send + Sync>;
 
+#[cfg(feature = "testkit")]
+static DEMOS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 #[derive(Default)]
 struct Tasks { timeline: Option<JoinHandle<()>>, typing: Option<JoinHandle<()>>, thread: Option<JoinHandle<()>>, sync: Option<JoinHandle<()>> }
 
 /// What the engine's tasks share.
 struct Inner {
     sink: Sink,
+    /// Held by a sign-out until its clean-up (logout, deleting the data directory) is over; a new login waits for it.
+    signout: Arc<tokio::sync::Mutex<()>>,
     data_dir: Mutex<PathBuf>,
     client: Mutex<Option<Client>>,
     secret: Mutex<Option<String>>,
@@ -129,7 +134,7 @@ impl App {
         }); } /* listens on 127.0.0.1:6669 for `tokio-console` */
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("tokio runtime");
         let inner = Arc::new(Inner {
-            sink, data_dir: Mutex::new(data_dir), client: Mutex::new(None), secret: Mutex::new(None), verifier: Mutex::new(None), calls: Mutex::new(None), video_sink: Mutex::new(None), groups: Mutex::new(None), tasks: Mutex::new(Tasks::default()),
+            sink, signout: Default::default(), data_dir: Mutex::new(data_dir), client: Mutex::new(None), secret: Mutex::new(None), verifier: Mutex::new(None), calls: Mutex::new(None), video_sink: Mutex::new(None), groups: Mutex::new(None), tasks: Mutex::new(Tasks::default()),
             timeline: Default::default(), thread: Default::default(), images: Default::default(), opening: Default::default(), previews: Default::default(), index: Default::default(), avatars: Default::default(), user_mxc: Default::default(),
             bookmarks: Default::default(), focused: AtomicBool::new(true), previews_on: AtomicBool::new(false), busy: AtomicBool::new(false),
             screen: Mutex::new("login".into()),
@@ -363,6 +368,7 @@ impl App {
         if hs.trim().is_empty() || user.trim().is_empty() { i.state("Enter the server and your user name."); return Value::Null; }
         i.set_busy(true, "Signing in...");
         self.rt().spawn(async move {
+            let _out = i.signout.clone().lock_owned().await; /* a sign-out still deleting the old data must finish first */
             let dir = i.dir();
             match crate::session::sign_in(&dir, &hs, &user, &pw, Some(pass.as_str()).filter(|p| !p.is_empty()), "Vector").await {
                 Ok(client) => {
@@ -379,6 +385,7 @@ impl App {
         let i = self.inner.clone();
         i.set_busy(true, "Opening your account...");
         self.rt().spawn(async move {
+            let _out = i.signout.clone().lock_owned().await;
             match crate::session::restore(&i.dir(), &secret).await {
                 Ok(client) => start_session(i, client, secret).await,
                 Err(e) => login_failed(&i, &e),
@@ -394,20 +401,11 @@ impl App {
     fn sign_out(&self) -> Value {
         self.stop_tasks();
         let i = self.inner.clone();
-        *i.index.lock().unwrap() = None;
-        *i.bookmarks.lock().unwrap() = None;
-        *i.verifier.lock().unwrap() = None;
         let client = i.client.lock().unwrap().take();
-        let dir = i.dir();
+        let held = i.signout.clone().try_lock_owned().ok(); /* taken before returning, so a login that follows has to wait */
         self.rt().spawn(async move {
-            *i.timeline.lock().await = None;
-            *i.thread.lock().await = None;
-            let calls = i.calls.lock().unwrap().take();
-            if let Some(c) = calls { c.hangup().await; }
-            let groups = i.groups.lock().unwrap().take();
-            if let Some(g) = groups { g.leave().await; }
-            if let Some(c) = client { let _ = c.matrix_auth().logout().await; }
-            crate::session::forget(&dir);
+            end_session(&i, client, true).await;
+            drop(held);
         });
         self.inner.set_screen("login", "");
         self.inner.emit("rooms", "[]");
@@ -424,7 +422,7 @@ impl App {
         let plans = hs.add_room("Plans");
         hs.add_space("Rust club", &[plans.as_str(), "!announcements:hs"]);
         hs.add_room("Lounge");
-        *self.inner.data_dir.lock().unwrap() = std::env::temp_dir().join(format!("vector-demo-{}", std::process::id())); /* never the real saved session */
+        *self.inner.data_dir.lock().unwrap() = std::env::temp_dir().join(format!("vector-demo-{}-{}", std::process::id(), DEMOS.fetch_add(1, Ordering::Relaxed))); /* never the real saved session; one per app, so tests can run side by side */
         let lines = ["Hello alice, this room is end-to-end encrypted.", "You are reading it through matrix-sdk.", "Reply below!"].map(String::from).to_vec();
         self.rt().spawn(crate::testkit::bob_says(hs.clone(), lines));
         self.rt().spawn(crate::testkit::bob_reads_alice(hs.clone()));
@@ -449,6 +447,8 @@ impl App {
         let i = self.inner.clone();
         let id = room_id.to_string();
         let cache = i.dir().join("media");
+        /* until the new room's timeline is open, actions must fail rather than land in the room we just left */
+        self.rt().block_on(async { *i.timeline.lock().await = None; });
         i.emit("typing", "[]");
         {
             let _g = self.rt().enter();
@@ -718,6 +718,22 @@ fn login_failed(i: &Arc<Inner>, message: &str) {
     i.set_busy(false, message);
 }
 
+/// Close the account: calls, local stores, the open timelines; the server is told when `logout` (a session the server already ended needs no
+/// telling), and the saved session is deleted.
+async fn end_session(i: &Arc<Inner>, client: Option<Client>, logout: bool) {
+    *i.index.lock().unwrap() = None;
+    *i.bookmarks.lock().unwrap() = None;
+    *i.verifier.lock().unwrap() = None;
+    *i.timeline.lock().await = None;
+    *i.thread.lock().await = None;
+    let calls = i.calls.lock().unwrap().take();
+    if let Some(c) = calls { c.hangup().await; }
+    let groups = i.groups.lock().unwrap().take();
+    if let Some(g) = groups { g.leave().await; }
+    if let (true, Some(c)) = (logout, client) { let _ = c.matrix_auth().logout().await; }
+    crate::session::forget(&i.dir());
+}
+
 /// A signed-in client: wire up verification, local stores and the sync loop, then tell the UI the account is open.
 async fn start_session(i: Arc<Inner>, client: Client, secret: String) {
     *i.client.lock().unwrap() = Some(client.clone());
@@ -773,8 +789,28 @@ async fn sync_loop(i: Arc<Inner>, client: Client) {
     let mut keys_restored = false;
     i.avatars.use_dir(&i.avatar_dir());
     let spaces = matrix_sdk_ui::spaces::SpaceService::new(client.clone()).await;
+    let mut failures = 0u32;
     loop {
-        let _ = client.sync_once(SyncSettings::default().timeout(Duration::from_secs(0))).await;
+        match client.sync_once(SyncSettings::default().timeout(Duration::from_secs(0))).await {
+            Ok(_) => failures = 0,
+            Err(e) => {
+                if matches!(e.client_api_error_kind(), Some(matrix_sdk::ruma::api::error::ErrorKind::UnknownToken { .. } | matrix_sdk::ruma::api::error::ErrorKind::UserDeactivated)) {
+                    /* the server ended this session (signed out elsewhere, token revoked, account deactivated): back to the sign-in */
+                    for h in { let mut t = i.tasks.lock().unwrap(); [t.timeline.take(), t.typing.take(), t.thread.take()] }.into_iter().flatten() { h.abort(); }
+                    i.client.lock().unwrap().take();
+                    let held = i.signout.clone().lock_owned().await;
+                    end_session(&i, Some(client.clone()), false).await;
+                    drop(held);
+                    i.set_screen("login", "");
+                    i.emit("rooms", "[]");
+                    i.emit("timeline", json!({"room_id": "", "rows": []}).to_string());
+                    i.notice("Your session was ended on the server. Sign in again.");
+                    return;
+                }
+                failures = (failures + 1).min(6);
+                tokio::time::sleep(Duration::from_secs(1u64 << failures)).await; /* back off: 2 s, 4 s ... 64 s */
+            }
+        }
         let mut rooms = ui::ui_rooms_with_spaces(&client, &spaces).await;
         for m in rooms.iter().map(|r| r.avatar_mxc.clone()).filter(|m| i.avatars.wanted(m)).take(3).collect::<Vec<_>>() { i.avatars.fetch(&client, &m, &i.avatar_dir()).await; }
         for r in rooms.iter_mut() { r.avatar_path = i.avatars.path(&r.avatar_mxc); }
@@ -820,7 +856,7 @@ mod tests {
             loop {
                 for (n, p) in self.seen.iter().rev() { if n == what { if let Ok(v) = serde_json::from_str::<Value>(p) { if ok(&v) { return v; } } } }
                 let left = deadline.saturating_duration_since(std::time::Instant::now());
-                match self.rx.recv_timeout(left.min(Duration::from_millis(500))) { Ok(e) => self.seen.push(e), Err(_) if std::time::Instant::now() > deadline => panic!("never saw {what}: {:?}", self.seen.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>()), Err(_) => {} }
+                match self.rx.recv_timeout(left.min(Duration::from_millis(500))) { Ok(e) => self.seen.push(e), Err(_) if std::time::Instant::now() > deadline => panic!("never saw {what}: {:?}", self.seen), Err(_) => {} }
             }
         }
     }
@@ -857,6 +893,36 @@ mod tests {
         assert_eq!(app.call("account_info", &Value::Null)["user_id"], "@alice:hs");
         assert!(app.call("search_emoji", &json!({"query": "red heart"})).as_array().map(|a| !a.is_empty()).unwrap_or(false));
         assert!(app.call("nonsense", &Value::Null)["error"].is_string());
+    }
+
+    #[test]
+    fn signing_in_right_after_signing_out_keeps_the_new_session() {
+        let (app, mut probe, _dir) = app();
+        let fake = app.call("start_fake_server", &Value::Null);
+        let creds = json!({"homeserver": fake["homeserver"], "user": "alice", "password": "x"});
+        app.call("login", &creds);
+        probe.wait("state", |v| v["screen"] == "main");
+        app.call("sign_out", &Value::Null);
+        probe.seen.clear();
+        app.call("login", &creds);
+        probe.wait("state", |v| v["screen"] == "main");
+        std::thread::sleep(Duration::from_secs(3)); /* the old sign-out's clean-up has long finished by now */
+        assert!(crate::session::has_saved_session(&app.inner.dir()), "the late clean-up deleted the new session");
+    }
+
+    #[test]
+    fn actions_do_not_reach_the_room_that_was_just_left() {
+        let (app, mut probe, _dir) = app();
+        let fake = app.call("start_fake_server", &Value::Null);
+        app.call("login", &json!({"homeserver": fake["homeserver"], "user": "alice", "password": "x"}));
+        probe.wait("state", |v| v["screen"] == "main");
+        let rooms = probe.wait("rooms", |v| v.as_array().map(|a| a.iter().any(|r| r["title"] == "bob")).unwrap_or(false));
+        let room = rooms.as_array().unwrap().iter().find(|r| r["title"] == "bob").unwrap()["id"].as_str().unwrap().to_string();
+        app.call("select_room", &json!({"room_id": room}));
+        probe.wait("timeline", |v| v["rows"].as_array().map(|a| !a.is_empty()).unwrap_or(false));
+        assert!(app.rt().block_on(app.inner.open_timeline_of()).is_some());
+        app.call("select_room", &json!({"room_id": "!nowhere:hs"}));
+        assert!(app.rt().block_on(app.inner.open_timeline_of()).is_none(), "the previous room is still the target");
     }
 
     #[test]

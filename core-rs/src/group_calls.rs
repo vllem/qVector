@@ -758,6 +758,19 @@ mod tests {
         carol.calls.join(&room).await.unwrap();
         sync_until(&[&alice, &bob, &carol], "everybody connected to everybody", || connected(&alice) == 2 && connected(&bob) == 2 && connected(&carol) == 2).await;
 
+        // a connection belongs to the person on its other end: carol cannot hang up alice's connection to bob
+        let (group_id, bobs_call) = {
+            let g = alice.calls.group.lock().unwrap();
+            let g = g.as_ref().unwrap();
+            (g.group_id.clone(), g.links.iter().find(|(_, l)| l.user_id == "@bob:hs").map(|(c, _)| c.clone()).unwrap())
+        };
+        let alices_room = alice.client.get_room(<&matrix_sdk::ruma::RoomId>::try_from(room.as_str()).unwrap()).unwrap();
+        let forged = json!({"sender": "@carol:hs", "content": {"call_id": bobs_call, GROUP_KEY: group_id}});
+        alice.calls.on_signal(&alices_room, "m.call.hangup", &forged).await;
+        alice.calls.on_signal(&alices_room, "m.call.answer", &json!({"sender": "@carol:hs", "content": {"call_id": bobs_call, GROUP_KEY: group_id, "answer": {"sdp": "x"}}})).await;
+        assert!(alice.calls.group.lock().unwrap().as_ref().unwrap().links.contains_key(&bobs_call), "a stranger ended the connection");
+        assert_eq!(connected(&alice), 2);
+
         // sound: carol hears alice and bob mixed; alice hears bob
         for _ in 0..80 {
             if carol.heard.load(Ordering::Relaxed) > 20 && alice.heard.load(Ordering::Relaxed) > 20 { break; }
