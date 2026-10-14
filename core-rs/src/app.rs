@@ -504,8 +504,9 @@ impl App {
                             i.user_mxc.lock().unwrap().insert(key, mxc);
                         }
                     }
-                    let known = i.user_mxc.lock().unwrap().clone();
-                    for r in rows.iter_mut() { if let Some(Some(m)) = known.get(&format!("{id}|{}", r.sender_id)) { r.avatar_path = i.avatars.path(m); } }
+                    /* one look-up per sender, not per row (and no copy of the whole map) */
+                    let paths: HashMap<&str, String> = { let known = i.user_mxc.lock().unwrap(); senders.iter().filter_map(|u| known.get(&format!("{id}|{u}")).cloned().flatten().map(|m| (u.as_str(), i.avatars.path(&m)))).collect() };
+                    for r in rows.iter_mut() { if let Some(p) = paths.get(r.sender_id.as_str()) { r.avatar_path = p.clone(); } }
                 }
                 for r in rows.iter_mut() { for e in r.emoji.iter_mut() { e.path = i.avatars.path(&e.mxc); } }
                 let previews_on = i.previews_on.load(Ordering::Relaxed);
@@ -873,7 +874,12 @@ async fn housekeeping(i: Arc<Inner>, client: Client) {
             }
         }
         if let Some(index) = &index {
-            if last_save.elapsed() > Duration::from_secs(20) { last_save = std::time::Instant::now(); let _ = index.lock().map(|mut x| x.save()); }
+            if last_save.elapsed() > Duration::from_secs(20) {
+                last_save = std::time::Instant::now();
+                /* sealing a big index takes a while, and the engine has only two worker threads: do it on a thread of its own */
+                let index = index.clone();
+                tokio::task::spawn_blocking(move || { let _ = index.lock().map(|mut x| x.save()); });
+            }
         }
         let json = serde_json::to_string(&rooms).unwrap_or_else(|_| "[]".into());
         if json != last_rooms { last_rooms = json.clone(); i.emit("rooms", json); } /* the list rarely changes: the UI rebuilds its sidebar for every event */

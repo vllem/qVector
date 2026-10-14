@@ -227,6 +227,7 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     if (QSystemTrayIcon::isSystemTrayAvailable()) {
         tray_ = new QSystemTrayIcon(this);
         tray_->setIcon(QIcon(trayPixmap(0, 64)));
+        trayUnread_ = 0;
         tray_->setToolTip("qVector");
         auto *tm = new QMenu(this);
         tm->addAction("Show qVector", this, [this] { showNormal(); raise(); activateWindow(); });
@@ -1040,7 +1041,7 @@ void MainWindow::updateTitle()
     for (const QJsonValue &v : rooms_) { const QJsonObject r = v.toObject(); if (!r["invite"].toBool()) unread += r["unread"].toInt(); }
     const QString t = current_.isEmpty() ? QString("qVector") : roomTitle(current_) + " - qVector";
     setWindowTitle(unread > 0 ? QString("(%1) ").arg(unread) + t : t);
-    if (tray_) tray_->setIcon(QIcon(trayPixmap(unread, 64)));
+    if (tray_ && unread != trayUnread_) { trayUnread_ = unread; tray_->setIcon(QIcon(trayPixmap(unread, 64))); } /* a new tray icon is a message to the desktop: only when the badge changes */
 }
 
 void MainWindow::updateTopic()

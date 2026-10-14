@@ -55,7 +55,7 @@ static const char *kVecGlyph =
     "M 456.5 597 C 456.5 604 451.5 609 445.5 611 C 409.5 623 380.5 649 364.5 683 C 362.5 688 357.5 692 351.5 692 C 342.5 692 336.5 685 336.5 677 C 336.5 675 336.5 673 337.5 671 C 347.5 648 363.5 628 382.5 612 L 55.5 612 C 47.5 612 40.5 605 40.5 597 C 40.5 589 47.5 582 55.5 582 L 382.5 582 C 363.5 566 347.5 546 337.5 523 C 336.5 521 336.5 519 336.5 517 C 336.5 509 342.5 502 351.5 502 C 357.5 502 362.5 506 364.5 511 C 380.5 545 409.5 571 445.5 583 C 451.5 585 456.5 590 456.5 597 Z";
 static const QRectF kVecBounds(29, -692, 439, 703);
 
-static QPainterPath vecPath()
+static QPainterPath buildVecPath()
 {
     QPainterPath path;
     const QStringList t = QString(kVecGlyph).split(' ', Qt::SkipEmptyParts);
@@ -67,6 +67,12 @@ static QPainterPath vecPath()
         else if (c == "C") { qreal a = n(), b = n(), c2 = n(), d = n(), e = n(), f = n(); path.cubicTo(a, -b, c2, -d, e, -f); }
         else if (c == "Z") path.closeSubpath();
     }
+    return path;
+}
+
+static QPainterPath vecPath()
+{
+    static const QPainterPath path = buildVecPath(); /* parsed once: every icon of every size and badge draws it */
     return path;
 }
 
