@@ -2,6 +2,8 @@
 #include "qt/avatar.h"
 #include <QApplication>
 #include <QClipboard>
+#include <QHideEvent>
+#include <QShowEvent>
 #include <QJsonArray>
 #include <QMenu>
 #include <QPainter>
@@ -42,13 +44,32 @@ MemberList::MemberList(QWidget *parent) : QListWidget(parent)
     });
 }
 
+/* A panel that is closed holds none of its people: a room of 3 000 has about 38 MB of rows and pictures, most of it only needed while the list is on screen.
+   The details it was given are kept (they are a few MB for the biggest rooms), so showing the list again, by the toggle or by the window coming back
+   from the tray, fills it at once. */
+void MemberList::hideEvent(QHideEvent *e)
+{
+    QListWidget::hideEvent(e);
+    if (e->spontaneous()) return; /* the window was minimised: the list is still shown when it comes back */
+    clear();
+    itemById_.clear();
+    memberById_.clear();
+    sig_.clear();
+}
+
+void MemberList::showEvent(QShowEvent *e)
+{
+    QListWidget::showEvent(e);
+    if (count() == 0 && !last_.isEmpty()) refresh(last_);
+}
+
 void MemberList::setPresence(const QJsonObject &states)
 {
     if (states == presence_) return;
     const QJsonObject before = presence_;
     presence_ = states;
     if (last_.isEmpty()) return;
-    if (itemById_.isEmpty()) { sig_.clear(); refresh(last_); return; }
+    if (itemById_.isEmpty()) { if (isVisible()) { sig_.clear(); refresh(last_); } return; } /* a hidden list is built when it is shown */
     /* Heartbeats flip a handful of people at a time: redo those rows, not all of a 20 000-person list. Both objects are sorted by key, so
        one walk side by side finds the differences without a look-up per person. */
     QStringList changed;

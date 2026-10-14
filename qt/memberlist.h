@@ -20,6 +20,10 @@ signals:
     void verifyRequested(const QString &userId);  /* "Verify...": compare emoji with this person */
     void messageRequested(const QString &userId); /* "Message" in the context menu: start / open a direct message */
 
+protected:
+    void hideEvent(QHideEvent *e) override;
+    void showEvent(QShowEvent *e) override;
+
 private:
     void decorate(QListWidgetItem *it, const QJsonObject &m, bool banned);
     QString sig_, me_;

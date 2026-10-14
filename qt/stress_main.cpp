@@ -23,9 +23,12 @@
 #include <QTextDocument>
 #include <QWheelEvent>
 #include <cstdio>
+#include <thread>
+#include <vector>
 #ifdef __GLIBC__
 #include <malloc.h>
 #endif
+#include "qt/core.h"
 #include "qt/memberlist.h"
 #include "qt/packpicker.h"
 #include "qt/sidebar.h"
@@ -432,6 +435,42 @@ int main(int argc, char **argv)
         pp.hide();
         std::printf("    stickers in the grid before opening: %d, after: %d\n", before, after);
         if (before != 0 || after != 30) failures++;
+    });
+
+    /* The other side's pictures arrive on a decoder thread and used to be queued to the GUI thread one by one: a window that stalls for a few seconds
+       (a big room being laid out, a file dialog, a loaded machine) collected 15 pictures a second of 2 MB each, per person. Only the newest picture of
+       a person is worth showing. */
+    step("video: 100 pictures of 960x540 while the GUI thread is busy", 3000, [&] {
+        QTemporaryDir dir;
+        Core core(dir.path());
+        int delivered = 0;
+        QObject::connect(&core, &Core::remoteFrame, &core, [&](const QString &, const QImage &) { delivered++; });
+        const long base = heldKiB();
+        std::thread engine([&] { std::vector<unsigned char> px(960 * 540 * 4, 7); for (int i = 0; i < 100; i++) Core::pictureTrampoline(&core, "@bob:hs", 960, 540, px.data()); });
+        engine.join(); /* no event has been processed meanwhile: the GUI thread was busy */
+        const long waiting = rssAnonKiB() - base;
+        QApplication::processEvents();
+        std::printf("    while they wait: %ld KiB resident more than before (100 queued pictures are 200 000); delivered afterwards: %d\n", waiting, delivered);
+        if (delivered != 1 || waiting > 20000) failures++;
+    });
+
+    /* a closed member list holds none of its people */
+    memstep("memory: a member list that has been hidden holds no people", 16000, [&] {
+        MemberList hidden;
+        hidden.resize(240, 600);
+        hidden.show();
+        QJsonArray ms;
+        for (int i = 0; i < 3000; i++) ms.append(QJsonObject{{"user_id", QString("@h%1:hs").arg(i)}, {"name", QString("Hidden person %1").arg(i)}, {"role", "Member"}});
+        hidden.refresh(QJsonObject{{"id", "!hide:hs"}, {"members", ms}});
+        settle();
+        hidden.hide();
+        QJsonObject states;
+        states.insert("@h1:hs", "online");
+        hidden.setPresence(states); /* news about presence must not rebuild a list nobody sees */
+        if (hidden.count() != 0) { std::printf("    %d rows are still there\n", hidden.count()); failures++; }
+        hidden.show(); /* it fills again by itself (the toggle, or the window coming back from the tray) */
+        if (hidden.count() != 3000) { std::printf("    %d rows after showing it again, not 3000\n", hidden.count()); failures++; }
+        hidden.hide();
     });
 
     std::printf("\n%d step(s) too slow\n", failures);

@@ -38,13 +38,31 @@ Core::~Core()
     app_ = nullptr;
 }
 
-/* a decoder thread calls this; the buffer is only valid now, so copy the picture */
+/* a decoder thread calls this; the buffer is only valid now, so copy the picture. Only the newest picture of a person is worth showing: when the GUI
+   thread is busy (a big room being laid out, a file dialog, a loaded machine) the older ones are dropped, not queued (15 pictures a second of 2 MB
+   each used to pile up, 200 MB after 100 pictures). */
 void Core::pictureTrampoline(void *user, const char *who, int width, int height, const unsigned char *rgba)
 {
     Core *self = static_cast<Core *>(user);
     const QImage img = QImage(rgba, width, height, width * 4, QImage::Format_RGBA8888).copy();
     const QString from = QString::fromUtf8(who);
-    QMetaObject::invokeMethod(self, [self, from, img] { emit self->remoteFrame(from, img); }, Qt::QueuedConnection);
+    bool queue;
+    {
+        QMutexLocker lock(&self->frameLock_);
+        self->newestFrames_.insert(from, img);
+        queue = !self->frameDeliveryQueued_;
+        self->frameDeliveryQueued_ = true;
+    }
+    if (!queue) return;
+    QMetaObject::invokeMethod(self, [self] {
+        QHash<QString, QImage> frames;
+        {
+            QMutexLocker lock(&self->frameLock_);
+            frames.swap(self->newestFrames_);
+            self->frameDeliveryQueued_ = false;
+        }
+        for (auto it = frames.cbegin(); it != frames.cend(); ++it) emit self->remoteFrame(it.key(), it.value());
+    }, Qt::QueuedConnection);
 }
 
 void Core::pushVideo(const QImage &picture)

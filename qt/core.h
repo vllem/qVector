@@ -4,7 +4,9 @@
 #include <QImage>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QHash>
 #include <QJsonValue>
+#include <QMutex>
 #include <QObject>
 #include <QString>
 
@@ -30,10 +32,16 @@ signals:
     void event(const QString &name, const QJsonValue &payload);
     void remoteFrame(const QString &who, const QImage &picture); /* who: user id in a group call, empty in a one-to-one call */
 
+public:
+    /* the engine's decoder threads call this with the other side's pictures (public so that the stress test can play the engine) */
+    static void pictureTrampoline(void *user, const char *who, int width, int height, const unsigned char *rgba);
+
 private:
     static void trampoline(void *user, const char *name, const char *json);
-    static void pictureTrampoline(void *user, const char *who, int width, int height, const unsigned char *rgba);
     ::App *app_ = nullptr;
+    QMutex frameLock_;
+    QHash<QString, QImage> newestFrames_; /* the newest picture of each person that has not been shown yet: a slow GUI thread skips older ones instead of queueing them */
+    bool frameDeliveryQueued_ = false;
 };
 
 }
