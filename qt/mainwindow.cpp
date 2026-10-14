@@ -709,6 +709,12 @@ void MainWindow::buildMenus()
     actPreviews_->setToolTip("The preview is fetched by your homeserver, which therefore sees the link");
     actPreviews_->setChecked(core_->boolPref("linkPreviews", false));
     connect(actPreviews_, &QAction::toggled, this, [this](bool on) { core_->setBoolPref("linkPreviews", on); core_->call("set_previews", {{"on", on}}); });
+    actThumbs_ = view->addAction("Thumbnails of pictures in the timeline (the whole picture loads when opened)");
+    actThumbs_->setCheckable(true);
+    actThumbs_->setToolTip("The timeline shows a smaller version of a large picture, made by your homeserver or sent along by the sender, instead of downloading the whole file.\n"
+                           "Saves bandwidth and memory. The whole picture is fetched when you open it or save it. Off: every picture is downloaded in full.");
+    actThumbs_->setChecked(core_->boolPref("timelineThumbnails", true));
+    connect(actThumbs_, &QAction::toggled, this, [this](bool on) { core_->setBoolPref("timelineThumbnails", on); core_->call("set_thumbnails", {{"on", on}}); });
     actIndex_ = view->addAction("Search all my messages (keeps an encrypted index on this computer)");
     actIndex_->setCheckable(true);
     actIndex_->setChecked(core_->boolPref("messageIndex", false));
@@ -865,7 +871,7 @@ void MainWindow::onEvent(const QString &name, const QJsonValue &p)
         const QString screen = S(o, "screen");
         login_->refresh(screen, S(o, "status"), o["busy"].toBool());
         showMain(screen == "main");
-        if (screen == "main") { core_->call("set_previews", {{"on", core_->boolPref("linkPreviews", false)}}); user_ = core_->call("account_info").toObject()["user_id"].toString(); workspace_ = core_->call("account_info").toObject()["homeserver"].toString(); updateStatus(); }
+        if (screen == "main") { core_->call("set_previews", {{"on", core_->boolPref("linkPreviews", false)}}); core_->call("set_thumbnails", {{"on", core_->boolPref("timelineThumbnails", true)}}); user_ = core_->call("account_info").toObject()["user_id"].toString(); workspace_ = core_->call("account_info").toObject()["homeserver"].toString(); updateStatus(); }
         else { current_.clear(); rooms_ = QJsonArray(); while (tabs_->count()) tabs_->removeTab(0); }
     } else if (name == "rooms") {
         rooms_ = p.toArray();
@@ -956,8 +962,10 @@ void MainWindow::onEvent(const QString &name, const QJsonValue &p)
         const QString id = S(p.toObject(), "event_id");
         const QJsonObject row = timeline_->row(id);
         if (S(row, "kind") == "audio") (new AudioPlayer(S(p.toObject(), "path"), S(row, "file_name").isEmpty() ? S(row, "body") : S(row, "file_name"), this))->show(); /* a window with the waveform */
+        else if (S(row, "kind") == "image") showPicture(id, S(p.toObject(), "path")); /* the picture itself, fetched because the timeline shows a thumbnail */
         else timeline_->playFile(id, S(p.toObject(), "path"));
     } else if (name == "media_failed") {
+        statusBar()->clearMessage();
         timeline_->setLoading(QString());
     } else if (name == "open_file") {
         QDesktopServices::openUrl(QUrl::fromLocalFile(p.toString()));
@@ -1394,15 +1402,24 @@ void MainWindow::roomSettings()
     RoomSettingsDialog(core_, details_, this).exec();
 }
 
+void MainWindow::showPicture(const QString &eventId, const QString &path)
+{
+    statusBar()->clearMessage();
+    auto *v = new ImageViewer(path, S(timeline_->row(eventId), "file_name"), this);
+    v->setAttribute(Qt::WA_DeleteOnClose);
+    connect(v, &ImageViewer::saveRequested, this, [this, eventId] { saveAttachment(eventId); });
+    v->show();
+}
+
 void MainWindow::openPicture(const QString &eventId)
 {
     const QJsonObject r = timeline_->row(eventId);
     const QString kind = S(r, "kind");
     if (kind == "image" && !S(r, "image_path").isEmpty()) {
-        auto *v = new ImageViewer(S(r, "image_path"), S(r, "file_name"), this);
-        v->setAttribute(Qt::WA_DeleteOnClose);
-        connect(v, &ImageViewer::saveRequested, this, [this, eventId] { saveAttachment(eventId); });
-        v->show();
+        if (r.value("image_thumb").toBool()) { /* the timeline shows a thumbnail: the picture itself is fetched, and `media_file` shows it */
+            statusBar()->showMessage("Loading the picture...", 60000);
+            core_->call("fetch_media", {{"event_id", eventId}});
+        } else showPicture(eventId, S(r, "image_path"));
     } else if (kind == "audio") core_->call("fetch_media", {{"event_id", eventId}});
     else core_->call("open_attachment", {{"event_id", eventId}});
 }
@@ -1429,6 +1446,7 @@ void MainWindow::showPreferences()
     };
     group("Notifications", {actNotify_});
     group("Privacy", {actTyping_, actPreviews_});
+    group("Pictures", {actThumbs_});
     group("Search", {actIndex_});
     group("Window", {actTray_, actCloseTray_});
     {   /* calls: which devices, and whether the phone rings */
@@ -1580,6 +1598,10 @@ void MainWindow::dialogForDemo(const QString &which)
         composer_->setText("a caption");
     }
     else if (which.startsWith("audio:")) (new AudioPlayer(which.mid(6), QFileInfo(which.mid(6)).fileName(), this))->show(); /* dev aid: --dialog audio:FILE */
+    else if (which == "picture") { /* dev aid: open the first picture of the room as a click on it does (a thumbnail is replaced by the whole picture) */
+        for (const QJsonValue &v : timeline_->rows()) if (S(v.toObject(), "kind") == "image" && !S(v.toObject(), "image_path").isEmpty()) { openPicture(S(v.toObject(), "id")); return; }
+        QTimer::singleShot(1000, this, [this] { dialogForDemo("picture"); }); /* the picture may not have arrived yet */
+    }
     else if (which == "text") {
         for (const QJsonValue &v : timeline_->rows()) if (v.toObject().value("text_file").toBool()) { core_->call("fetch_text", {{"event_id", S(v.toObject(), "id")}}); return; }
         QTimer::singleShot(1000, this, [this] { dialogForDemo("text"); }); /* the file may not have arrived yet */

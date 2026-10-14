@@ -62,6 +62,9 @@ pub struct UiMessage {
     /// a picture: where the cached file is once it has been downloaded (empty before), and its size
     #[serde(skip_serializing_if = "String::is_empty")]
     pub image_path: String,
+    /// `image_path` is a smaller version of the picture (a thumbnail), not the picture itself: opening it has to fetch the original
+    #[serde(skip_serializing_if = "is_false")]
+    pub image_thumb: bool,
     #[serde(skip_serializing_if = "is_zero32")]
     pub image_w: u32,
     #[serde(skip_serializing_if = "is_zero32")]
@@ -532,7 +535,11 @@ fn preview_of(c: &TimelineItemContent) -> String {
     if first.chars().count() > 120 { first.chars().take(117).collect::<String>() + "..." } else { first.to_string() }
 }
 
-fn message_row(ev: &EventTimelineItem, me: &str, images: &HashMap<String, PathBuf>) -> Option<UiMessage> {
+/// A picture of the timeline on disk: the picture itself, or (`thumb`) a smaller version of it that the server or the sender made.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pic { pub path: PathBuf, pub thumb: bool }
+
+fn message_row(ev: &EventTimelineItem, me: &str, images: &HashMap<String, Pic>) -> Option<UiMessage> {
     let content = ev.content();
     let (kind, body, file_name) = describe(content);
     if kind == "other" && body.is_empty() { return None; } /* membership changes, state, ... : not shown (yet) */
@@ -565,14 +572,14 @@ fn message_row(ev: &EventTimelineItem, me: &str, images: &HashMap<String, PathBu
         }
         if let MessageType::Image(i) = m.msgtype() {
             if let Some(info) = &i.info { row.image_w = info.width.map(|w| u64::from(w) as u32).unwrap_or(0); row.image_h = info.height.map(|h| u64::from(h) as u32).unwrap_or(0); }
-            row.image_path = images.get(&id).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+            if let Some(pic) = images.get(&id) { row.image_path = pic.path.to_string_lossy().into_owned(); row.image_thumb = pic.thumb; }
         }
     }
     if let Some(st) = content.as_sticker() {
         let uint = |v: Option<matrix_sdk::ruma::UInt>| v.map(u64::from).unwrap_or(0) as u32;
         row.image_w = uint(st.content().info.width);
         row.image_h = uint(st.content().info.height);
-        row.image_path = images.get(&id).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        row.image_path = images.get(&id).map(|p| p.path.to_string_lossy().into_owned()).unwrap_or_default();
     }
     row.emoji = crate::emotes::emoji_sources(&row.html).into_iter().map(|mxc| UiEmojiRef { mxc, path: String::new() }).collect();
     row.shield = shield_of(ev);
@@ -593,7 +600,7 @@ fn message_row(ev: &EventTimelineItem, me: &str, images: &HashMap<String, PathBu
     Some(row)
 }
 
-fn gallery_item(index: usize, it: &matrix_sdk::ruma::events::room::message::GalleryItemType, image: Option<&PathBuf>) -> UiGalleryItem {
+fn gallery_item(index: usize, it: &matrix_sdk::ruma::events::room::message::GalleryItemType, image: Option<&Pic>) -> UiGalleryItem {
     use matrix_sdk::ruma::events::room::message::GalleryItemType as G;
     let uint = |v: Option<matrix_sdk::ruma::UInt>| v.map(u64::from).unwrap_or(0);
     let mut item = UiGalleryItem { index: index as u32, name: it.body().to_string(), ..Default::default() };
@@ -601,7 +608,7 @@ fn gallery_item(index: usize, it: &matrix_sdk::ruma::events::room::message::Gall
         G::Image(i) => {
             item.kind = "image".into(); item.name = i.filename().to_string();
             if let Some(info) = &i.info { item.image_w = uint(info.width) as u32; item.image_h = uint(info.height) as u32; item.size = uint(info.size); }
-            item.image_path = image.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+            item.image_path = image.map(|p| p.path.to_string_lossy().into_owned()).unwrap_or_default();
         }
         G::Video(v) => { item.kind = "video".into(); item.name = v.filename().to_string(); item.size = uint(v.info.as_ref().and_then(|i| i.size)); }
         G::Audio(a) => { item.kind = "audio".into(); item.name = a.filename().to_string(); item.size = uint(a.info.as_ref().and_then(|i| i.size)); }
@@ -618,7 +625,7 @@ fn gallery_source(it: &matrix_sdk::ruma::events::room::message::GalleryItemType)
 }
 
 /// The messages of a timeline in order (decrypted; what cannot be read shows as a placeholder). `images`: event id -> cached picture file.
-pub fn ui_messages_with(items: &[Arc<TimelineItem>], me: &str, images: &HashMap<String, PathBuf>) -> Vec<UiMessage> {
+pub fn ui_messages_with(items: &[Arc<TimelineItem>], me: &str, images: &HashMap<String, Pic>) -> Vec<UiMessage> {
     items.iter().filter_map(|i| i.as_event()).filter_map(|ev| message_row(ev, me, images)).collect()
 }
 
@@ -762,43 +769,91 @@ pub fn search_messages(items: &[Arc<TimelineItem>], me: &str, query: &str, limit
     }).take(limit).collect()
 }
 
-/// Download (and decrypt) the pictures of these items that are not cached yet into `cache`; returns what was added.
-pub async fn fetch_images(client: &Client, items: &[Arc<TimelineItem>], cache: &Path, have: &HashMap<String, PathBuf>) -> HashMap<String, PathBuf> {
+/// A picture whose message declares it at most this big is fetched as it is even when thumbnails are on: a thumbnail would hardly be smaller.
+const SMALL_PICTURE: u64 = 256 * 1024;
+
+/// The size asked of the server for a timeline thumbnail. The timeline draws a picture at most 480x320 points, which is this many pixels on a screen with twice as many.
+const THUMBNAIL_BOX: (u32, u32) = (960, 640);
+
+/// Pictures downloaded by one call of `fetch_images`: the newest come first and the app calls again for the rest, so the pictures of the end of a room show up
+/// at once instead of after the last one of a long room has arrived.
+const PICTURES_PER_PASS: usize = 8;
+
+/// Write a file so that a crash or a kill never leaves half of it under its name: a file found on disk is used without a look.
+fn write_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut part = path.as_os_str().to_owned();
+    part.push(".part");
+    let part = PathBuf::from(part);
+    std::fs::write(&part, bytes)?;
+    std::fs::rename(&part, path).inspect_err(|_| { let _ = std::fs::remove_file(&part); })
+}
+
+fn has_content(path: &Path) -> bool { std::fs::metadata(path).map(|m| m.is_file() && m.len() > 0).unwrap_or(false) }
+
+/// The bytes of a picture of a message and whether they are a thumbnail. With `thumbs` the server is asked for a thumbnail of an unencrypted picture; the sender's own
+/// (`info.thumbnail_source`) is the next choice and the only one for an encrypted picture, which the server cannot scale. A picture the message declares small, a failed
+/// or empty answer and a message without a thumbnail all end in the picture itself.
+async fn fetch_picture(client: &Client, source: &matrix_sdk::ruma::events::room::MediaSource, info: Option<&matrix_sdk::ruma::events::room::ImageInfo>, thumbs: bool) -> Option<(Vec<u8>, bool)> {
+    use matrix_sdk::{media::MediaThumbnailSettings, ruma::events::room::MediaSource};
+    let get = |source: MediaSource, format: MediaFormat| async move { client.media().get_media_content(&MediaRequestParameters { source, format }, false).await.ok() };
+    let small = info.and_then(|i| i.size).is_some_and(|size| u64::from(size) <= SMALL_PICTURE);
+    if thumbs && !small {
+        if matches!(source, MediaSource::Plain(_)) {
+            let (w, h) = THUMBNAIL_BOX;
+            if let Some(bytes) = get(source.clone(), MediaFormat::Thumbnail(MediaThumbnailSettings::new(w.into(), h.into()))).await.filter(|b| !b.is_empty()) { return Some((bytes, true)); }
+        }
+        if let Some(thumb) = info.and_then(|i| i.thumbnail_source.clone()) {
+            if let Some(bytes) = get(thumb, MediaFormat::File).await.filter(|b| !b.is_empty()) { return Some((bytes, true)); }
+        }
+    }
+    get(source.clone(), MediaFormat::File).await.map(|bytes| (bytes, false))
+}
+
+/// Download (and decrypt) the pictures of these items that are not shown yet into `cache`; returns what was added, at most `PICTURES_PER_PASS` downloads at a time,
+/// the newest first. What an earlier run left in `cache` is used as it is: the picture itself first, else (with `thumbs`) its thumbnail, else it is downloaded.
+/// With `thumbs` the timeline gets a smaller version where there is one (see `fetch_picture`); a thumbnail in `have` is fetched again as the picture when
+/// thumbnails have been switched off since.
+pub async fn fetch_images(client: &Client, items: &[Arc<TimelineItem>], cache: &Path, have: &HashMap<String, Pic>, thumbs: bool) -> HashMap<String, Pic> {
+    use matrix_sdk::ruma::events::room::{message::GalleryItemType, ImageInfo, MediaSource};
     let mut added = HashMap::new();
+    let mut downloaded = 0;
     let _ = std::fs::create_dir_all(cache);
-    for item in items {
+    let done = |key: &str, added: &HashMap<String, Pic>| have.get(key).is_some_and(|p| thumbs || !p.thumb) || added.contains_key(key);
+    for item in items.iter().rev() {
+        if downloaded >= PICTURES_PER_PASS { break; }
         let Some(ev) = item.as_event() else { continue };
         let Some(id) = ev.event_id().map(|e| e.to_string()) else { continue };
+        let safe_of = |key: &str| -> String { key.chars().filter(|c| c.is_ascii_alphanumeric()).collect() };
         if let Some(st) = ev.content().as_sticker() { /* a sticker is a picture of its own */
-            if !have.contains_key(&id) && !added.contains_key(&id) {
-                let req = MediaRequestParameters { source: st.content().source.clone().into(), format: MediaFormat::File };
-                if let Ok(bytes) = client.media().get_media_content(&req, false).await {
-                    let safe: String = id.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-                    let path = cache.join(format!("{safe}.img"));
-                    if std::fs::write(&path, bytes).is_ok() { added.insert(id.clone(), path); }
-                }
+            if done(&id, &added) { continue; }
+            let path = cache.join(format!("{}.img", safe_of(&id)));
+            if has_content(&path) { added.insert(id, Pic { path, thumb: false }); continue; }
+            let req = MediaRequestParameters { source: st.content().source.clone().into(), format: MediaFormat::File };
+            if let Ok(bytes) = client.media().get_media_content(&req, false).await {
+                if write_whole(&path, &bytes).is_ok() { added.insert(id, Pic { path, thumb: false }); downloaded += 1; }
             }
             continue;
         }
         let Some(m) = ev.content().as_message() else { continue };
-        /* (key, source, file name) of every picture of the message; a gallery's pictures are keyed "<event id>#<index>" */
-        let wanted: Vec<(String, matrix_sdk::ruma::events::room::MediaSource, String)> = match m.msgtype() {
-            MessageType::Image(img) => vec![(id.clone(), img.source.clone(), img.filename().to_string())],
+        /* (key, source, file name, info) of every picture of the message; a gallery's pictures are keyed "<event id>#<index>" */
+        let wanted: Vec<(String, MediaSource, String, Option<&ImageInfo>)> = match m.msgtype() {
+            MessageType::Image(img) => vec![(id.clone(), img.source.clone(), img.filename().to_string(), img.info.as_deref())],
             MessageType::Gallery(g) => g.itemtypes.iter().enumerate().filter_map(|(n, it)| match it {
-                matrix_sdk::ruma::events::room::message::GalleryItemType::Image(img) => Some((format!("{id}#{n}"), img.source.clone(), img.filename().to_string())),
+                GalleryItemType::Image(img) => Some((format!("{id}#{n}"), img.source.clone(), img.filename().to_string(), img.info.as_deref())),
                 _ => None,
             }).collect(),
             _ => continue,
         };
-        for (key, source, name) in wanted {
-            if have.contains_key(&key) || added.contains_key(&key) { continue; }
-            let req = MediaRequestParameters { source, format: MediaFormat::File };
-            if let Ok(bytes) = client.media().get_media_content(&req, false).await {
-                let ext = name.rsplit('.').next().filter(|e| e.len() <= 5 && !e.contains('/')).unwrap_or("img");
-                let safe: String = key.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-                let path = cache.join(format!("{safe}.{ext}"));
-                if std::fs::write(&path, bytes).is_ok() { added.insert(key, path); }
-            }
+        for (key, source, name, info) in wanted {
+            if done(&key, &added) { continue; }
+            let ext = name.rsplit('.').next().filter(|e| e.len() <= 5 && !e.contains('/')).unwrap_or("img");
+            let safe = safe_of(&key);
+            let (full, thumb) = (cache.join(format!("{safe}.{ext}")), cache.join(format!("{safe}-t.img")));
+            if has_content(&full) { added.insert(key, Pic { path: full, thumb: false }); continue; }
+            if thumbs && has_content(&thumb) { added.insert(key, Pic { path: thumb, thumb: true }); continue; }
+            let Some((bytes, is_thumb)) = fetch_picture(client, &source, info, thumbs).await else { continue };
+            let path = if is_thumb { thumb } else { full };
+            if write_whole(&path, &bytes).is_ok() { added.insert(key, Pic { path, thumb: is_thumb }); downloaded += 1; }
         }
     }
     added
@@ -1418,11 +1473,142 @@ mod tests {
         assert_ne!(up[0], PNG, "what the server holds is not the picture: the room is encrypted");
         let items: Vec<_> = f.timeline.items().await.iter().cloned().collect();
         let cache = dir.path().join("cache");
-        let got = fetch_images(&f.client, &items, &cache, &HashMap::new()).await;
+        let got = fetch_images(&f.client, &items, &cache, &HashMap::new(), true).await;
         assert_eq!(got.len(), 1);
-        assert_eq!(std::fs::read(got.values().next().unwrap()).unwrap(), PNG, "downloaded and decrypted to the original bytes");
+        let pic = got.values().next().unwrap();
+        assert!(!pic.thumb, "this picture carries no thumbnail");
+        assert_eq!(std::fs::read(&pic.path).unwrap(), PNG, "downloaded and decrypted to the original bytes");
         let again = ui_messages_with(&items, "@alice:hs", &got);
         assert!(again[0].image_path.ends_with(".png"));
+    }
+
+    /// What a picture and its thumbnail are in the thumbnail tests: the engine does not decode them, so any bytes do.
+    fn big() -> Vec<u8> { vec![1u8; 300_000] }
+    fn small() -> Vec<u8> { vec![2u8; 5_000] }
+
+    async fn items_of(f: &Fixture) -> Vec<Arc<TimelineItem>> { f.timeline.items().await.iter().cloned().collect() }
+
+    #[tokio::test]
+    async fn the_timeline_gets_the_servers_thumbnail_when_thumbnails_are_on_and_the_picture_itself_when_they_go_off() {
+        let f = fixture().await;
+        f.hs.put_picture("photo", big(), Some(small()));
+        let id = f.hs.say_picture("bob", "photo", Some(3_000_000), None);
+        wait_for(&f, |m| m.len() == 1 && m[0].kind == "image").await;
+        let (items, dir) = (items_of(&f).await, tempfile::tempdir().unwrap());
+        let got = fetch_images(&f.client, &items, dir.path(), &HashMap::new(), true).await;
+        assert!(got[&id].thumb);
+        assert_eq!(std::fs::read(&got[&id].path).unwrap(), small(), "the thumbnail's bytes");
+        let log = f.hs.log();
+        assert!(log.iter().any(|l| l == "thumbnail pic_photo 960x640 scale"), "asked for a scaled thumbnail the timeline can draw sharp at twice the pixels: {log:?}");
+        assert!(!log.iter().any(|l| l == "download pic_photo"), "the picture itself was not downloaded: {log:?}");
+        let row = &ui_messages_with(&items, "@alice:hs", &got)[0];
+        assert!(row.image_thumb && row.image_path.ends_with("-t.img"), "the row says its picture is a thumbnail: {} {}", row.image_thumb, row.image_path);
+        assert_eq!((row.image_w, row.image_h), (4000, 3000), "the row keeps the size of the picture, so the layout does not move when the original arrives");
+        assert!(serde_json::to_value(row).unwrap().get("image_thumb").is_some());
+        /* switched off: what is held is a thumbnail, so the picture is fetched and replaces it */
+        let again = fetch_images(&f.client, &items, dir.path(), &got, false).await;
+        assert!(!again[&id].thumb);
+        assert_eq!(std::fs::read(&again[&id].path).unwrap(), big());
+        let row = &ui_messages_with(&items, "@alice:hs", &again)[0];
+        assert!(!row.image_thumb && !row.image_path.ends_with("-t.img"));
+        assert!(serde_json::to_value(row).unwrap().get("image_thumb").is_none(), "a picture that is not a thumbnail says nothing");
+        /* and switched on again, the picture it already has is good enough */
+        assert!(fetch_images(&f.client, &items, dir.path(), &again, true).await.is_empty());
+        assert_eq!(f.hs.log().iter().filter(|l| l.starts_with("thumbnail ")).count(), 1, "one thumbnail request in all");
+    }
+
+    #[tokio::test]
+    async fn small_pictures_and_pictures_without_a_thumbnail_come_whole() {
+        let f = fixture().await;
+        f.hs.put_picture("tiny", big(), Some(small()));
+        f.hs.put_picture("plain", big(), None);
+        f.hs.put_picture("mini", small(), None);
+        f.hs.put_picture("sent", big(), None);
+        let tiny = f.hs.say_picture("bob", "tiny", Some(100_000), None);
+        let plain = f.hs.say_picture("bob", "plain", Some(3_000_000), None);
+        let sent = f.hs.say_picture("bob", "sent", Some(3_000_000), Some("mini"));
+        let unknown = { f.hs.put_picture("unknown", big(), Some(small())); f.hs.say_picture("bob", "unknown", None, None) };
+        wait_for(&f, |m| m.len() == 4).await;
+        let (items, dir) = (items_of(&f).await, tempfile::tempdir().unwrap());
+        let got = fetch_images(&f.client, &items, dir.path(), &HashMap::new(), true).await;
+        assert!(!got[&tiny].thumb && std::fs::read(&got[&tiny].path).unwrap() == big(), "declared small: a thumbnail would hardly be smaller");
+        assert!(!f.hs.log().iter().any(|l| l.starts_with("thumbnail pic_tiny")));
+        assert!(!got[&plain].thumb && std::fs::read(&got[&plain].path).unwrap() == big(), "the server has no thumbnail and the sender sent none: the picture");
+        assert!(f.hs.log().iter().any(|l| l.starts_with("thumbnail pic_plain")), "it was asked first");
+        assert!(got[&sent].thumb && std::fs::read(&got[&sent].path).unwrap() == small(), "the server has none, the sender's own thumbnail does");
+        assert!(got[&unknown].thumb, "a message that does not say how big the picture is gets the thumbnail");
+    }
+
+    #[tokio::test]
+    async fn an_encrypted_picture_shows_the_thumbnail_its_sender_attached_and_otherwise_comes_whole() {
+        use matrix_sdk::attachment::{AttachmentInfo, BaseImageInfo, Thumbnail};
+        use matrix_sdk_ui::timeline::AttachmentConfig;
+        let f = fixture().await;
+        let dir = tempfile::tempdir().unwrap();
+        let (with, without) = (dir.path().join("with.jpg"), dir.path().join("without.jpg"));
+        std::fs::write(&with, big()).unwrap();
+        std::fs::write(&without, big()).unwrap();
+        let info = || AttachmentInfo::Image(BaseImageInfo { width: Some(4000u32.into()), height: Some(3000u32.into()), size: Some(3_000_000u32.into()), blurhash: None, is_animated: None });
+        let thumb = Thumbnail { data: small(), content_type: mime::IMAGE_JPEG, height: 600u32.into(), width: 800u32.into(), size: (small().len() as u32).into() };
+        f.timeline.send_attachment(with.clone(), mime::IMAGE_JPEG, AttachmentConfig { info: Some(info()), thumbnail: Some(thumb), ..Default::default() }).await.unwrap();
+        wait_for(&f, |m| m.len() == 1 && m[0].kind == "image" && !m[0].pending).await;
+        f.timeline.send_attachment(without.clone(), mime::IMAGE_JPEG, AttachmentConfig { info: Some(info()), ..Default::default() }).await.unwrap();
+        let msgs = wait_for(&f, |m| m.len() == 2 && m.iter().all(|x| !x.pending)).await;
+        let (a, b) = (msgs[0].id.clone(), msgs[1].id.clone());
+        assert_eq!(f.hs.uploaded().len(), 3, "two pictures and one thumbnail, all encrypted");
+        let items = items_of(&f).await;
+        let got = fetch_images(&f.client, &items, &dir.path().join("cache"), &HashMap::new(), true).await;
+        assert!(got[&a].thumb && std::fs::read(&got[&a].path).unwrap() == small(), "the sender's thumbnail, decrypted");
+        assert!(!got[&b].thumb && std::fs::read(&got[&b].path).unwrap() == big(), "no thumbnail was sent and the server cannot make one of what it cannot read");
+        assert!(!f.hs.log().iter().any(|l| l.starts_with("thumbnail ")), "an encrypted picture is never asked of the thumbnail endpoint");
+        let off = fetch_images(&f.client, &items, &dir.path().join("cache"), &got, false).await;
+        assert!(off.len() == 1 && !off[&a].thumb && std::fs::read(&off[&a].path).unwrap() == big(), "switched off: the first one comes whole too");
+    }
+
+    #[tokio::test]
+    async fn pictures_from_an_earlier_run_are_used_and_a_download_is_never_left_half_written() {
+        let f = fixture().await;
+        f.hs.put_picture("one", big(), Some(small()));
+        f.hs.put_picture("two", big(), Some(small()));
+        let one = f.hs.say_picture("bob", "one", Some(3_000_000), None);
+        let two = f.hs.say_picture("bob", "two", Some(3_000_000), None);
+        wait_for(&f, |m| m.len() == 2).await;
+        let (items, dir) = (items_of(&f).await, tempfile::tempdir().unwrap());
+        let first = fetch_images(&f.client, &items, dir.path(), &HashMap::new(), true).await;
+        assert_eq!(first.len(), 2);
+        let asked = f.hs.log().len();
+        let again = fetch_images(&f.client, &items, dir.path(), &HashMap::new(), true).await; /* a new run: nothing is held in memory */
+        assert_eq!(again, first, "the files of the first run are used");
+        assert_eq!(f.hs.log().len(), asked, "and nothing is asked of the server");
+        let names: Vec<String> = std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert!(names.iter().all(|n| !n.ends_with(".part")), "no half-written file stays: {names:?}");
+        /* the picture itself, when it is there, wins over the thumbnail; off, the thumbnail is not used at all */
+        std::fs::write(dir.path().join(format!("{}.jpg", one.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>())), big()).unwrap();
+        let better = fetch_images(&f.client, &items, dir.path(), &HashMap::new(), true).await;
+        assert!(!better[&one].thumb && better[&two].thumb);
+        let off = fetch_images(&f.client, &items, dir.path(), &HashMap::new(), false).await;
+        assert!(!off[&one].thumb && !off[&two].thumb, "off: the picture on disk is used, the other one is downloaded");
+        assert_eq!(std::fs::read(&off[&two].path).unwrap(), big());
+    }
+
+    #[tokio::test]
+    async fn pictures_come_in_batches_of_eight_the_newest_first() {
+        let f = fixture().await;
+        f.hs.put_picture("p", big(), None);
+        let ids: Vec<String> = (0..11).map(|_| f.hs.say_picture("bob", "p", Some(100), None)).collect();
+        wait_for(&f, |m| m.len() == 11).await;
+        let (items, dir) = (items_of(&f).await, tempfile::tempdir().unwrap());
+        let first = fetch_images(&f.client, &items, dir.path(), &HashMap::new(), false).await;
+        let mut got: Vec<&String> = first.keys().collect();
+        got.sort();
+        let mut newest: Vec<&String> = ids[3..].iter().collect();
+        newest.sort();
+        assert_eq!(got, newest, "the eight newest");
+        let mut have = first;
+        let rest = fetch_images(&f.client, &items, dir.path(), &have, false).await;
+        assert_eq!(rest.len(), 3, "the three older ones");
+        have.extend(rest);
+        assert!(fetch_images(&f.client, &items, dir.path(), &have, false).await.is_empty());
     }
 
     #[tokio::test]
@@ -1441,11 +1627,11 @@ mod tests {
         assert_eq!(f.hs.room_events().iter().filter(|e| e["type"] == "m.room.encrypted").count(), 1, "one event for all three");
         assert_eq!(f.hs.uploaded().len(), 3);
         let items: Vec<_> = f.timeline.items().await.iter().cloned().collect();
-        let got = fetch_images(&f.client, &items, &dir.path().join("cache"), &HashMap::new()).await;
+        let got = fetch_images(&f.client, &items, &dir.path().join("cache"), &HashMap::new(), true).await;
         assert_eq!(got.len(), 3);
         let id = msgs[0].id.clone();
         for (n, p) in files.iter().enumerate() {
-            assert_eq!(std::fs::read(&got[&format!("{id}#{n}")]).unwrap(), std::fs::read(p).unwrap(), "item {n}");
+            assert_eq!(std::fs::read(&got[&format!("{id}#{n}")].path).unwrap(), std::fs::read(p).unwrap(), "item {n}");
         }
         let rows = ui_messages_with(&items, "@alice:hs", &got);
         assert!(rows[0].gallery.iter().all(|g| g.image_path.ends_with(".png")));

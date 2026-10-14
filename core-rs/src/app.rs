@@ -58,7 +58,8 @@ struct Inner {
     tasks: Mutex<Tasks>,
     timeline: tokio::sync::Mutex<Option<Arc<Timeline>>>,
     thread: tokio::sync::Mutex<Option<Arc<Timeline>>>,
-    images: Mutex<Arc<HashMap<String, PathBuf>>>, /* event id -> picture file; a pass takes a share (a copy of the whole map on every new message cost more and more as pictures were shown), adding pictures copies it once */
+    images: Mutex<Arc<HashMap<String, ui::Pic>>>, /* event id -> picture file; a pass takes a share (a copy of the whole map on every new message cost more and more as pictures were shown), adding pictures copies it once */
+    thumbs: tokio::sync::watch::Sender<bool>, /* the timeline shows thumbnails of pictures (see `ui::fetch_images`); an open timeline watches it */
     opening: Mutex<HashSet<String>>, /* attachments being downloaded for opening: a second click while one runs is ignored */
     previews: Mutex<HashMap<String, Option<ui::UiPreview>>>,
     /* rooms a sync brought events for since their event caches were last asked to shrink (see `ui::shrink_event_caches`) */
@@ -153,7 +154,7 @@ impl App {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("tokio runtime");
         let inner = Arc::new(Inner {
             sink, signout: Default::default(), wake: Default::default(), identity_due: AtomicBool::new(true), data_dir: Mutex::new(data_dir), client: Mutex::new(None), secret: Mutex::new(None), verifier: Mutex::new(None), calls: Mutex::new(None), video_sink: Mutex::new(None), groups: Mutex::new(None), tasks: Mutex::new(Tasks::default()),
-            timeline: Default::default(), thread: Default::default(), images: Default::default(), opening: Default::default(), previews: Default::default(), live_rooms: Default::default(), index: Default::default(), avatars: Default::default(), user_mxc: Default::default(),
+            timeline: Default::default(), thread: Default::default(), images: Default::default(), thumbs: tokio::sync::watch::channel(true).0, opening: Default::default(), previews: Default::default(), live_rooms: Default::default(), index: Default::default(), avatars: Default::default(), user_mxc: Default::default(),
             bookmarks: Default::default(), focused: AtomicBool::new(true), previews_on: AtomicBool::new(false), busy: AtomicBool::new(false),
             screen: Mutex::new("login".into()),
             #[cfg(feature = "testkit")]
@@ -265,6 +266,7 @@ impl App {
                 Value::Null
             }
             "set_previews" => { i.previews_on.store(b(args, "on"), Ordering::Relaxed); Value::Null }
+            "set_thumbnails" => { i.thumbs.send_if_modified(|on| { let now = b(args, "on"); std::mem::replace(on, now) != now }); Value::Null }
             "search_emoji" => json!(crate::emoji::search(&s(args, "query"), args["limit"].as_u64().unwrap_or(160) as usize)),
             "account_info" => match i.client() {
                 Some(c) => json!({"user_id": c.user_id().map(|u| u.to_string()), "device_id": c.device_id().map(|d| d.to_string()), "homeserver": c.homeserver().to_string()}),
@@ -442,6 +444,8 @@ impl App {
         hs.invite_alice("Bob's club");
         hs.set_history(40);
         hs.seed_emoji_pack();
+        hs.put_picture("demo", include_bytes!("demo_photo.jpg").to_vec(), Some(include_bytes!("demo_photo_thumb.jpg").to_vec()));
+        hs.say_picture("bob", "demo", Some(3_000_000), None); /* the timeline shows the server's thumbnail; opening it fetches the whole picture */
         let plans = hs.add_room("Plans");
         hs.add_space("Rust club", &[plans.as_str(), "!announcements:hs"]);
         hs.add_room("Lounge");
@@ -498,6 +502,7 @@ impl App {
             let me = client.user_id().map(|u| u.to_string()).unwrap_or_default();
             let (initial, mut stream) = timeline.subscribe().await;
             let mut items: Vec<_> = initial.iter().cloned().collect();
+            let mut thumbs = i.thumbs.subscribe();
             let fetching: Arc<Mutex<std::collections::HashSet<String>>> = Default::default(); /* links whose preview is being fetched */
             let wake = Arc::new(tokio::sync::Notify::new());
             loop {
@@ -521,6 +526,7 @@ impl App {
                 }
                 for r in rows.iter_mut() { for e in r.emoji.iter_mut() { e.path = i.avatars.path(&e.mxc); } }
                 let previews_on = i.previews_on.load(Ordering::Relaxed);
+                let thumbs_on = *thumbs.borrow_and_update();
                 if previews_on {
                     let known = i.previews.lock().unwrap();
                     for r in rows.iter_mut() { if let Some(u) = ui::first_url(&r.body) { r.preview = known.get(&u).cloned().flatten(); } }
@@ -534,7 +540,7 @@ impl App {
                     let t = std::time::Instant::now();
                     let slow = |what: &str| { let ms = t.elapsed().as_millis(); if ms > 1500 { eprintln!("timeline: {what} took {ms} ms"); } };
                     if i.focused.load(Ordering::Relaxed) { let _ = ui::mark_read(&timeline).await; slow("read receipt"); }
-                    let added = ui::fetch_images(&client, &items, &cache, &have).await;
+                    let added = ui::fetch_images(&client, &items, &cache, &have, thumbs_on).await;
                     slow("pictures");
                     if !added.is_empty() { Arc::make_mut(&mut i.images.lock().unwrap()).extend(added); return true; } /* show the pictures that just arrived */
                     {
@@ -568,9 +574,10 @@ impl App {
                 tokio::select! {
                     rerun = &mut work => { if rerun { continue; } false },
                     n = stream.next() => { if n.is_none() { break; } true },
+                    _ = thumbs.changed() => true, /* thumbnails switched: fetch the pictures again the other way */
                 } };
                 if !interrupted { /* nothing left to fetch: wait for the next change, or for a link preview that has arrived */
-                    tokio::select! { n = stream.next() => { if n.is_none() { break; } }, _ = wake.notified() => {} }
+                    tokio::select! { n = stream.next() => { if n.is_none() { break; } }, _ = wake.notified() => {}, _ = thumbs.changed() => {} }
                 }
                 items = timeline.items().await.iter().cloned().collect();
             }
@@ -1011,6 +1018,35 @@ mod tests {
         assert!(app.rt().block_on(app.inner.open_timeline_of()).is_some());
         app.call("select_room", &json!({"room_id": "!nowhere:hs"}));
         assert!(app.rt().block_on(app.inner.open_timeline_of()).is_none(), "the previous room is still the target");
+    }
+
+    #[test]
+    fn the_thumbnail_switch_changes_the_pictures_of_the_open_room_at_once() {
+        let (app, mut probe, _dir) = app();
+        let fake = app.call("start_fake_server", &Value::Null);
+        {   /* bob has shown a photo in the room before alice looks */
+            let hs = app.inner.fake.lock().unwrap().clone().unwrap();
+            hs.put_picture("photo", vec![1u8; 300_000], Some(vec![2u8; 5_000]));
+            hs.say_picture("bob", "photo", Some(3_000_000), None);
+        }
+        app.call("login", &json!({"homeserver": fake["homeserver"], "user": "alice", "password": "x"}));
+        probe.wait("state", |v| v["screen"] == "main");
+        let rooms = probe.wait("rooms", |v| v.as_array().map(|a| a.iter().any(|r| r["title"] == "bob")).unwrap_or(false));
+        let room = rooms.as_array().unwrap().iter().find(|r| r["title"] == "bob").unwrap()["id"].as_str().unwrap().to_string();
+        let photo = |v: &Value| v["rows"].as_array().and_then(|a| a.iter().find(|m| m["body"] == "photo.jpg").cloned()); /* the demo has a picture of its own */
+        let bytes = |m: &Value| std::fs::read(m["image_path"].as_str().unwrap()).unwrap();
+        app.call("select_room", &json!({"room_id": room}));
+        let t = probe.wait("timeline", |v| photo(v).is_some_and(|m| m["image_thumb"] == true));
+        assert_eq!(bytes(&photo(&t).unwrap()), vec![2u8; 5_000], "on by default: the thumbnail");
+        app.call("set_thumbnails", &json!({"on": false}));
+        let t = probe.wait("timeline", |v| photo(v).is_some_and(|m| m.get("image_thumb").is_none() && m["image_path"].as_str().is_some_and(|p| !p.is_empty())));
+        assert_eq!(bytes(&photo(&t).unwrap()), vec![1u8; 300_000], "switched off: the picture itself, without leaving the room");
+        app.call("set_thumbnails", &json!({"on": true}));
+        std::thread::sleep(Duration::from_secs(2));
+        probe.wait("timeline", |v| photo(v).is_some_and(|m| m.get("image_thumb").is_none())); /* the picture it has is kept: nothing is fetched again */
+        let hs = app.inner.fake.lock().unwrap().clone().unwrap();
+        assert_eq!(hs.log().iter().filter(|l| l.starts_with("download pic_photo")).count(), 1);
+        assert_eq!(hs.log().iter().filter(|l| l.starts_with("thumbnail pic_photo")).count(), 1);
     }
 
     #[test]

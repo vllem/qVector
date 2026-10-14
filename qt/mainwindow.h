@@ -120,6 +120,7 @@ private:
     void verifyPerson(const QString &userId);
     void jumpTo(const QString &room, const QString &event);
     void openPicture(const QString &eventId);
+    void showPicture(const QString &eventId, const QString &path); /* the viewer window for the picture in `path`, the picture of message `eventId` */
     void saveDrafts();
     void loadDrafts();
     QString roomTitle(const QString &id) const;
@@ -195,7 +196,7 @@ private:
     QPointer<RecoveryDialog> recoveryDlg_;
     QPointer<StartDmDialog> startDm_;
     QPointer<BrowseRoomsDialog> browse_, explore_;
-    QAction *actNotify_ = nullptr, *actTyping_ = nullptr, *actPreviews_ = nullptr, *actIndex_ = nullptr, *actTray_ = nullptr, *actCloseTray_ = nullptr;
+    QAction *actNotify_ = nullptr, *actTyping_ = nullptr, *actPreviews_ = nullptr, *actThumbs_ = nullptr, *actIndex_ = nullptr, *actTray_ = nullptr, *actCloseTray_ = nullptr;
     QJsonArray sessions_;
     QPointer<QDialog> prefsDlg_;
     QString pendingReveal_;

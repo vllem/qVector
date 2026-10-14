@@ -173,11 +173,27 @@ impl Respond for Upload {
 struct Download(Arc<Mutex<State>>);
 impl Respond for Download {
     fn respond(&self, req: &Request) -> ResponseTemplate {
-        let st = self.0.lock().unwrap();
+        let mut st = self.0.lock().unwrap();
         let id = req.url.path().rsplit('/').next().unwrap_or("").to_string();
+        st.log.push(format!("download {id}"));
         match st.media.get(&id) {
             Some(bytes) => ResponseTemplate::new(200).insert_header("content-type", "application/octet-stream").set_body_bytes(bytes.clone()),
             None => ResponseTemplate::new(404).set_body_json(json!({"errcode": "M_NOT_FOUND", "error": "no such file"})),
+        }
+    }
+}
+
+/// The server's own thumbnail of a picture: the file `thumb_<media id>` when a test has put one there, else "not found" (as for a type of picture the server cannot scale).
+struct Thumbnail(Arc<Mutex<State>>);
+impl Respond for Thumbnail {
+    fn respond(&self, req: &Request) -> ResponseTemplate {
+        let mut st = self.0.lock().unwrap();
+        let id = req.url.path().rsplit('/').next().unwrap_or("").to_string();
+        let ask = |k: &str| req.url.query_pairs().find(|(q, _)| q == k).map(|(_, v)| v.to_string()).unwrap_or_default();
+        st.log.push(format!("thumbnail {id} {}x{} {}", ask("width"), ask("height"), ask("method")));
+        match st.media.get(&format!("thumb_{id}")) {
+            Some(bytes) => ResponseTemplate::new(200).insert_header("content-type", "application/octet-stream").set_body_bytes(bytes.clone()),
+            None => ResponseTemplate::new(404).set_body_json(json!({"errcode": "M_NOT_FOUND", "error": "no thumbnail"})),
         }
     }
 }
@@ -273,6 +289,7 @@ impl FakeHs {
         }).await;
         Mock::given(method("POST")).and(path_regex(r"^/_matrix/media/v3/upload$")).respond_with(Upload(st.clone())).mount(&*server).await;
         Mock::given(method("GET")).and(path_regex(r"^/_matrix/(client/v1/media|media/v3)/download/")).respond_with(Download(st.clone())).mount(&*server).await;
+        Mock::given(method("GET")).and(path_regex(r"^/_matrix/(client/v1/media|media/v3)/thumbnail/")).respond_with(Thumbnail(st.clone())).mount(&*server).await;
         mount("GET", r"^/_matrix/(client/v1/media|media/v3)/config$", |_, _, _| json!({"m.upload.size": 50_000_000})).await;
         mount("PUT", r"^/_matrix/client/v3/rooms/[^/]+/redact/", |st, who, req| {
             let parts: Vec<&str> = req.url.path().split('/').collect(); /* .../redact/<event id>/<txn> */
@@ -621,7 +638,29 @@ impl FakeHs {
     }
 
     /// The files uploaded so far, in upload order.
-    pub fn uploaded(&self) -> Vec<Vec<u8>> { self.st.lock().unwrap().media.iter().filter(|(k, _)| !k.starts_with("av_")).map(|(_, v)| v.clone()).collect() } /* what the client uploaded (not the seeded avatars) */
+    pub fn uploaded(&self) -> Vec<Vec<u8>> { self.st.lock().unwrap().media.iter().filter(|(k, _)| !["av_", "pic_", "thumb_"].iter().any(|p| k.starts_with(p))).map(|(_, v)| v.clone()).collect() } /* what the client uploaded (not the seeded avatars and pictures) */
+
+    /// A picture that was uploaded before the test: the server holds `full` under the media id `pic_<name>`; `thumb` is what its thumbnail endpoint answers (none: not found).
+    pub fn put_picture(&self, name: &str, full: Vec<u8>, thumb: Option<Vec<u8>>) {
+        let mut st = self.st.lock().unwrap();
+        st.media.insert(format!("pic_{name}"), full);
+        if let Some(t) = thumb { st.media.insert(format!("thumb_pic_{name}"), t); }
+    }
+
+    /// `sender` (a local part, e.g. "bob") posts the picture `name` (see `put_picture`) in the room as an unencrypted `m.image`. `declared`: the size the message
+    /// claims for it; `own_thumb`: the name of another picture that the message carries as its own thumbnail. Returns the event id.
+    pub fn say_picture(&self, sender: &str, name: &str, declared: Option<u64>, own_thumb: Option<&str>) -> String {
+        let mut st = self.st.lock().unwrap();
+        st.counter += 1;
+        let id = format!("$pic{}", st.counter);
+        let mut info = json!({"w": 4000, "h": 3000, "mimetype": "image/jpeg"});
+        if let Some(n) = declared { info["size"] = json!(n); }
+        if let Some(t) = own_thumb { info["thumbnail_url"] = json!(format!("mxc://hs/pic_{t}")); info["thumbnail_info"] = json!({"w": 800, "h": 600, "mimetype": "image/jpeg"}); }
+        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(1000) + st.counter;
+        st.events.push(json!({"type": "m.room.message", "sender": format!("@{sender}:hs"), "event_id": id, "origin_server_ts": ts,
+            "content": {"msgtype": "m.image", "body": format!("{name}.jpg"), "url": format!("mxc://hs/pic_{name}"), "info": info}}));
+        id
+    }
 
     /// From now on the server asks for this password before accepting cross-signing keys.
     pub fn require_password(&self, pw: &str) { self.st.lock().unwrap().uia_password = Some(pw.into()); }

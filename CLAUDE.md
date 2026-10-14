@@ -42,7 +42,7 @@ QT_QPA_PLATFORM=offscreen XDG_CONFIG_HOME=$(mktemp -d) ./build/qvector --demo --
 ```
 
 * **Do not set LD_LIBRARY_PATH to ~/Qt** (a Qt 6.10 install used by the dropped QtBridge experiment): the Widgets app uses the system Qt 6.8.
-* `--demo` starts the in-process fake homeserver (feature `testkit`, CMake option `VC_DEMO`) with alice (you), bob, a space, an invite and 40 history messages.
+* `--demo` starts the in-process fake homeserver (feature `testkit`, CMake option `VC_DEMO`) with alice (you), bob, a space, an invite, 40 history messages and a photo from bob (`--dialog picture` opens it as a click does).
   Dev aids: `--room NAME --members --search T --thread T --dialog poll|saved|prefs|verify|recovery|settings --delay MS --data DIR --server URL --user U --password P
   --verify --confirm`. Screenshots grab the main window (or the dialog being demonstrated); popups/menus are not captured.
 * A real run signs in a *new device* on the account and needs re-verification: ask the user before pointing it at their real account. Use `core-rs/examples/fakehs.rs`
@@ -95,10 +95,15 @@ heap that reuses freed memory, so they read lower (a regression of 10 MB in the 
 * The message index (`index.rs`): rows packed into one text arena, 190 bytes a message (was 541), saved as sealed segment files (`seg-NNNNNN.enc`: a save writes what
   changed; many segments are written again as few; the old single file is read and replaced).
 * Link: `--gc-sections` takes 38 MB off the release binary and 2 MB off its resident size. The demo removes its own temporary folders (`/tmp` was 370 MB of them).
+* Timeline thumbnails (Preferences > Pictures, pref `timelineThumbnails`, default ON, engine call `set_thumbnails`): a 25 MB photo is about 50 MB at once in the engine (file plus
+  HTTP/2 buffers), its thumbnail about 50 KB. `ui::fetch_images` asks the server for `thumbnail/..?width=960&height=640&method=scale` (what the timeline draws at twice the pixels), then
+  the sender's `info.thumbnail_source`, then the file itself; an encrypted picture has only the sender's thumbnail (the server cannot scale it), and a picture the message
+  declares under 256 KB is fetched whole. `Inner.images` maps event id to `ui::Pic {path, thumb}`; a row with `image_thumb` has the smaller one, and `MainWindow::openPicture` then
+  asks for `fetch_media` and `media_file` opens the viewer (a gallery item or "Save as" always fetches the original). Files are named `<id>.<ext>` (the picture) and `<id>-t.img`
+  (a thumbnail), written through `.part` and renamed, and found again after a restart without asking the server (the picture wins over a thumbnail). A call fetches at most 8 pictures,
+  the newest first. Not covered: the pictures qVector sends itself carry no thumbnail (so in an encrypted room others download them whole), GIFs are still frames in the timeline anyway.
 * Not done, with what it would give: the sync has no filter, so the first sign-in of an account downloads every member of every room (`lazy_load_members` and no
-  `presence` in a `FilterDefinition`; the SDK stores presence events the UI never reads); timeline pictures are downloaded as full originals (a 25 MB photo is about 50 MB at
-  once, file plus HTTP/2 buffers; `info.thumbnail_source` or the server's thumbnail is about 50 KB, but the viewer opens `image_path`, so a click would need to fetch the
-  original); a non-PIE link (another 4 MB resident, but no ASLR for our code); `max_blocking_threads`; a timeline window that drops far-away messages from the document. Qt loads all 11 image plugins (1.6 MB) at the first
+  `presence` in a `FilterDefinition`; the SDK stores presence events the UI never reads); a non-PIE link (another 4 MB resident, but no ASLR for our code); `max_blocking_threads`; a timeline window that drops far-away messages from the document. Qt loads all 11 image plugins (1.6 MB) at the first
   `QLineEdit::setClearButtonEnabled`, whatever the app asks of `QImageReader`.
 
 ## The fake homeserver (`core-rs/src/testkit.rs`)
