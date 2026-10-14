@@ -36,7 +36,7 @@ core-rs/src/ui.rs    UI-facing functions on top of matrix-sdk (rooms, messages, 
 ```sh
 cmake -S . -B build && cmake --build build -j8                  # dev: cargo dev profile in the repo's target/, Qt from the system (6.8)
 cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release && cmake --build build-release -j8
-cargo test -p vector-core --lib --features testkit              # 46 tests, ~5 min; a parallel-load flake in the reply/shield tests is known (UTD retry window)
+cargo test -p vector-core --lib --features testkit              # 109 tests, ~5 min (10 more are `#[ignore]`d stress tests: `-- --ignored`)
 scripts/ui_smoke.sh build/qvector                                # every window/dialog offscreen
 QT_QPA_PLATFORM=offscreen XDG_CONFIG_HOME=$(mktemp -d) ./build/qvector --demo --data $(mktemp -d) --room bob --screenshot out.png
 ```
@@ -125,7 +125,9 @@ heap that reuses freed memory, so they read lower (a regression of 10 MB in the 
 wiremock-based, several users/devices: login, keys upload/query/claim/signatures/device_signing (optional UIA password), to-device, send/redact/state (state PUT is
 echoed through the sync), members, messages (`set_history(n)`), media (+ seeded avatars), account data, key backup, receipts, typing, tags, spaces, invites,
 createRoom/join/leave, user directory, public rooms, link previews. A request it does not know is logged as `UNHANDLED`; error JSON with `errcode` becomes 4xx.
-Add endpoints there with a test in `ui.rs`/`crypto.rs`. Every fake server must use its own temp dirs (parallel tests shared one once and flaked). `ROOM` doubles as
+Add endpoints there with a test in `ui.rs`/`crypto.rs`. Every fake server must use its own temp dirs (parallel tests shared one once and flaked). wiremock keeps the servers of finished tests in a process-wide pool and
+gives them (port and all) to the next test: anything a test keeps on disk under a name made from the port (the stores of `bob_says` and `alice_other_session`) must be removed
+first, or the next test opens the old one with its keys and room key (the reply tests then never decrypted bob's message: it looked like a load flake, and happened more often the more tests there were). `ROOM` doubles as
 the alice/bob direct chat (`m.direct`).
 
 ## Matrix behaviour learned the hard way

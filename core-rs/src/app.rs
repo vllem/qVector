@@ -1091,6 +1091,23 @@ mod tests {
     }
 
     #[test]
+    fn opening_a_small_room_asks_for_its_members_once_and_lists_them_all() {
+        let (app, mut probe, _dir) = app();
+        let fake = app.call("start_fake_server", &Value::Null);
+        let hs = app.inner.fake.lock().unwrap().clone().unwrap();
+        for n in ["carol", "dave", "erin"] { hs.add_member(n); }
+        app.call("login", &json!({"homeserver": fake["homeserver"], "user": "alice", "password": "x"}));
+        probe.wait("state", |v| v["screen"] == "main");
+        probe.wait("rooms", |v| v.as_array().map(|a| a.iter().any(|r| r["id"] == crate::testkit::ROOM)).unwrap_or(false));
+        app.call("select_room", &json!({"room_id": crate::testkit::ROOM}));
+        let d = probe.wait("details", |v| v["id"] == crate::testkit::ROOM && v["members_complete"] == true);
+        assert_eq!((d["member_count"].as_u64(), d["members"].as_array().map(|a| a.len())), (Some(5), Some(5)), "{d}");
+        probe.wait("timeline", |v| v["rows"].as_array().map(|a| !a.is_empty()).unwrap_or(false));
+        std::thread::sleep(Duration::from_secs(2)); /* the timeline's own fetch of the members has long finished */
+        assert_eq!(hs.log().iter().filter(|l| l.starts_with("GET ") && l.contains("/members (")).count(), 1, "the room details and the timeline share one request");
+    }
+
+    #[test]
     fn the_demo_takes_its_temporary_folders_with_it() {
         let (app, mut probe, _dir) = app();
         let fake = app.call("start_fake_server", &Value::Null);

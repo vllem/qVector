@@ -779,6 +779,9 @@ pub async fn bob_says(hs: FakeHs, lines: Vec<String>) {
     use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
     for _ in 0..600 { if hs.has_device_keys("alice") { break; } tokio::time::sleep(std::time::Duration::from_millis(100)).await; }
     let dir = std::env::temp_dir().join(format!("vector-fake-bob-{}-{}", std::process::id(), hs.server.address().port()));
+    /* wiremock hands the ports of servers that are done to the next test of the process: the store of an earlier bob must not be opened again (its keys,
+       sessions and room key are another server's: alice then never got the key and the message stayed unreadable) */
+    let _ = std::fs::remove_dir_all(&dir);
     let Ok(bob) = crate::open_client(&hs.uri(), &dir, "pw").await else { return };
     if crate::login_password(&bob, "bob", "x", "bob's phone").await.is_err() { return; } /* also starts the event cache */
     let _ = crate::sync_once(&bob).await;
@@ -814,6 +817,7 @@ pub async fn bob_reads_alice(hs: FakeHs) {
 pub async fn alice_other_session(hs: FakeHs) {
     use crate::crypto::Verifier;
     let dir = std::env::temp_dir().join(format!("vector-fake-other-{}-{}", std::process::id(), hs.server.address().port()));
+    let _ = std::fs::remove_dir_all(&dir); /* a fresh store (see bob_says: ports are reused) */
     let Ok(client) = crate::open_client(&hs.uri(), &dir, "pw").await else { return };
     if client.matrix_auth().login_username("alice", "x").device_id("OTHER").initial_device_display_name("Alice's laptop").send().await.is_err() { return; }
     crate::start_event_cache(&client);
