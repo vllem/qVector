@@ -368,7 +368,7 @@ impl App {
         if hs.trim().is_empty() || user.trim().is_empty() { i.state("Enter the server and your user name."); return Value::Null; }
         i.set_busy(true, "Signing in...");
         self.rt().spawn(async move {
-            let _out = i.signout.clone().lock_owned().await; /* a sign-out still deleting the old data must finish first */
+            drop(i.signout.clone().lock_owned().await); /* a sign-out still deleting the old data must finish first (only waited for, not held) */
             let dir = i.dir();
             match crate::session::sign_in(&dir, &hs, &user, &pw, Some(pass.as_str()).filter(|p| !p.is_empty()), "Vector").await {
                 Ok(client) => {
@@ -385,7 +385,7 @@ impl App {
         let i = self.inner.clone();
         i.set_busy(true, "Opening your account...");
         self.rt().spawn(async move {
-            let _out = i.signout.clone().lock_owned().await;
+            drop(i.signout.clone().lock_owned().await);
             match crate::session::restore(&i.dir(), &secret).await {
                 Ok(client) => start_session(i, client, secret).await,
                 Err(e) => login_failed(&i, &e),
@@ -738,7 +738,7 @@ async fn end_session(i: &Arc<Inner>, client: Option<Client>, logout: bool) {
     if let (true, Some(c)) = (logout, &client) { let _ = c.matrix_auth().logout().await; }
     /* every handle on the databases must be gone (the aborted tasks drop theirs at their next step) before the files are deleted and a new login reuses the place */
     drop((calls, groups, client));
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
     crate::session::forget(&i.dir());
 }
 
