@@ -180,65 +180,6 @@ int main(int argc, char **argv)
     tl.show();
     app.processEvents();
 
-    /* ---- memory: what a long session shows (pictures, avatars) must not pile up. Photos and faces are made here, as real JPEG/PNG files. ---- */
-    QTemporaryDir farm;
-    QStringList photos, faces;
-    const bool wantMemory = farm.isValid() && (only.isEmpty() || only.contains("memory", Qt::CaseInsensitive));
-    if (wantMemory) {
-        for (int i = 0; i < 8; i++) { const QString p = farm.filePath(QString("photo%1.jpg").arg(i)); photo(4000, 3000, 100 + i).save(p, "JPEG", 85); photos << p; }
-        { const QString p = farm.filePath("shot.png"); photo(2560, 1440, 7).save(p, "PNG"); photos << p; }
-        for (int i = 0; i < 40; i++) { const QString p = farm.filePath(QString("face%1.jpg").arg(i)); photo(512, 512, 500 + i).save(p, "JPEG", 90); faces << p; }
-    }
-    /* the same file under a name of its own: the views key their pictures by path, so every link counts as another picture */
-    auto link = [&](const QString &base, const QString &tag) { const QString p = farm.filePath(tag + "." + QFileInfo(base).suffix()); QFile::link(base, p); return p; };
-    /* a room as the engine sends it: 60 messages, 12 of them pictures (some a PNG screenshot), a sticker, a gallery of four, every sender with a face */
-    auto room = [&](int r) {
-        QJsonArray rows;
-        for (int i = 0; i < 60; i++) {
-            QJsonObject m = message(i, QString("message %1 of room %2").arg(i).arg(r));
-            m["avatar_path"] = link(faces[(r * 5 + i % 5) % faces.size()], QString("face_r%1_s%2").arg(r).arg(i % 5));
-            if (i % 5 == 4) { m["kind"] = "image"; m["body"] = "photo.jpg"; m["file_name"] = "photo.jpg"; m["image_w"] = 4000; m["image_h"] = 3000; m["image_path"] = link(photos[(r + i) % photos.size()], QString("pic_r%1_%2").arg(r).arg(i)); }
-            else if (i == 7) { m["kind"] = "sticker"; m["image_path"] = link(photos[(r + 3) % photos.size()], QString("stk_r%1").arg(r)); }
-            else if (i == 21) {
-                m["kind"] = "gallery"; m["body"] = "";
-                QJsonArray g;
-                for (int k = 0; k < 4; k++) g.append(QJsonObject{{"index", k}, {"kind", "image"}, {"name", "g.jpg"}, {"size", 1000000}, {"image_path", link(photos[(r + k) % photos.size()], QString("gal_r%1_%2").arg(r).arg(k))}});
-                m["gallery"] = g;
-            }
-            rows.append(m);
-        }
-        return rows;
-    };
-    if (wantMemory) {
-        TimelineView mtl;
-        mtl.resize(900, 600);
-        mtl.show();
-        app.processEvents();
-        memstep("memory: 10 rooms of 14 pictures, visited 3 times", 40000, [&] {
-            for (int cycle = 0; cycle < 3; cycle++) for (int r = 0; r < 10; r++) { mtl.reset(); mtl.setRows(room(r)); settle(); }
-        }, 8000);
-        mtl.reset();
-        Sidebar msb;
-        msb.resize(260, 700);
-        msb.show();
-        memstep("memory: 600 rooms with a picture of their own (sidebar)", 12000, [&] {
-            QJsonArray rooms;
-            for (int i = 0; i < 600; i++) rooms.append(QJsonObject{{"id", QString("!m%1:hs").arg(i)}, {"title", QString("room %1").arg(i)}, {"section", "Rooms"}, {"unread", 0}, {"notify", "default"}, {"avatar_path", link(faces[i % faces.size()], QString("room_face%1").arg(i))}});
-            msb.refresh(rooms, "", "");
-        });
-        memstep("memory: a room of 100 messages, as the engine sends them", 1500, [&] { mtl.reset(); mtl.setRows(engineRows(100)); settle(); });
-        memstep("memory: a room of 5 000 messages loaded, 100 shown", 17000, [&] { mtl.reset(); mtl.setRows(engineRows(5000)); settle(); });
-        memstep("memory: the same room scrolled back, 3 000 shown", 28000, [&] { mtl.revealMessage("$event2000abcdefghijklmnopqrstuvwxyz0123456789:example.org"); settle(); });
-        MemberList mml;
-        mml.resize(240, 600);
-        mml.show();
-        memstep("memory: 3 000 people with a picture each (member list)", 60000, [&] {
-            QJsonArray ms;
-            for (int i = 0; i < 3000; i++) ms.append(QJsonObject{{"user_id", QString("@p%1:hs").arg(i)}, {"name", QString("Person %1").arg(i)}, {"role", "Member"}, {"avatar_path", link(faces[i % faces.size()], QString("member_face%1").arg(i))}});
-            mml.refresh(QJsonObject{{"id", "!big:hs"}, {"members", ms}});
-        });
-    }
-
     step("timeline: open a room of 50 000 messages", 1300, [&] { tl.setRows(messages(50000)); });
     step("timeline: scroll to the top and back 20 times", 800, [&] {
         auto *bar = tl.findChild<QTextBrowser *>()->verticalScrollBar();
@@ -417,6 +358,66 @@ int main(int argc, char **argv)
             ml.setPresence(st);
         }
     });
+
+    /* ---- memory: what a long session shows (pictures, avatars) must not pile up. Photos and faces are made here, as real JPEG/PNG files. These steps come
+       last: they leave the heap in a state that makes the time steps above slower by a few per cent. ---- */
+    QTemporaryDir farm;
+    QStringList photos, faces;
+    const bool wantMemory = farm.isValid() && (only.isEmpty() || only.contains("memory", Qt::CaseInsensitive));
+    if (wantMemory) {
+        for (int i = 0; i < 8; i++) { const QString p = farm.filePath(QString("photo%1.jpg").arg(i)); photo(4000, 3000, 100 + i).save(p, "JPEG", 85); photos << p; }
+        { const QString p = farm.filePath("shot.png"); photo(2560, 1440, 7).save(p, "PNG"); photos << p; }
+        for (int i = 0; i < 40; i++) { const QString p = farm.filePath(QString("face%1.jpg").arg(i)); photo(512, 512, 500 + i).save(p, "JPEG", 90); faces << p; }
+    }
+    /* the same file under a name of its own: the views key their pictures by path, so every link counts as another picture */
+    auto link = [&](const QString &base, const QString &tag) { const QString p = farm.filePath(tag + "." + QFileInfo(base).suffix()); QFile::link(base, p); return p; };
+    /* a room as the engine sends it: 60 messages, 12 of them pictures (some a PNG screenshot), a sticker, a gallery of four, every sender with a face */
+    auto room = [&](int r) {
+        QJsonArray rows;
+        for (int i = 0; i < 60; i++) {
+            QJsonObject m = message(i, QString("message %1 of room %2").arg(i).arg(r));
+            m["avatar_path"] = link(faces[(r * 5 + i % 5) % faces.size()], QString("face_r%1_s%2").arg(r).arg(i % 5));
+            if (i % 5 == 4) { m["kind"] = "image"; m["body"] = "photo.jpg"; m["file_name"] = "photo.jpg"; m["image_w"] = 4000; m["image_h"] = 3000; m["image_path"] = link(photos[(r + i) % photos.size()], QString("pic_r%1_%2").arg(r).arg(i)); }
+            else if (i == 7) { m["kind"] = "sticker"; m["image_path"] = link(photos[(r + 3) % photos.size()], QString("stk_r%1").arg(r)); }
+            else if (i == 21) {
+                m["kind"] = "gallery"; m["body"] = "";
+                QJsonArray g;
+                for (int k = 0; k < 4; k++) g.append(QJsonObject{{"index", k}, {"kind", "image"}, {"name", "g.jpg"}, {"size", 1000000}, {"image_path", link(photos[(r + k) % photos.size()], QString("gal_r%1_%2").arg(r).arg(k))}});
+                m["gallery"] = g;
+            }
+            rows.append(m);
+        }
+        return rows;
+    };
+    if (wantMemory) {
+        TimelineView mtl;
+        mtl.resize(900, 600);
+        mtl.show();
+        app.processEvents();
+        memstep("memory: 10 rooms of 14 pictures, visited 3 times", 40000, [&] {
+            for (int cycle = 0; cycle < 3; cycle++) for (int r = 0; r < 10; r++) { mtl.reset(); mtl.setRows(room(r)); settle(); }
+        }, 8000);
+        mtl.reset();
+        Sidebar msb;
+        msb.resize(260, 700);
+        msb.show();
+        memstep("memory: 600 rooms with a picture of their own (sidebar)", 12000, [&] {
+            QJsonArray rooms;
+            for (int i = 0; i < 600; i++) rooms.append(QJsonObject{{"id", QString("!m%1:hs").arg(i)}, {"title", QString("room %1").arg(i)}, {"section", "Rooms"}, {"unread", 0}, {"notify", "default"}, {"avatar_path", link(faces[i % faces.size()], QString("room_face%1").arg(i))}});
+            msb.refresh(rooms, "", "");
+        });
+        memstep("memory: a room of 100 messages, as the engine sends them", 1500, [&] { mtl.reset(); mtl.setRows(engineRows(100)); settle(); });
+        memstep("memory: a room of 5 000 messages loaded, 100 shown", 17000, [&] { mtl.reset(); mtl.setRows(engineRows(5000)); settle(); });
+        memstep("memory: the same room scrolled back, 3 000 shown", 28000, [&] { mtl.revealMessage("$event2000abcdefghijklmnopqrstuvwxyz0123456789:example.org"); settle(); });
+        MemberList mml;
+        mml.resize(240, 600);
+        mml.show();
+        memstep("memory: 3 000 people with a picture each (member list)", 60000, [&] {
+            QJsonArray ms;
+            for (int i = 0; i < 3000; i++) ms.append(QJsonObject{{"user_id", QString("@p%1:hs").arg(i)}, {"name", QString("Person %1").arg(i)}, {"role", "Member"}, {"avatar_path", link(faces[i % faces.size()], QString("member_face%1").arg(i))}});
+            mml.refresh(QJsonObject{{"id", "!big:hs"}, {"members", ms}});
+        });
+    }
 
     /* The sticker picker is a popup nobody looks at most of the time: it must not decode and scale every sticker of a room's packs whenever the room
        sends them (every room entered did), only when it opens. */
