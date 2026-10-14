@@ -77,6 +77,9 @@ impl MessageIndex {
 
     pub fn len(&self) -> usize { self.rows.len() }
 
+    /// Is this event indexed already?
+    pub fn knows(&self, room_id: &str, event_id: &str) -> bool { self.rows.contains_key(&format!("{room_id}|{event_id}")) }
+
     #[cfg(test)]
     pub(crate) fn insert_row(&mut self, row: IndexRow) { self.rows.insert(format!("{}|{}", row.room_id, row.event_id), row); self.dirty = true; }
 
@@ -144,7 +147,12 @@ pub async fn crawl_room(room: &matrix_sdk::Room, index: Option<&std::sync::Mutex
     for _ in 0..pages {
         reached = timeline.paginate_backwards(30).await.map_err(|e| e.to_string())?;
         let items: Vec<_> = timeline.items().await.iter().cloned().collect();
-        if let Some(index) = index { index.lock().map_err(|_| "index lock poisoned")?.add_items(&room_id, &items); }
+        if let Some(index) = index {
+            let mut index = index.lock().map_err(|_| "index lock poisoned")?;
+            /* every page shows the timeline again from its newest item: only what the earlier pages did not index is turned into rows */
+            let fresh: Vec<_> = items.iter().filter(|i| i.as_event().map_or(false, |e| e.event_id().map_or(true, |id| !index.knows(&room_id, id.as_str())))).cloned().collect();
+            index.add_items(&room_id, &fresh);
+        }
         if reached { break; }
     }
     Ok(reached)
