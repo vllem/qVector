@@ -21,6 +21,15 @@ use crate::crypto::Verifier;
 use crate::index::MessageIndex;
 use crate::ui;
 
+/// The payload of a `timeline` event, serialized straight from the rows. (`json!({"rows": rows})` first builds a `serde_json::Value` of every row: five
+/// times the memory of the text and 200 000 allocations for a room of 5 000 messages, on every new message.)
+#[derive(serde::Serialize)]
+struct TimelinePayload<'a> { room_id: &'a str, rows: &'a [ui::UiMessage] }
+
+/// The payload of an `emote_packs` event: a pack can hold hundreds of pictures.
+#[derive(serde::Serialize)]
+struct EmotePacksPayload<'a> { room_id: &'a str, packs: &'a [crate::emotes::UiPack] }
+
 /// Where events go: `(name, json)`. Called from engine threads: a UI must hand the event over to its own thread.
 pub type Sink = Arc<dyn Fn(&str, String) + Send + Sync>;
 
@@ -49,7 +58,7 @@ struct Inner {
     tasks: Mutex<Tasks>,
     timeline: tokio::sync::Mutex<Option<Arc<Timeline>>>,
     thread: tokio::sync::Mutex<Option<Arc<Timeline>>>,
-    images: Mutex<HashMap<String, PathBuf>>,
+    images: Mutex<Arc<HashMap<String, PathBuf>>>, /* event id -> picture file; a pass takes a share (a copy of the whole map on every new message cost more and more as pictures were shown), adding pictures copies it once */
     opening: Mutex<HashSet<String>>, /* attachments being downloaded for opening: a second click while one runs is ignored */
     previews: Mutex<HashMap<String, Option<ui::UiPreview>>>,
     /* rooms a sync brought events for since their event caches were last asked to shrink (see `ui::shrink_event_caches`) */
@@ -299,7 +308,7 @@ impl App {
             let mut packs = crate::emotes::emote_packs(&c, &room).await;
             for round in 0..2 {
                 for e in packs.iter_mut().flat_map(|p| p.emotes.iter_mut()) { e.path = i.avatars.path(&e.mxc); }
-                i.emit_json("emote_packs", &json!({"room_id": room, "packs": packs}));
+                i.emit_json("emote_packs", &EmotePacksPayload { room_id: &room, packs: &packs });
                 if round == 1 { break; }
                 let wanted: Vec<String> = packs.iter().flat_map(|p| p.emotes.iter()).map(|e| e.mxc.clone()).filter(|m| i.avatars.wanted(m)).collect();
                 if wanted.is_empty() { break; }
@@ -516,7 +525,7 @@ impl App {
                     let known = i.previews.lock().unwrap();
                     for r in rows.iter_mut() { if let Some(u) = ui::first_url(&r.body) { r.preview = known.get(&u).cloned().flatten(); } }
                 }
-                i.emit("timeline", json!({"room_id": id, "rows": rows}).to_string());
+                i.emit_json("timeline", &TimelinePayload { room_id: &id, rows: &rows });
                 if let Some(index) = i.index.lock().unwrap().clone() { let _ = index.lock().map(|mut x| x.add_messages(&id, &rows)); }
                 /* Everything below waits for the network (read receipt, pictures, avatars, link previews: a homeserver can take half a minute to
                    fetch a page). A new event must never wait for it, so the work races the stream and is simply started again for the next pass.
@@ -527,7 +536,7 @@ impl App {
                     if i.focused.load(Ordering::Relaxed) { let _ = ui::mark_read(&timeline).await; slow("read receipt"); }
                     let added = ui::fetch_images(&client, &items, &cache, &have).await;
                     slow("pictures");
-                    if !added.is_empty() { i.images.lock().unwrap().extend(added); return true; } /* show the pictures that just arrived */
+                    if !added.is_empty() { Arc::make_mut(&mut i.images.lock().unwrap()).extend(added); return true; } /* show the pictures that just arrived */
                     {
                         let wanted: Vec<String> = { let known = i.user_mxc.lock().unwrap(); rows.iter().filter_map(|r| known.get(&format!("{id}|{}", r.sender_id)).cloned().flatten()).filter(|m| i.avatars.wanted(m)).take(4).collect() };
                         for m in &wanted { i.avatars.fetch(&client, m, &i.avatar_dir()).await; }

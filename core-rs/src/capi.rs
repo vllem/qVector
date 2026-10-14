@@ -20,7 +20,9 @@ fn text(p: *const c_char) -> String { if p.is_null() { String::new() } else { un
 pub extern "C" fn vcr_app_new(data_dir: *const c_char, cb: VcrEventFn, user: *mut c_void) -> *mut App {
     let user = User(user);
     let sink: Sink = Arc::new(move |name, payload| {
-        let (n, p) = (CString::new(name).unwrap_or_default(), CString::new(payload.replace('\0', "")).unwrap_or_default());
+        /* a C string cannot hold a NUL: it is cut out (rarely there), and otherwise the payload is moved into the C string, not copied (a room's rows are megabytes) */
+        let payload = if payload.contains('\0') { payload.replace('\0', "") } else { payload };
+        let (n, p) = (CString::new(name).unwrap_or_default(), CString::new(payload).unwrap_or_default());
         let u = &user;
         cb(u.0, n.as_ptr(), p.as_ptr());
     });
