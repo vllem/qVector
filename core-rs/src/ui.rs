@@ -1042,6 +1042,21 @@ pub async fn load_reply(timeline: &Timeline, reply_event_id: &str) -> Result<(),
 
 pub async fn load_older(timeline: &Timeline) -> Result<bool, String> { timeline.paginate_backwards(30).await.map_err(|e| e.to_string()) }
 
+/// Give back the memory of rooms nobody is looking at. The SDK keeps every event a sync brings for a room in that room's in-memory cache and only
+/// drops all but the newest chunk when the room's last subscriber goes away: a room nobody has opened since the app started never does, and a busy
+/// channel adds thousands of events a day (about a kilobyte each) for as long as the app runs. A subscriber that comes and goes asks for that
+/// shrink. `skip` is the open room (it has a subscriber, so there is nothing to do there). Returns how many rooms were asked.
+pub async fn shrink_event_caches(client: &Client, rooms: &[matrix_sdk::ruma::OwnedRoomId], skip: Option<&str>) -> usize {
+    let mut asked = 0;
+    for id in rooms {
+        if Some(id.as_str()) == skip { continue; }
+        let Some(room) = client.get_room(id) else { continue };
+        let Ok((cache, _handles)) = room.event_cache().await else { continue };
+        if let Ok((_events, subscriber)) = cache.subscribe().await { drop(subscriber); asked += 1; }
+    }
+    asked
+}
+
 /// Tell the room we have read up to its newest message (so the server's unread counts and other people's receipts follow). True if a receipt was sent.
 pub async fn mark_read(timeline: &Timeline) -> Result<bool, String> {
     let sent = timeline.mark_as_read(matrix_sdk::ruma::api::client::receipt::create_receipt::v3::ReceiptType::Read).await.map_err(|e| e.to_string())?;

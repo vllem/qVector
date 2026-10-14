@@ -211,6 +211,65 @@ mod tests {
         (client, room)
     }
 
+    /// What the SDK keeps in memory for a room: the events of its in-memory cache.
+    async fn events_in_memory(room: &matrix_sdk::Room) -> usize {
+        let (cache, _guard) = room.event_cache().await.unwrap();
+        cache.events().await.unwrap().len()
+    }
+
+    /// Wait (the SDK shrinks a cache from a task of its own) until the room holds fewer than `limit` events in memory.
+    async fn wait_for_fewer_than(room: &matrix_sdk::Room, limit: usize) -> usize {
+        let mut held = events_in_memory(room).await;
+        for _ in 0..60 { if held < limit { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; held = events_in_memory(room).await; }
+        held
+    }
+
+    #[tokio::test]
+    async fn a_crawled_room_and_a_room_nobody_opened_give_their_events_back() {
+        use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
+        let hs = FakeHs::start().await;
+        hs.set_history(200);
+        let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (alice, room) = client_with_room(&hs, da.path()).await;
+        let index = std::sync::Mutex::new(MessageIndex::open(&da.path().join("index"), "s").unwrap());
+        for _ in 0..10 { if crawl_room(&room, Some(&index), 3).await.unwrap() { break; } }
+        let held = wait_for_fewer_than(&room, 150).await;
+        assert!(held < 150, "the crawl pages 200 events through a timeline of its own: when that goes, the SDK shrinks the room's cache ({held} events still held)");
+
+        /* Live events: the SDK adds every one of them to the cache of the room and, with nobody subscribed, never takes them out again. */
+        let bob = crate::open_client(&hs.uri(), db.path(), "pw").await.unwrap();
+        crate::login_password(&bob, "bob", "x", "bob's phone").await.unwrap();
+        crate::sync_once(&bob).await.unwrap();
+        let bob_room = bob.get_room(<&matrix_sdk::ruma::RoomId>::try_from(ROOM).unwrap()).unwrap();
+        for i in 0..300 {
+            bob_room.send(RoomMessageEventContent::text_plain(format!("live message {i}"))).await.unwrap();
+            if i % 10 == 9 { crate::sync_once(&alice).await.unwrap(); }
+        }
+        crate::sync_once(&alice).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let piled = events_in_memory(&room).await;
+        {
+            let (cache, _g) = room.event_cache().await.unwrap();
+            let events = cache.events().await.unwrap();
+            let json: usize = events.iter().map(|e| e.raw().json().get().len()).sum();
+            println!("events held in memory for a room nobody opened, after 300 live messages: {piled} ({} bytes of event JSON, {} bytes per TimelineEvent itself)", json, std::mem::size_of::<matrix_sdk::deserialized_responses::TimelineEvent>());
+        }
+        assert!(piled >= 300, "the SDK keeps every live event of a room without subscribers ({piled}); if it shrinks them by itself now, `shrink_event_caches` is not needed any more");
+
+        /* the open room is left alone, the others are asked */
+        let id = room.room_id().to_owned();
+        assert_eq!(crate::ui::shrink_event_caches(&alice, &[id.clone()], Some(id.as_str())).await, 0);
+        assert_eq!(crate::ui::shrink_event_caches(&alice, &[id.clone()], None).await, 1);
+        let held = wait_for_fewer_than(&room, 200).await;
+        println!("events held in memory after the shrink: {held}");
+        assert!(held < 200, "{held} events still held after the shrink");
+        /* what was dropped is still there for the timeline: it comes from the store */
+        let timeline = crate::ui::open_timeline(&room).await.unwrap();
+        let _ = timeline.subscribe().await;
+        for _ in 0..40 { if timeline.items().await.len() >= 20 { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+        assert!(timeline.items().await.iter().filter_map(|i| i.as_event()).any(|e| e.content().as_message().map_or(false, |m| m.body().starts_with("live message"))));
+    }
+
     #[tokio::test]
     async fn the_index_finds_old_encrypted_history_and_keeps_its_text_off_the_disk() {
         let hs = FakeHs::start().await;

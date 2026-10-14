@@ -52,6 +52,8 @@ struct Inner {
     images: Mutex<HashMap<String, PathBuf>>,
     opening: Mutex<HashSet<String>>, /* attachments being downloaded for opening: a second click while one runs is ignored */
     previews: Mutex<HashMap<String, Option<ui::UiPreview>>>,
+    /* rooms a sync brought events for since their event caches were last asked to shrink (see `ui::shrink_event_caches`) */
+    live_rooms: Mutex<HashSet<matrix_sdk::ruma::OwnedRoomId>>,
     index: Mutex<Option<Arc<Mutex<MessageIndex>>>>,
     avatars: crate::avatars::Avatars,
     user_mxc: Mutex<HashMap<String, Option<String>>>, /* "room|user" -> that member's avatar address */
@@ -142,7 +144,7 @@ impl App {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("tokio runtime");
         let inner = Arc::new(Inner {
             sink, signout: Default::default(), wake: Default::default(), identity_due: AtomicBool::new(true), data_dir: Mutex::new(data_dir), client: Mutex::new(None), secret: Mutex::new(None), verifier: Mutex::new(None), calls: Mutex::new(None), video_sink: Mutex::new(None), groups: Mutex::new(None), tasks: Mutex::new(Tasks::default()),
-            timeline: Default::default(), thread: Default::default(), images: Default::default(), opening: Default::default(), previews: Default::default(), index: Default::default(), avatars: Default::default(), user_mxc: Default::default(),
+            timeline: Default::default(), thread: Default::default(), images: Default::default(), opening: Default::default(), previews: Default::default(), live_rooms: Default::default(), index: Default::default(), avatars: Default::default(), user_mxc: Default::default(),
             bookmarks: Default::default(), focused: AtomicBool::new(true), previews_on: AtomicBool::new(false), busy: AtomicBool::new(false),
             screen: Mutex::new("login".into()),
             #[cfg(feature = "testkit")]
@@ -804,6 +806,8 @@ const MIN_SYNC_GAP: Duration = Duration::from_millis(700);
 const HOUSEKEEPING_EVERY: Duration = Duration::from_secs(5);
 /// Our own identity and sessions are asked for again at least this often (and at once after a verification or recovery).
 const IDENTITY_EVERY: Duration = Duration::from_secs(600);
+/// The event caches of the rooms that had news are asked to give back what they hold this often.
+const SHRINK_EVERY: Duration = Duration::from_secs(300);
 
 /// Keep the account in sync, and tell the UI about the room list, alerts and the session's trust state; also feeds the message index.
 /// Two halves in one task (aborting it stops both): the network half long-polls the homeserver, the local half runs when a sync has brought
@@ -820,7 +824,11 @@ async fn network_loop(i: Arc<Inner>, client: Client) {
     loop {
         let started = std::time::Instant::now();
         match client.sync_once(SyncSettings::default().timeout(SYNC_TIMEOUT)).await {
-            Ok(_) => { failures = 0; i.wake.notify_one(); }
+            Ok(response) => {
+                failures = 0;
+                i.live_rooms.lock().unwrap().extend(response.rooms.joined.keys().cloned());
+                i.wake.notify_one();
+            }
             Err(e) => {
                 if matches!(e.client_api_error_kind(), Some(matrix_sdk::ruma::api::error::ErrorKind::UnknownToken { .. } | matrix_sdk::ruma::api::error::ErrorKind::UserDeactivated)) {
                     /* the server ended this session (signed out elsewhere, token revoked, account deactivated): back to the sign-in */
@@ -848,6 +856,7 @@ async fn housekeeping(i: Arc<Inner>, client: Client) {
     let mut last_rooms = String::new();
     let (mut last_save, mut crawled) = (std::time::Instant::now(), HashSet::<String>::new());
     let mut last_identity: Option<std::time::Instant> = None;
+    let mut last_shrink = std::time::Instant::now();
     let mut seen_unread = None;
     let prefetching = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut keys_restored = false;
@@ -887,6 +896,11 @@ async fn housekeeping(i: Arc<Inner>, client: Client) {
         let focused = i.focused.load(Ordering::Relaxed);
         let alerts = ui::new_alerts(&mut seen_unread, &rooms, if focused { open.as_deref() } else { None });
         if !alerts.is_empty() { i.emit_json("alerts", &alerts); }
+        if last_shrink.elapsed() > SHRINK_EVERY {
+            last_shrink = std::time::Instant::now();
+            let live: Vec<matrix_sdk::ruma::OwnedRoomId> = std::mem::take(&mut *i.live_rooms.lock().unwrap()).into_iter().collect();
+            ui::shrink_event_caches(&client, &live, open.as_deref()).await;
+        }
         /* learn about our other sessions' identity: at the start, after a verification or recovery, and now and then; the SDK follows device changes itself */
         if i.identity_due.swap(false, Ordering::Relaxed) || last_identity.map_or(true, |t| t.elapsed() > IDENTITY_EVERY) {
             last_identity = Some(std::time::Instant::now());
