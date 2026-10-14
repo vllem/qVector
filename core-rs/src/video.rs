@@ -72,11 +72,17 @@ impl Frame {
 
     /// The picture shrunk (never enlarged) to fit `max_w` x `max_h`, with even sides as H.264 wants.
     pub fn fitted(&self, max_w: u32, max_h: u32) -> Frame {
+        self.fitted_ref(max_w, max_h).into_owned()
+    }
+
+    /// `fitted`, but a picture that fits already (a camera's usual 640x480) is not copied: it is up to 3 MB at 15 pictures a second.
+    pub fn fitted_ref(&self, max_w: u32, max_h: u32) -> std::borrow::Cow<'_, Frame> {
+        use std::borrow::Cow;
         let scale = (max_w as f32 / self.w as f32).min(max_h as f32 / self.h as f32).min(1.0);
         let w = (((self.w as f32 * scale) as u32) & !1).max(16);
         let h = (((self.h as f32 * scale) as u32) & !1).max(16);
         if (w, h) == (self.w, self.h) {
-            return self.clone();
+            return Cow::Borrowed(self);
         }
         let mut rgba = Vec::with_capacity(w as usize * h as usize * 4);
         for y in 0..h {
@@ -87,7 +93,7 @@ impl Frame {
                 rgba.extend_from_slice(&self.rgba[i..i + 4]);
             }
         }
-        Frame { w, h, rgba }
+        Cow::Owned(Frame { w, h, rgba })
     }
 }
 
@@ -145,7 +151,7 @@ impl Encoder {
         if !f.is_valid() {
             return Err("bad picture".into());
         }
-        let f = f.fitted(MAX_W, MAX_H);
+        let f = f.fitted_ref(MAX_W, MAX_H);
         if (self.h264.is_none() && self.vp8.is_none()) || self.size != (f.w, f.h) {
             self.open(f.w, f.h)?;
             self.key = true;
