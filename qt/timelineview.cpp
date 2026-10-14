@@ -1,6 +1,7 @@
 #include "qt/timelineview.h"
 #include "qt/avatar.h"
 #include "qt/emoji.h"
+#include "qt/imageload.h"
 #include "qt/theme.h"
 #include <QAbstractTextDocumentLayout>
 #include <QApplication>
@@ -9,7 +10,6 @@
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QHBoxLayout>
-#include <QImageReader>
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
@@ -19,6 +19,7 @@
 #include <QTextTable>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <functional>
 
 namespace vc {
 
@@ -90,21 +91,6 @@ static QString linkify(const QString &text)
     return out;
 }
 
-/* a picture from a file the engine downloaded (EXIF orientation applied), kept decoded */
-const QImage *TimelineView::picture(const QString &path)
-{
-    if (path.isEmpty()) return nullptr;
-    auto it = pictures_.constFind(path);
-    if (it != pictures_.cend()) return it->isNull() ? nullptr : &*it;
-    QImageReader rd(path);
-    rd.setAutoTransform(true);
-    const QSize full = rd.size(); /* the timeline never draws more than ~1000 px: do not keep a 50-megapixel photo in memory */
-    if (full.isValid() && qMax(full.width(), full.height()) > 1200) rd.setScaledSize(full.scaled(1200, 1200, Qt::KeepAspectRatio));
-    pictures_.insert(path, rd.read());
-    const QImage &img = pictures_[path];
-    return img.isNull() ? nullptr : &img;
-}
-
 /* a thin frame painted into a picture (device pixels). Its colour is the
  * inverse of the picture's average colour (sampled on a coarse grid), pushed to
  * black or white when that would blend into the picture or the timeline background */
@@ -132,6 +118,12 @@ static void frameImage(QImage &img, const QColor &bg, qreal dpr)
     fp.setBrush(Qt::NoBrush);
     const qreal h = qMax(1.0, dpr) / 2;
     fp.drawRect(QRectF(h, h, img.width() - 2 * h, img.height() - 2 * h));
+}
+
+/* `img` scaled into `box`; a null image stays null (QImage::scaled complains about those, and a picture whose file cannot be read is not an error) */
+static QImage scaledInto(const QImage &img, const QSize &box, Qt::AspectRatioMode mode)
+{
+    return img.isNull() ? QImage() : img.scaled(box, mode, Qt::SmoothTransformation);
 }
 
 static QHash<QUrl, QImage> *g_resStore = nullptr; /* the pictures of the render in progress: a new document gets them all */
@@ -174,6 +166,7 @@ TimelineView::TimelineView(bool thread, QWidget *parent) : QWidget(parent), thre
 }
 
 static const int kMaxShownChars = 20000;
+static const int kMinDrawnBytes = 24 << 20, kMaxDrawnBytes = 512 << 20; /* the picture cache of a view (see drawn_): never below / above this */
 
 TimelineView::~TimelineView() { stopInline(); }
 
@@ -337,6 +330,24 @@ void TimelineView::render()
     const QString muted = hex(pal.color(QPalette::PlaceholderText)), link = hex(pal.color(QPalette::Link));
     QTextDocument *doc = view_->document();
     const qreal dpr = devicePixelRatioF();
+    /* A picture is drawn small: a photo at most 480 x 320, a sticker 160, a link's picture 96, a custom emoji as high as text. The file is decoded
+       straight to that size, the finished picture (scaled, framed) is kept for the next redraw (every new message redraws the pictures in view)
+       and nothing else of it: it used to be a 1200 pixel copy of every file ever shown, and a redraw scaled them all again. The cache only has to
+       hold what is in view now plus some pictures of rooms visited lately: its limit follows what this redraw used. */
+    const QColor base = pal.color(QPalette::Base);
+    const QString look = QString::number(dpr) + QChar(1) + base.name();
+    qint64 drawnBytes = 0;
+    drawn_.setMaxCost(kMaxDrawnBytes); /* never evict what this redraw has just made */
+    auto drawn = [&](const QString &what, const QString &path, const std::function<QImage(const QString &)> &make) -> QImage {
+        if (path.isEmpty()) return QImage();
+        const QString key = what + QChar(1) + path + QChar(1) + look;
+        if (const QImage *hit = drawn_.object(key)) { drawnBytes += hit->sizeInBytes(); return *hit; }
+        const QImage img = make(path);
+        const qsizetype bytes = img.isNull() ? 1 : img.sizeInBytes(); /* a file that cannot be read is remembered too, at no cost */
+        drawn_.insert(key, new QImage(img), int(qMin<qsizetype>(bytes, kMaxDrawnBytes)));
+        drawnBytes += bytes;
+        return img;
+    };
 
     rowEvents_.clear();
     resHash_ = 0;
@@ -411,23 +422,29 @@ void TimelineView::render()
             content += "<span style=\"color:" + muted + "\">" + esc(foot) + "</span>";
             if (!ended && !eid.isEmpty() && B(r, "own")) content += " <a href=\"vc:pollend/" + enc(eid) + "\">End poll</a>";
         } else if (kind == "image") {
-            const QImage *img = picture(S(r, "image_path"));
-            if (img) {
+            const QSize box = QSize(480, 320) * dpr;
+            const QImage scaled = drawn("img", S(r, "image_path"), [&](const QString &p) {
+                QImage s = scaledInto(loadFitted(p, box), box, Qt::KeepAspectRatio);
+                frameImage(s, base, dpr);
+                s.setDevicePixelRatio(dpr);
+                return s;
+            });
+            if (!scaled.isNull()) {
                 const QString key = "img:" + eid;
-                QImage scaled = img->scaled(QSize(480, 320) * dpr, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-                frameImage(scaled, pal.color(QPalette::Base), dpr);
-                scaled.setDevicePixelRatio(dpr);
                 addRes(doc, resHash_, QUrl(key), scaled);
                 content = "<a href=\"vc:img:" + esc(eid) + "\"><img src=\"" + key + "\" width=" + QString::number(int(scaled.width() / dpr)) + "></a>";
             } else content = "<span style=\"color:" + muted + "\">Loading image...</span>";
             const QString fn = S(r, "file_name");
             if (!text.isEmpty() && text != "image" && text != fn) content += "<br>" + esc(text);
         } else if (kind == "sticker") { /* a picture without a frame, smaller than a photo */
-            const QImage *img = picture(S(r, "image_path"));
-            if (img) {
+            const QSize box = QSize(160, 160) * dpr;
+            const QImage scaled = drawn("stk", S(r, "image_path"), [&](const QString &p) {
+                QImage s = scaledInto(loadFitted(p, box), box, Qt::KeepAspectRatio);
+                s.setDevicePixelRatio(dpr);
+                return s;
+            });
+            if (!scaled.isNull()) {
                 const QString key = "stk:" + eid;
-                QImage scaled = img->scaled(QSize(160, 160) * dpr, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-                scaled.setDevicePixelRatio(dpr);
                 addRes(doc, resHash_, QUrl(key), scaled);
                 content = "<img src=\"" + key + "\" width=" + QString::number(int(scaled.width() / dpr)) + " title=\"" + esc(text) + "\">";
             } else content = "<span style=\"color:" + muted + "\">Loading sticker...</span>";
@@ -445,17 +462,20 @@ void TimelineView::render()
                         if (i + c >= n) { content += "<td></td>"; continue; }
                         const QJsonObject it = pics[i + c];
                         const QString href = "vc:img:" + esc(eid) + "%23" + QString::number(it.value("index").toInt());
-                        const QImage *img = picture(S(it, "image_path"));
-                        if (!img) { content += "<td width=" + QString::number(side) + " height=" + QString::number(side * 2 / 3) + " bgcolor=\"" + hex(pal.color(QPalette::AlternateBase)) + "\" align=center><span style=\"color:" + muted + "\">Loading...</span></td>"; continue; }
+                        const QImage t = drawn(n == 1 ? QStringLiteral("gal1") : "gal" + QString::number(side), S(it, "image_path"), [&](const QString &p) {
+                            QImage s;
+                            if (n == 1) { const QSize box = QSize(total, 320) * dpr; s = scaledInto(loadFitted(p, box), box, Qt::KeepAspectRatio); }
+                            else {
+                                const QSize box = QSize(side, side) * dpr;
+                                const QImage big = scaledInto(loadFitted(p, box, Qt::KeepAspectRatioByExpanding), box, Qt::KeepAspectRatioByExpanding);
+                                if (!big.isNull()) s = big.copy((big.width() - side * dpr) / 2, (big.height() - side * dpr) / 2, side * dpr, side * dpr);
+                            }
+                            frameImage(s, base, dpr);
+                            s.setDevicePixelRatio(dpr);
+                            return s;
+                        });
+                        if (t.isNull()) { content += "<td width=" + QString::number(side) + " height=" + QString::number(side * 2 / 3) + " bgcolor=\"" + hex(pal.color(QPalette::AlternateBase)) + "\" align=center><span style=\"color:" + muted + "\">Loading...</span></td>"; continue; }
                         const QString key = "gal:" + eid + "#" + QString::number(it.value("index").toInt());
-                        QImage t;
-                        if (n == 1) t = img->scaled(QSize(total, 320) * dpr, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-                        else {
-                            const QImage big = img->scaled(QSize(side, side) * dpr, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
-                            t = big.copy((big.width() - side * dpr) / 2, (big.height() - side * dpr) / 2, side * dpr, side * dpr);
-                        }
-                        frameImage(t, pal.color(QPalette::Base), dpr);
-                        t.setDevicePixelRatio(dpr);
                         addRes(doc, resHash_, QUrl(key), t);
                         content += "<td><a href=\"" + href + "\"><img src=\"" + key + "\" width=" + QString::number(int(t.width() / dpr)) + "></a></td>";
                     }
@@ -528,12 +548,16 @@ void TimelineView::render()
                 for (const QJsonValue &ev : r.value("emoji").toArray()) { /* custom emoji: the downloaded picture at text height, else its shortcode */
                     const QJsonObject e = ev.toObject();
                     const QString mxc = S(e, "mxc");
-                    const QImage *eimg = picture(S(e, "path"));
+                    const int line = int(22 * dpr);
+                    const QImage scaled = drawn("emo", S(e, "path"), [&](const QString &p) {
+                        const QImage got = loadFitted(p, QSize(1 << 20, line));
+                        QImage s = got.isNull() ? got : got.scaledToHeight(line, Qt::SmoothTransformation);
+                        s.setDevicePixelRatio(dpr);
+                        return s;
+                    });
                     QString repl;
-                    if (eimg) {
+                    if (!scaled.isNull()) {
                         const QString key = "emo:" + mxc;
-                        QImage scaled = eimg->scaledToHeight(int(22 * dpr), Qt::SmoothTransformation);
-                        scaled.setDevicePixelRatio(dpr);
                         addRes(doc, resHash_, QUrl(key), scaled);
                         repl = "<img src=\"" + key + "\" height=22 style=\"vertical-align:middle\">";
                     }
@@ -601,11 +625,16 @@ void TimelineView::render()
         const QJsonObject pv = r.value("preview").toObject(); /* a card for the first link, when previews are on */
         if (!pv.isEmpty()) {
             QString img;
-            if (const QImage *pi = picture(S(pv, "image_path"))) {
+            const int across = int(96 * dpr);
+            const QImage sc = drawn("pv", S(pv, "image_path"), [&](const QString &p) {
+                const QImage got = loadFitted(p, QSize(across, 1 << 20));
+                QImage s = got.isNull() ? got : got.scaledToWidth(across, Qt::SmoothTransformation);
+                frameImage(s, base, dpr);
+                s.setDevicePixelRatio(dpr);
+                return s;
+            });
+            if (!sc.isNull()) {
                 const QString key = "pv:" + eid;
-                QImage sc = pi->scaledToWidth(int(96 * dpr), Qt::SmoothTransformation);
-                frameImage(sc, pal.color(QPalette::Base), dpr);
-                sc.setDevicePixelRatio(dpr);
                 addRes(doc, resHash_, QUrl(key), sc);
                 img = "<td valign=top><img src=\"" + key + "\" width=96></td>";
             }
@@ -648,6 +677,8 @@ void TimelineView::render()
             html += "<tr><td></td><td colspan=2 align=right><font color=\"" + muted + "\" size=\"-1\">Read by " + esc(names.join(", ")) + "</font></td></tr>";
         }
     }
+
+    drawn_.setMaxCost(int(qBound<qint64>(qint64(kMinDrawnBytes), drawnBytes + drawnBytes / 4, qint64(kMaxDrawnBytes)))); /* what the next redraw needs plus a quarter, and at least some pictures of other rooms */
 
     /* One small table per message (rather than one table for the room): Qt lays that out about 40% faster, and it lets a change at the end of the
        room replace only the tables that changed instead of laying out everything again. */

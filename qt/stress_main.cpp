@@ -5,14 +5,23 @@
 
    Budgets are for a Release build; a Debug/ASan build gets 8x. Pass a name part to run only matching steps. */
 #include <QApplication>
+#include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
+#include <QFileInfo>
+#include <QImage>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QRandomGenerator>
 #include <QScrollBar>
+#include <QTemporaryDir>
 #include <QTextBrowser>
 #include <QTextDocument>
 #include <QWheelEvent>
 #include <cstdio>
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 #include "qt/memberlist.h"
 #include "qt/sidebar.h"
 #include "qt/timelineview.h"
@@ -51,6 +60,53 @@ static void settle()
     while (w.elapsed() < 300) QApplication::processEvents(QEventLoop::AllEvents, 20);
 }
 
+/* Resident anonymous memory of this process in KiB: the heap, image buffers and stacks, not the file-backed pages of the libraries. -1 without /proc. */
+static long rssAnonKiB()
+{
+    QFile f("/proc/self/status");
+    if (!f.open(QIODevice::ReadOnly)) return -1;
+    for (const QByteArray &l : f.readAll().split('\n')) if (l.startsWith("RssAnon:")) return l.mid(8).trimmed().split(' ').first().toLong();
+    return -1;
+}
+
+/* What a view really holds once it has settled: pending redraws done, free heap pages given back to the system. */
+static long heldKiB()
+{
+    settle();
+#ifdef __GLIBC__
+    malloc_trim(0);
+#endif
+    return rssAnonKiB();
+}
+
+/* Like step(), for memory: `f` may grow the process by `budgetKiB` at most (resident anonymous memory after everything has settled). */
+template <class F> static void memstep(const char *name, long budgetKiB, F f)
+{
+    if (!only.isEmpty() && !QString(name).contains(only, Qt::CaseInsensitive)) return;
+    const long before = heldKiB();
+    f();
+    const long grew = heldKiB() - before;
+    const bool ok = before < 0 || grew <= budgetKiB;
+    std::printf("%-58s %+8ld KiB  (budget %ld)  %s\n", name, grew, budgetKiB, ok ? "ok" : "TOO MUCH MEMORY");
+    std::fflush(stdout);
+    if (!ok) failures++;
+}
+
+/* A photo-like picture (a gradient with a little noise), so the JPEG and PNG files come out about as big as real ones. */
+static QImage photo(int w, int h, quint32 seed)
+{
+    QImage img(w, h, QImage::Format_RGB32);
+    QRandomGenerator rg(seed);
+    for (int y = 0; y < h; y++) {
+        QRgb *line = reinterpret_cast<QRgb *>(img.scanLine(y));
+        for (int x = 0; x < w; x++) {
+            const quint32 n = rg.generate();
+            line[x] = qRgb(int((x * 255LL / w + (n & 15)) & 255), int((y * 255LL / h + ((n >> 4) & 15)) & 255), int(((x + y) * 255LL / (w + h) + ((n >> 8) & 15)) & 255));
+        }
+    }
+    return img;
+}
+
 static QJsonObject message(int i, const QString &body, const QString &html = QString())
 {
     static const char *const who[] = {"zach", "ben", "matt", "ruben", "kab"};
@@ -87,6 +143,45 @@ int main(int argc, char **argv)
     tl.resize(900, 600);
     tl.show();
     app.processEvents();
+
+    /* ---- memory: what a long session shows (pictures, avatars) must not pile up. Photos and faces are made here, as real JPEG/PNG files. ---- */
+    QTemporaryDir farm;
+    QStringList photos, faces;
+    const bool wantMemory = farm.isValid() && (only.isEmpty() || only.contains("memory", Qt::CaseInsensitive));
+    if (wantMemory) {
+        for (int i = 0; i < 8; i++) { const QString p = farm.filePath(QString("photo%1.jpg").arg(i)); photo(4000, 3000, 100 + i).save(p, "JPEG", 85); photos << p; }
+        { const QString p = farm.filePath("shot.png"); photo(2560, 1440, 7).save(p, "PNG"); photos << p; }
+        for (int i = 0; i < 40; i++) { const QString p = farm.filePath(QString("face%1.jpg").arg(i)); photo(512, 512, 500 + i).save(p, "JPEG", 90); faces << p; }
+    }
+    /* the same file under a name of its own: the views key their pictures by path, so every link counts as another picture */
+    auto link = [&](const QString &base, const QString &tag) { const QString p = farm.filePath(tag + "." + QFileInfo(base).suffix()); QFile::link(base, p); return p; };
+    /* a room as the engine sends it: 60 messages, 12 of them pictures (some a PNG screenshot), a sticker, a gallery of four, every sender with a face */
+    auto room = [&](int r) {
+        QJsonArray rows;
+        for (int i = 0; i < 60; i++) {
+            QJsonObject m = message(i, QString("message %1 of room %2").arg(i).arg(r));
+            m["avatar_path"] = link(faces[(r * 5 + i % 5) % faces.size()], QString("face_r%1_s%2").arg(r).arg(i % 5));
+            if (i % 5 == 4) { m["kind"] = "image"; m["body"] = "photo.jpg"; m["file_name"] = "photo.jpg"; m["image_w"] = 4000; m["image_h"] = 3000; m["image_path"] = link(photos[(r + i) % photos.size()], QString("pic_r%1_%2").arg(r).arg(i)); }
+            else if (i == 7) { m["kind"] = "sticker"; m["image_path"] = link(photos[(r + 3) % photos.size()], QString("stk_r%1").arg(r)); }
+            else if (i == 21) {
+                m["kind"] = "gallery"; m["body"] = "";
+                QJsonArray g;
+                for (int k = 0; k < 4; k++) g.append(QJsonObject{{"index", k}, {"kind", "image"}, {"name", "g.jpg"}, {"size", 1000000}, {"image_path", link(photos[(r + k) % photos.size()], QString("gal_r%1_%2").arg(r).arg(k))}});
+                m["gallery"] = g;
+            }
+            rows.append(m);
+        }
+        return rows;
+    };
+    if (wantMemory) {
+        TimelineView mtl;
+        mtl.resize(900, 600);
+        mtl.show();
+        app.processEvents();
+        memstep("memory: 10 rooms of 14 pictures, visited 3 times", 60000, [&] {
+            for (int cycle = 0; cycle < 3; cycle++) for (int r = 0; r < 10; r++) { mtl.reset(); mtl.setRows(room(r)); settle(); }
+        });
+    }
 
     step("timeline: open a room of 50 000 messages", 1300, [&] { tl.setRows(messages(50000)); });
     step("timeline: scroll to the top and back 20 times", 800, [&] {

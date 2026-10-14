@@ -1,6 +1,7 @@
 #ifndef VC_QT_TIMELINEVIEW_H
 #define VC_QT_TIMELINEVIEW_H
 
+#include <QCache>
 #include <QElapsedTimer>
 #include <QHash>
 #include <QImage>
@@ -74,7 +75,6 @@ private:
     void resizeEvent(QResizeEvent *) override;
     bool eventFilter(QObject *obj, QEvent *ev) override;
     int anchorY(const QString &eventId);
-    const QImage *picture(const QString &path);
 
     bool thread_;
     QString me_, highlight_;
@@ -91,7 +91,7 @@ private:
     quint64 resHash_ = 0, lastRes_ = 0;
     QHash<QUrl, QImage> resources_;
     QHash<QUrl, QSize> resSizes_;
-    QHash<QString, QImage> pictures_;   /* decoded pictures by file path */
+    QCache<QString, QImage> drawn_;     /* the pictures as they are drawn (scaled to their box, framed), by file and look: what a redraw reuses; cost = bytes */
     QTextDocument *ownDoc_ = nullptr;
     size_t shownLimit_ = 100;
     QString windowStart_;
