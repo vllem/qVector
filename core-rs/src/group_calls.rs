@@ -26,7 +26,7 @@ use crate::rtc_peer::{CallPeer, PeerEvent, Playback, VideoDisplay};
 use crate::video::Frame;
 
 pub const GROUP_KEY: &str = "dev.qvector.group_id";
-const MEMBER_EVENT: &str = "dev.qvector.call.member";
+pub(crate) const MEMBER_EVENT: &str = "dev.qvector.call.member";
 /// While in a call we renew our entry this often...
 const HEARTBEAT_MS: u64 = 60_000;
 /// ...so an "active" entry older than this is a client that died without leaving.
@@ -202,11 +202,12 @@ impl GroupCalls {
         (group, people)
     }
 
-    async fn set_membership(&self, room: &Room, group_id: &str, active: bool) {
+    async fn set_membership(&self, room: &Room, group_id: &str, active: bool) -> Result<(), String> {
         let content = json!({"group_id": group_id, "active": active, "ts": now_ms()});
-        if let Err(e) = room.send_state_event_raw(MEMBER_EVENT, &self.me(), content).await {
+        room.send_state_event_raw(MEMBER_EVENT, &self.me(), content).await.map(|_| ()).map_err(|e| {
             eprintln!("group call: cannot update membership: {e}");
-        }
+            e.to_string()
+        })
     }
 
     async fn send(&self, room_id: &str, ty: &str, mut content: Value, group_id: &str, call_id: &str, party: &str) {
@@ -300,14 +301,18 @@ impl GroupCalls {
             tick.tick().await;
             loop {
                 tick.tick().await;
-                me.set_membership(&beat_room, &beat_group, true).await;
+                let _ = me.set_membership(&beat_room, &beat_group, true).await;
             }
         });
         if let Some(g) = self.group.lock().unwrap().as_mut() {
             g.tasks = vec![mic, mixer, heartbeat];
             self.emit("active", g);
         }
-        self.set_membership(&room, &group_id, true).await;
+        if let Err(e) = self.set_membership(&room, &group_id, true).await {
+            // without the entry nobody can see or ring us: say so instead of sitting alone in a "call"
+            self.leave().await;
+            return Err(format!("You are not allowed to start or join a group call in this room ({e})"));
+        }
         Ok(())
     }
 
@@ -323,7 +328,7 @@ impl GroupCalls {
         }
         if let Ok(rid) = <&matrix_sdk::ruma::RoomId>::try_from(g.room_id.as_str()) {
             if let Some(room) = self.client.get_room(rid) {
-                self.set_membership(&room, &g.group_id, false).await;
+                let _ = self.set_membership(&room, &g.group_id, false).await;
             }
         }
         for (call_id, l) in &g.links {
@@ -462,7 +467,7 @@ impl GroupCalls {
         let group_id = c["group_id"].as_str().unwrap_or("").to_string();
         let ts = c["ts"].as_u64().unwrap_or(0);
         let room_id = room.room_id().to_string();
-        if user.is_empty() || group_id.is_empty() {
+        if user.is_empty() || group_id.is_empty() || ev["sender"].as_str() != Some(user.as_str()) {
             return;
         }
         {
@@ -535,9 +540,21 @@ impl GroupCalls {
         if call_id.is_empty() || !ours {
             return;
         }
+        if ty != "m.call.invite" {
+            // a connection belongs to one person: nobody else may answer it, add candidates to it or hang it up
+            let owner = self.group.lock().unwrap().as_ref().and_then(|g| g.links.get(&call_id)).map(|l| l.user_id.clone());
+            if owner.as_deref() != Some(sender.as_str()) {
+                return;
+            }
+        }
         match ty {
             "m.call.invite" => {
                 if content["invitee"].as_str() != Some(&self.me()) {
+                    return;
+                }
+                // only someone who announced they are in this group call may ring us
+                let announced = self.presence.lock().unwrap().get(&room_id).and_then(|m| m.get(&sender)).map(|(g, _)| *g == group_id).unwrap_or(false);
+                if !announced {
                     return;
                 }
                 let age = now_ms().saturating_sub(ev["origin_server_ts"].as_u64().unwrap_or(now_ms()));

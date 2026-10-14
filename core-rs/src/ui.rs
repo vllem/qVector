@@ -424,6 +424,12 @@ pub async fn create_room_with(client: &Client, name: &str, topic: &str, encrypte
         let ev = InitialStateEvent::with_empty_state_key(RoomEncryptionEventContent::with_recommended_defaults());
         req.initial_state = vec![Raw::new(&ev).map_err(|e| e.to_string())?.cast_unchecked()];
     }
+    /* everybody may announce a group call: its presence is a state event, and state events need power level 50 unless the room says otherwise. The
+       server replaces the whole `events` map of its defaults, so those are repeated here. */
+    let levels = serde_json::json!({"events": {
+        "m.room.name": 50, "m.room.power_levels": 100, "m.room.history_visibility": 100, "m.room.canonical_alias": 50, "m.room.avatar": 50,
+        "m.room.tombstone": 100, "m.room.server_acl": 100, "m.room.encryption": 100, (crate::group_calls::MEMBER_EVENT): 0 }});
+    req.power_level_content_override = Raw::new(&levels).ok().map(|r| r.cast_unchecked());
     client.create_room(req).await.map(|r| r.room_id().to_string()).map_err(|e| e.to_string())
 }
 
