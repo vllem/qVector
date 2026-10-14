@@ -12,6 +12,7 @@
 #include <QGuiApplication>
 #include <QImage>
 #include <QJsonArray>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QListWidget>
 #include <QRandomGenerator>
@@ -97,6 +98,20 @@ template <class F> static void memstep(const char *name, long budgetKiB, F f)
     std::printf("%-58s %+8ld KiB  (budget %ld)  %s\n", name, grew, budgetKiB, ok ? "ok" : "TOO MUCH MEMORY");
     std::fflush(stdout);
     if (!ok) failures++;
+}
+
+/* a row with every field the engine sends (core-rs `UiMessage`), as it comes off the wire: JSON text parsed by Qt, which is what the view really holds per message */
+static QJsonArray engineRows(int n)
+{
+    QJsonArray src;
+    for (int i = 0; i < n; i++)
+        src.append(QJsonObject{{"id", QString("$event%1abcdefghijklmnopqrstuvwxyz0123456789:example.org").arg(i)}, {"sender", "Alice Example"}, {"sender_id", "@alice:example.org"},
+                               {"body", QString("message %1: the quick brown fox jumps over the lazy dog, again and again until the line wraps around the window").arg(i)}, {"html", ""}, {"kind", "text"},
+                               {"time", "12:34"}, {"ts", 1700000000000.0 + i}, {"own", false}, {"edited", false}, {"pending", false}, {"reply", QJsonValue()}, {"reactions", QJsonArray()},
+                               {"image_path", ""}, {"image_w", 0}, {"image_h", 0}, {"file_name", ""}, {"text_file", false}, {"size", 0}, {"seen_by", QJsonArray()}, {"thread_replies", 0},
+                               {"preview", QJsonValue()}, {"shield", QJsonValue()}, {"pinned", false}, {"poll", QJsonValue()}, {"gallery", QJsonArray()},
+                               {"avatar_path", "/home/user/.local/share/vector/vector/account/media/avatars/mxcexampleorgabcdefghijklmnop.img"}, {"emoji", QJsonArray()}});
+    return QJsonDocument::fromJson(QJsonDocument(src).toJson(QJsonDocument::Compact)).array();
 }
 
 /* A photo-like picture (a gradient with a little noise), so the JPEG and PNG files come out about as big as real ones. */
@@ -197,6 +212,9 @@ int main(int argc, char **argv)
             for (int i = 0; i < 600; i++) rooms.append(QJsonObject{{"id", QString("!m%1:hs").arg(i)}, {"title", QString("room %1").arg(i)}, {"section", "Rooms"}, {"unread", 0}, {"notify", "default"}, {"avatar_path", link(faces[i % faces.size()], QString("room_face%1").arg(i))}});
             msb.refresh(rooms, "", "");
         });
+        memstep("memory: a room of 100 messages, as the engine sends them", 1500, [&] { mtl.reset(); mtl.setRows(engineRows(100)); settle(); });
+        memstep("memory: a room of 5 000 messages loaded, 100 shown", 17000, [&] { mtl.reset(); mtl.setRows(engineRows(5000)); settle(); });
+        memstep("memory: the same room scrolled back, 3 000 shown", 28000, [&] { mtl.revealMessage("$event2000abcdefghijklmnopqrstuvwxyz0123456789:example.org"); settle(); });
         MemberList mml;
         mml.resize(240, 600);
         mml.show();
