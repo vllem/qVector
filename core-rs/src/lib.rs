@@ -12,7 +12,16 @@ use matrix_sdk_ui::timeline::RoomExt;
 
 /// Build a client for `homeserver` whose state (including all encryption keys) lives in an encrypted sqlite store under `dir`.
 pub async fn open_client(homeserver: &str, dir: &Path, passphrase: &str) -> Result<Client, matrix_sdk::ClientBuildError> {
-    Client::builder().homeserver_url(homeserver).sqlite_store(dir, Some(passphrase)).build().await
+    Client::builder().homeserver_url(homeserver).sqlite_store_with_config_and_cache_path(store_config(dir, passphrase), None::<&Path>).build().await
+}
+
+/// How much page cache each SQLite connection of the SDK's four stores may use. The SDK's default is 2 MB (a connection that has read a lot of a big
+/// database holds all of it) and a client has a dozen connections open; the operating system's cache holds the pages anyway.
+const SQLITE_CACHE_BYTES: u32 = 500_000;
+
+/// The SDK's sqlite stores under `dir`, sealed with `secret`.
+pub fn store_config(dir: &Path, secret: &str) -> matrix_sdk::SqliteStoreConfig {
+    matrix_sdk::SqliteStoreConfig::new(dir).passphrase(Some(secret)).cache_size(SQLITE_CACHE_BYTES)
 }
 
 /// Timelines are fed from the event cache, and its redecryptor (which re-reads messages that were unreadable when a room key arrives later: from a

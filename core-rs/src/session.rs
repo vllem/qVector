@@ -59,7 +59,7 @@ pub fn saved_key_secret(dir: &Path) -> Result<String, String> { key_secret(dir, 
 async fn build_client(homeserver: &str, dir: &Path, secret: &str) -> Result<Client, String> {
     let client = Client::builder()
         .server_name_or_homeserver_url(homeserver.trim())
-        .sqlite_store(store_dir(dir), Some(secret))
+        .sqlite_store_with_config_and_cache_path(crate::store_config(&store_dir(dir), secret), None::<&Path>)
         .build()
         .await
         .map_err(|e| format!("cannot reach {homeserver}: {e}"))?;
