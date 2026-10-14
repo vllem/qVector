@@ -91,6 +91,8 @@ private:
     void updateTitle();
     void updateStatus();
     void updateTopic();
+    int memberCount() const; /* the people in the open room: the room's count, as the list may hold only those the sync has brought */
+    void wantMembers();      /* the whole member list of a big room is not sent when it is opened: ask for it (once per room) when something needs it */
     void updateTabs();
     void showMain(bool main);
     QJsonArray mentionsIn(const QString &text);
@@ -208,6 +210,7 @@ private:
     QString user_, workspace_;
     QJsonArray rooms_;
     QJsonObject details_, session_;
+    QString membersAsked_; /* the room whose whole member list was last asked for */
     QHash<QString, QString> drafts_;
     bool notify_ = true;
 };

@@ -126,7 +126,11 @@ void MemberList::refresh(const QJsonObject &d)
     auto rankOf = [](const QString &role) { return role == "Admin" || role == "Creator" ? 0 : role == "Moderator" ? 1 : 2; };
     for (const QJsonValue &v : d["members"].toArray()) rows.append({v.toObject(), false, rankOf(v.toObject()["role"].toString())});
     for (const QJsonValue &v : d["banned"].toArray()) rows.append({v.toObject(), true, 4});
-    QString sig = d["id"].toString();
+    const bool complete = d.value("members_complete").toBool(true); /* a big room's list holds only the people the sync has brought until the rest is loaded */
+    const int total = d.value("member_count").toInt();
+    int shown = 0;
+    for (const Row &x : rows) if (!x.banned) shown++;
+    QString sig = d["id"].toString() + (complete ? QStringLiteral("#") : "~" + QString::number(total));
     for (const Row &x : rows) sig += "|" + x.m["user_id"].toString() + ":" + x.m["name"].toString() + ":" + QString::number(x.rank) + QString::number(x.m["verified"].toBool()) + QString::number(x.m["can_kick"].toBool()) + x.m["avatar_path"].toString() + presence_[x.m["user_id"].toString()].toString();
     if (sig == sig_) return;
     sig_ = sig;
@@ -136,6 +140,12 @@ void MemberList::refresh(const QJsonObject &d)
     const QPalette pal = palette();
     int lastRank = -1;
     const bool staff = !rows.isEmpty() && rows.first().rank < 2;
+    if (!complete) {
+        auto *note = new QListWidgetItem(QString("%1 of %2 people so far. Loading the rest...").arg(shown).arg(total));
+        note->setFlags(Qt::NoItemFlags);
+        note->setForeground(pal.color(QPalette::PlaceholderText));
+        addItem(note);
+    }
     for (const Row &x : rows) {
         if (x.rank != lastRank) {
             static const char *const HEAD[] = {"Admins", "Moderators", "Members", "Invited", "Banned"};

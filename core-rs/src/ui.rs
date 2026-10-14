@@ -160,9 +160,10 @@ pub async fn ui_rooms(client: &Client) -> Vec<UiRoom> {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct UiMember { pub user_id: String, pub name: String, pub role: String, pub can_kick: bool, pub can_ban: bool, pub verified: bool, pub avatar_mxc: String, pub avatar_path: String }
 
-/// What the room details panel shows.
+/// What the room details panel shows. `members` is everybody when `members_complete`; otherwise only the people the sync has brought (the ones who have
+/// written lately, see `crate::sync_settings`) and `member_count` is how many there are in all.
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct UiRoomDetails { pub id: String, pub name: String, pub topic: String, pub encrypted: bool, pub can_edit: bool, pub can_set_roles: bool, pub can_pin: bool, pub can_invite: bool, pub members: Vec<UiMember>, pub banned: Vec<UiMember> }
+pub struct UiRoomDetails { pub id: String, pub name: String, pub topic: String, pub encrypted: bool, pub can_edit: bool, pub can_set_roles: bool, pub can_pin: bool, pub can_invite: bool, pub member_count: u64, pub members_complete: bool, pub members: Vec<UiMember>, pub banned: Vec<UiMember> }
 
 /// The name to show for a room member; one that another member also has comes with the user id (spec: "Calculating the display name for a user").
 fn member_name(m: &matrix_sdk::room::RoomMember) -> String {
@@ -173,17 +174,26 @@ fn member_name(m: &matrix_sdk::room::RoomMember) -> String {
     }
 }
 
-/// Name, topic, encryption and the joined members (fetched in full: the sync only brings the ones it needs) of a room.
-pub async fn room_details(client: &Client, room_id: &str) -> Result<UiRoomDetails, String> {
+/// A room with at most this many people lists all of them as soon as it is opened (the member list is one request); a bigger one lists the people the sync has
+/// brought until the member list is opened (`load_members`): a room of 20 000 people is 10 MB of JSON, as many rows in the UI and a minute of waiting at every first open.
+pub const MEMBERS_AT_OPEN: u64 = 1000;
+
+/// Name, topic, encryption and the joined members of a room as it is opened: everybody, unless it is a big room whose member list has not been loaded.
+pub async fn room_details(client: &Client, room_id: &str) -> Result<UiRoomDetails, String> { room_details_for(client, room_id, false, MEMBERS_AT_OPEN).await }
+
+/// `room_details`, asking for the whole member list when `everybody` or when the room has at most `up_to` people (the sync only brings the ones it needs).
+pub async fn room_details_for(client: &Client, room_id: &str, everybody: bool, up_to: u64) -> Result<UiRoomDetails, String> {
     use matrix_sdk::RoomMemberships;
     let rid = <&matrix_sdk::ruma::RoomId>::try_from(room_id).map_err(|e| e.to_string())?;
     let room = client.get_room(rid).ok_or("unknown room")?;
+    let fetch = everybody || room.joined_members_count() <= up_to;
     let name = room.display_name().await.map(|n| n.to_string()).unwrap_or_else(|_| room_id.to_string());
     let encrypted = room.latest_encryption_state().await.map(|s| s.is_encrypted()).unwrap_or(false);
     let me = client.user_id().ok_or("not signed in")?.to_owned();
     let levels = room.power_levels().await.ok();
     let allowed = |f: &dyn Fn(&matrix_sdk::ruma::events::room::power_levels::RoomPowerLevels) -> bool| levels.as_ref().map(f).unwrap_or(false);
-    let mut members: Vec<UiMember> = room.members(RoomMemberships::JOIN).await.map_err(|e| e.to_string())?.iter().map(|m| UiMember {
+    let joined = if fetch { room.members(RoomMemberships::JOIN).await } else { room.members_no_sync(RoomMemberships::JOIN).await };
+    let mut members: Vec<UiMember> = joined.map_err(|e| e.to_string())?.iter().map(|m| UiMember {
         user_id: m.user_id().to_string(),
         name: member_name(m),
         role: match m.suggested_role_for_power_level() { matrix_sdk::room::RoomMemberRole::Creator => "Creator", matrix_sdk::room::RoomMemberRole::Administrator => "Admin", matrix_sdk::room::RoomMemberRole::Moderator => "Moderator", _ => "" }.into(),
@@ -200,12 +210,15 @@ pub async fn room_details(client: &Client, room_id: &str) -> Result<UiRoomDetail
     let can_invite = levels.as_ref().map(|l| l.user_can_invite(&me)).unwrap_or(false);
     let can_pin = allowed(&|l| l.user_can_send_state(&me, StateEventType::RoomPinnedEvents));
     let can_set_roles = allowed(&|l| l.user_can_send_state(&me, StateEventType::RoomPowerLevels));
-    let banned: Vec<UiMember> = room.members(RoomMemberships::BAN).await.map(|v| v.iter().map(|m| UiMember {
+    let banned = if fetch { room.members(RoomMemberships::BAN).await } else { room.members_no_sync(RoomMemberships::BAN).await };
+    let banned: Vec<UiMember> = banned.map(|v| v.iter().map(|m| UiMember {
         user_id: m.user_id().to_string(),
         name: member_name(m),
         role: String::new(), can_kick: false, can_ban: allowed(&|l| l.user_can_ban(&me)), verified: false, avatar_mxc: m.avatar_url().map(|u| u.to_string()).unwrap_or_default(), avatar_path: String::new(),
     }).collect()).unwrap_or_default();
-    Ok(UiRoomDetails { id: room_id.into(), name, topic: room.topic().unwrap_or_default(), encrypted, can_edit, can_set_roles, can_pin, can_invite, members, banned })
+    let members_complete = fetch || room.are_members_synced();
+    let member_count = if members_complete { members.len() as u64 } else { room.joined_members_count().max(members.len() as u64) };
+    Ok(UiRoomDetails { id: room_id.into(), name, topic: room.topic().unwrap_or_default(), encrypted, can_edit, can_set_roles, can_pin, can_invite, member_count, members_complete, members, banned })
 }
 
 /// Online status of people: user id -> "online", "unavailable" (away) or "offline". People the server will not tell about are left out
@@ -1701,6 +1714,81 @@ mod tests {
         assert!(d.encrypted);
         let names: Vec<_> = d.members.iter().map(|m| (m.name.as_str(), m.role.as_str())).collect();
         assert_eq!(names, vec![("alice", "Admin"), ("bob", "")], "{names:?}");
+    }
+
+    /// How many times the whole member list has been asked for.
+    fn member_list_requests(f: &Fixture) -> usize { f.hs.log().iter().filter(|l| l.starts_with("GET ") && l.contains("/members (")).count() }
+
+    fn localparts(members: &[matrix_sdk::room::RoomMember]) -> Vec<String> { let mut v: Vec<String> = members.iter().map(|m| m.user_id().localpart().to_string()).collect(); v.sort(); v }
+
+    #[tokio::test]
+    async fn every_sync_asks_for_lazy_loading_of_members_and_for_no_presence() {
+        let f = fixture().await;
+        crate::sync_once(&f.client).await.unwrap();
+        let filters: Vec<serde_json::Value> = f.hs.log().iter().filter_map(|l| l.strip_prefix("sync filter ")).filter_map(|j| serde_json::from_str(j).ok()).collect();
+        assert!(filters.len() >= 2, "the fixture's syncs and this one all sent a filter: {filters:?}");
+        for filter in &filters {
+            assert_eq!(filter["room"]["state"]["lazy_load_members"], true, "{filter}");
+            assert_eq!(filter["presence"]["not_types"], serde_json::json!(["*"]), "{filter}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_sync_brings_the_people_who_wrote_and_the_heroes_and_the_rest_wait_for_a_request() {
+        let f = fixture().await;
+        for n in ["carol", "dave", "erin", "frank", "gina", "hugo", "ivan"] { f.hs.add_member(n); }
+        f.hs.say_text("ivan", "I am here");
+        crate::sync_once(&f.client).await.unwrap();
+        wait_for(&f, |m| m.iter().any(|x| x.body == "I am here")).await;
+        let room = f.client.get_room(<&matrix_sdk::ruma::RoomId>::try_from(ROOM).unwrap()).unwrap();
+        assert_eq!(room.joined_members_count(), 9, "the summary has the count");
+        assert_eq!(localparts(&room.members_no_sync(matrix_sdk::RoomMemberships::JOIN).await.unwrap()), ["alice", "bob", "carol", "dave", "erin", "frank", "ivan"],
+            "us, the first five others (the heroes) and the one who wrote; not gina and hugo");
+        assert!(!room.are_members_synced());
+        assert_eq!(member_list_requests(&f), 0, "nothing asked for the whole list so far");
+        /* a big room: the details say so and list the ones that are known */
+        let part = room_details_for(&f.client, ROOM, false, 5).await.unwrap();
+        assert!(!part.members_complete);
+        assert_eq!((part.member_count, part.members.len()), (9, 7));
+        assert_eq!(member_list_requests(&f), 0, "still not");
+        /* asked for: one request, then everybody */
+        let all = room_details_for(&f.client, ROOM, true, 5).await.unwrap();
+        assert!(all.members_complete && all.member_count == 9 && all.members.len() == 9, "{}", all.members.len());
+        assert_eq!(member_list_requests(&f), 1);
+        assert!(room_details_for(&f.client, ROOM, false, 5).await.unwrap().members_complete, "what has been loaded stays");
+        assert_eq!(member_list_requests(&f), 1);
+    }
+
+    #[tokio::test]
+    async fn a_small_room_lists_everybody_when_it_is_opened() {
+        let f = fixture().await;
+        for n in ["carol", "dave", "erin", "frank", "gina"] { f.hs.add_member(n); }
+        crate::sync_once(&f.client).await.unwrap();
+        let d = room_details(&f.client, ROOM).await.unwrap();
+        assert!(d.members_complete && d.member_count == 7 && d.members.len() == 7, "{} {}", d.member_count, d.members.len());
+        assert_eq!(member_list_requests(&f), 1);
+    }
+
+    #[tokio::test]
+    async fn a_sender_nobody_has_heard_of_gets_a_name_and_a_picture_once_the_member_list_is_in() {
+        use matrix_sdk_ui::timeline::TimelineDetails;
+        let f = fixture().await;
+        f.hs.add_member("gina");
+        f.hs.add_member("hugo"); /* alice's heroes are bob, gina and hugo: add more people so that gina is not one of them */
+        for n in ["ivan", "jack", "kate"] { f.hs.add_member(n); }
+        f.hs.set_history_by(&["kate"], 2);
+        f.hs.say_text("alice", "newest"); /* not sent through the timeline: sending into an encrypted room asks for the whole member list first */
+        wait_for(&f, |m| m.iter().any(|x| x.body == "newest")).await;
+        for _ in 0..3 { if load_older(&f.timeline).await.unwrap_or(false) { break; } }
+        wait_for(&f, |m| m.iter().filter(|x| x.body.starts_with("old message")).count() == 2).await;
+        let profile = |items: Vec<Arc<TimelineItem>>| items.iter().filter_map(|i| i.as_event()).find(|e| e.sender().as_str() == "@kate:hs").map(|e| e.sender_profile().clone());
+        let before = profile(items_of(&f).await).unwrap();
+        assert!(matches!(before, TimelineDetails::Unavailable), "kate wrote long ago and her member event never came: {before:?}");
+        assert_eq!(ui_messages(&items_of(&f).await, "@alice:hs").iter().find(|m| m.sender_id == "@kate:hs").unwrap().sender, "kate", "her user name stands in for her name");
+        f.timeline.fetch_members().await;
+        let after = profile(items_of(&f).await).unwrap();
+        match after { TimelineDetails::Ready(p) => assert_eq!(p.avatar_url.as_deref().map(|u| u.as_str()), Some("mxc://hs/av_kate")), other => panic!("{other:?}") }
+        assert_eq!(member_list_requests(&f), 1);
     }
 
     #[tokio::test]

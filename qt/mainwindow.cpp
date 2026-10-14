@@ -658,6 +658,7 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     connect(timeline_, &TimelineView::openRequested, this, &MainWindow::openPicture);
     composer_->candidates = [this](const QString &prefix) {
         QList<Composer::Candidate> out;
+        wantMembers(); /* a big room: only the people who have written are known until the list is loaded */
         for (const QJsonValue &v : details_["members"].toArray()) {
             const QJsonObject m = v.toObject();
             if (S(m, "user_id") == user_) continue;
@@ -1053,10 +1054,23 @@ void MainWindow::updateTitle()
     if (tray_ && unread != trayUnread_) { trayUnread_ = unread; tray_->setIcon(QIcon(trayPixmap(unread, 64))); } /* a new tray icon is a message to the desktop: only when the badge changes */
 }
 
+int MainWindow::memberCount() const
+{
+    const QJsonValue c = details_.value("member_count");
+    return c.isDouble() ? c.toInt() : details_.value("members").toArray().size();
+}
+
+void MainWindow::wantMembers()
+{
+    if (current_.isEmpty() || details_.value("members_complete").toBool(true) || membersAsked_ == current_) return;
+    membersAsked_ = current_;
+    core_->call("load_members", {{"room_id", current_}});
+}
+
 void MainWindow::updateTopic()
 {
     topic_->setText(S(details_, "topic").simplified());
-    const int n = details_["members"].toArray().size();
+    const int n = memberCount();
     membersBtn_->setText(current_.isEmpty() ? QString() : QString("%1 members").arg(n));
     membersBtn_->setVisible(!current_.isEmpty());
     callBtn_->setVisible(!current_.isEmpty() && n == 2); /* a call needs exactly one other person */
@@ -1068,7 +1082,7 @@ void MainWindow::updateTopic()
 void MainWindow::updateGroupButton()
 {
     const int others = groupPeople_.value(current_);
-    const int n = details_["members"].toArray().size();
+    const int n = memberCount();
     groupBtn_->setVisible(!current_.isEmpty() && (n > 2 || others > 0));
     groupBtn_->setText(inGroup_ ? "Back to call" : others > 0 ? QString("Join call (%1)").arg(others) : "Group call");
     groupBtn_->setToolTip("A call with everybody in this room who uses qVector (Element cannot join it)");
@@ -1287,7 +1301,7 @@ void MainWindow::saveAttachment(const QString &eventId)
 void MainWindow::toggleMembers()
 {
     memberList_->setVisible(!memberList_->isVisible());
-    if (memberList_->isVisible()) { memberList_->setMe(user_); memberList_->refresh(details_); }
+    if (memberList_->isVisible()) { memberList_->setMe(user_); memberList_->refresh(details_); membersAsked_.clear(); wantMembers(); }
     layoutPanes();
 }
 

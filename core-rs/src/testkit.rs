@@ -18,6 +18,7 @@ struct Dev {
     to_device: VecDeque<Value>,
     room_pos: usize,
     state_sent: bool,
+    members_sent: std::collections::BTreeSet<String>, /* whose member events a lazy-loading sync has already carried to this device (local parts) */
     told: std::collections::BTreeSet<String>, /* extra rooms already announced, "inv:<id>" / "join:<id>" */
 }
 
@@ -47,6 +48,7 @@ struct State {
     emoji_pack: bool, /* the demo room has a custom emoji pack (media emoji_cat / emoji_wave are seeded with it) */
     presence: BTreeMap<String, String>, /* user local part -> presence state set by the user (bob is online unless set) */
     members: Vec<String>, /* who has joined ROOM (local parts): alice and bob, plus whoever `add_member` added */
+    room_name: Option<String>, /* ROOM's name, once `name_room` gave it one (a room without a name is called after its first few members) */
     sync_mark: BTreeMap<String, (usize, u64)>, /* per user and device: (events, counter) when its last /sync was answered, to tell an idle poll from a busy one */
 }
 
@@ -345,11 +347,17 @@ impl FakeHs {
             }
             json!({"failures": {}})
         }).await;
-        mount("GET", r"^/_matrix/client/v3/sync$", |st, who, _| {
+        mount("GET", r"^/_matrix/client/v3/sync$", |st, who, req| {
             st.syncs += 1;
             let n = st.events.len();
             let member_names = st.members.clone();
-            let mut state_events = room_state(&member_names.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+            /* A client that asks for lazy loading (`room.state.lazy_load_members` in its filter) is sent member events only for the people whose events the sync carries,
+               itself and the room's heroes (the first few others, which the room's name is made of), and a summary that has the counts. */
+            let filter: Value = req.url.query_pairs().find(|(k, _)| k == "filter").and_then(|(_, f)| serde_json::from_str(&f).ok()).unwrap_or(Value::Null);
+            let lazy = filter["room"]["state"]["lazy_load_members"] == true;
+            if !filter.is_null() { st.log.push(format!("sync filter {filter}")); }
+            let mut state_events = room_state(&if lazy { vec![] } else { member_names.iter().map(|s| s.as_str()).collect::<Vec<_>>() });
+            if let Some(name) = &st.room_name { state_events.push(json!({"type": "m.room.name", "state_key": "", "sender": "@alice:hs", "event_id": "$roomname", "origin_server_ts": 8, "content": {"name": name}})); }
             if st.emoji_pack {
                 state_events.push(json!({"type": "im.ponies.room_emotes", "state_key": "cats", "sender": "@alice:hs", "event_id": "$emotes", "origin_server_ts": 7, "content": {"pack": {"display_name": "Cats"},
                     "images": {"cat": {"url": "mxc://hs/emoji_cat", "info": {"w": 64, "h": 64, "mimetype": "image/png"}}, "wave": {"url": "mxc://hs/emoji_wave", "usage": ["sticker"], "info": {"w": 64, "h": 64, "mimetype": "image/png"}}}}}));
@@ -364,6 +372,21 @@ impl FakeHs {
             u.state_sent = true;
             let counts = otk_counts(u);
             let events = st.events[from..].to_vec();
+            let me_local = user_of(who);
+            let heroes: Vec<String> = member_names.iter().filter(|m| **m != me_local).take(5).cloned().collect();
+            let mut new_members: Vec<Value> = vec![];
+            if lazy {
+                let local = |id: &str| id.trim_start_matches('@').split(':').next().unwrap_or("").to_string();
+                let mut needed: Vec<String> = events.iter().filter_map(|e| e["sender"].as_str()).map(local).collect();
+                needed.push(me_local.clone());
+                needed.extend(heroes.iter().cloned());
+                needed.sort();
+                needed.dedup();
+                let u = st.users.entry(me_local.clone()).or_default().devices.entry(split_who(who).1).or_default();
+                for who in needed {
+                    if let Some(at) = member_names.iter().position(|m| *m == who) { if u.members_sent.insert(who.clone()) { new_members.push(member_event(&who, 10 + at as u64)); } }
+                }
+            }
             let mut invite = serde_json::Map::new();
             let mut joined = serde_json::Map::new();
             let rooms = st.extra_rooms.clone();
@@ -395,13 +418,16 @@ impl FakeHs {
                 let acc = json!({"events": [{"type": "m.tag", "content": {"tags": tag_map}}]});
                 match joined.get_mut(room) { Some(j) => { j["account_data"] = acc; } None => { if room != ROOM { joined.insert(room.clone(), json!({"account_data": acc})); } } }
             }
-            joined.insert(ROOM.to_string(), json!({
+            let mut shown_state = if first { state_events } else { vec![] };
+            shown_state.extend(new_members);
+            let mut room_entry = json!({
                 "account_data": json!({"events": [{"type": "m.tag", "content": {"tags": st.tags.get(ROOM).map(|t| t.iter().map(|x| (x.clone(), json!({}))).collect::<serde_json::Map<String, Value>>()).unwrap_or_default()}}]}),
                 "ephemeral": {"events": [{"type": "m.typing", "content": {"user_ids": typing}}, {"type": "m.receipt", "content": receipts}]},
-                "state": {"events": if first { state_events } else { vec![] }},
+                "state": {"events": shown_state},
                 "timeline": {"events": events, "limited": false, "prev_batch": "pb0"}
-            }));
-            let me_local = user_of(who);
+            });
+            if lazy { room_entry["summary"] = json!({"m.heroes": heroes.iter().map(|h| format!("@{h}:hs")).collect::<Vec<_>>(), "m.joined_member_count": member_names.len(), "m.invited_member_count": 0}); }
+            joined.insert(ROOM.to_string(), room_entry);
             let other = if me_local == "alice" { "bob" } else { "alice" }; /* ROOM doubles as the direct chat between the two */
             let mut account: Vec<Value> = st.users.get(&me_local).map(|u| u.account_data.iter().map(|(t, c)| json!({"type": t, "content": c})).collect()).unwrap_or_default();
             account.push(json!({"type": "m.direct", "content": {format!("@{other}:hs"): [ROOM]}}));
@@ -687,10 +713,23 @@ impl FakeHs {
     pub fn read_by(&self, user: &str, event_id: &str) { let mut st = self.st.lock().unwrap(); st.reads.retain(|r| r.0 != user); st.reads.push((user.into(), event_id.into())); }
 
     /// `count` old plain-text messages from bob that only /messages knows (the sync does not bring them), oldest first.
-    pub fn set_history(&self, count: usize) {
+    pub fn set_history(&self, count: usize) { self.set_history_by(&["bob"], count) }
+
+    /// `set_history`, written by these people (local parts) in turn.
+    pub fn set_history_by(&self, senders: &[&str], count: usize) {
         let mut st = self.st.lock().unwrap();
-        st.history = (0..count).map(|i| json!({"type": "m.room.message", "room_id": ROOM, "sender": "@bob:hs", "event_id": format!("$old{i}"), "origin_server_ts": 1_000 + i as u64,
+        st.history = (0..count).map(|i| json!({"type": "m.room.message", "room_id": ROOM, "sender": format!("@{}:hs", senders[i % senders.len()]), "event_id": format!("$old{i}"), "origin_server_ts": 1_000 + i as u64,
             "content": {"msgtype": "m.text", "body": format!("old message {i}")}})).collect();
+    }
+
+    /// `sender` (a local part) says `body` in the room as a plain, unencrypted text message. Returns the event id.
+    pub fn say_text(&self, sender: &str, body: &str) -> String {
+        let mut st = self.st.lock().unwrap();
+        st.counter += 1;
+        let id = format!("$say{}", st.counter);
+        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(1000) + st.counter;
+        st.events.push(json!({"type": "m.room.message", "sender": format!("@{sender}:hs"), "event_id": id, "origin_server_ts": ts, "content": {"msgtype": "m.text", "body": body}}));
+        id
     }
 
     /// A room alice is already in, called `name`; returns its id.
@@ -710,6 +749,9 @@ impl FakeHs {
         st.extra_rooms.push((id.clone(), name.into(), true, children.iter().map(|c| c.to_string()).collect()));
         id
     }
+
+    /// Give `ROOM` a name (from the next first sync on).
+    pub fn name_room(&self, name: &str) { self.st.lock().unwrap().room_name = Some(name.to_string()); }
 
     /// Another person in `ROOM` (they sign in as that user): for tests with more than two people.
     pub fn add_member(&self, name: &str) {

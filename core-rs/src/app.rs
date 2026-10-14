@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use matrix_sdk::{config::SyncSettings, Client};
+use matrix_sdk::Client;
 use matrix_sdk_ui::timeline::Timeline;
 use serde_json::{json, Value};
 use tokio::runtime::Runtime;
@@ -66,7 +66,6 @@ struct Inner {
     live_rooms: Mutex<HashSet<matrix_sdk::ruma::OwnedRoomId>>,
     index: Mutex<Option<Arc<Mutex<MessageIndex>>>>,
     avatars: crate::avatars::Avatars,
-    user_mxc: Mutex<HashMap<String, Option<String>>>, /* "room|user" -> that member's avatar address */
     bookmarks: Mutex<Option<Bookmarks>>,
     focused: AtomicBool,
     previews_on: AtomicBool,
@@ -123,9 +122,10 @@ impl Inner {
 
     fn avatar_dir(&self) -> PathBuf { self.dir().join("media").join("avatars") }
 
-    /// Room details with the members' pictures: those already downloaded are in, the rest are fetched and the details are sent again.
-    async fn send_details(&self, client: &Client, room_id: &str) {
-        let Ok(mut d) = ui::room_details(client, room_id).await else { return };
+    /// Room details with the members' pictures: those already downloaded are in, the rest are fetched and the details are sent again. `everybody`: the whole member
+    /// list, however big the room (otherwise a big room whose list has not been loaded gives the people the sync has brought, see `ui::MEMBERS_AT_OPEN`).
+    async fn send_details(&self, client: &Client, room_id: &str, everybody: bool) {
+        let Ok(mut d) = ui::room_details_for(client, room_id, everybody, ui::MEMBERS_AT_OPEN).await else { return };
         let fill = |d: &mut ui::UiRoomDetails| { for m in d.members.iter_mut().chain(d.banned.iter_mut()) { m.avatar_path = self.avatars.path(&m.avatar_mxc); } };
         fill(&mut d);
         self.emit_json("details", &d);
@@ -154,7 +154,7 @@ impl App {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("tokio runtime");
         let inner = Arc::new(Inner {
             sink, signout: Default::default(), wake: Default::default(), identity_due: AtomicBool::new(true), data_dir: Mutex::new(data_dir), client: Mutex::new(None), secret: Mutex::new(None), verifier: Mutex::new(None), calls: Mutex::new(None), video_sink: Mutex::new(None), groups: Mutex::new(None), tasks: Mutex::new(Tasks::default()),
-            timeline: Default::default(), thread: Default::default(), images: Default::default(), thumbs: tokio::sync::watch::channel(true).0, opening: Default::default(), previews: Default::default(), live_rooms: Default::default(), index: Default::default(), avatars: Default::default(), user_mxc: Default::default(),
+            timeline: Default::default(), thread: Default::default(), images: Default::default(), thumbs: tokio::sync::watch::channel(true).0, opening: Default::default(), previews: Default::default(), live_rooms: Default::default(), index: Default::default(), avatars: Default::default(),
             bookmarks: Default::default(), focused: AtomicBool::new(true), previews_on: AtomicBool::new(false), busy: AtomicBool::new(false),
             screen: Mutex::new("login".into()),
             #[cfg(feature = "testkit")]
@@ -266,6 +266,7 @@ impl App {
                 Value::Null
             }
             "set_previews" => { i.previews_on.store(b(args, "on"), Ordering::Relaxed); Value::Null }
+            "load_members" => self.load_members(&s(args, "room_id")),
             "set_thumbnails" => { i.thumbs.send_if_modified(|on| { let now = b(args, "on"); std::mem::replace(on, now) != now }); Value::Null }
             "search_emoji" => json!(crate::emoji::search(&s(args, "query"), args["limit"].as_u64().unwrap_or(160) as usize)),
             "account_info" => match i.client() {
@@ -444,6 +445,10 @@ impl App {
         hs.invite_alice("Bob's club");
         hs.set_history(40);
         hs.seed_emoji_pack();
+        if let Some(n) = std::env::var("VC_DEMO_MEMBERS").ok().and_then(|n| n.parse::<usize>().ok()) { /* dev aid: a big room (the member list is not loaded until it is opened) */
+            hs.name_room("bob");
+            for k in 0..n { hs.add_member(&format!("user{k}")); }
+        }
         hs.put_picture("demo", include_bytes!("demo_photo.jpg").to_vec(), Some(include_bytes!("demo_photo_thumb.jpg").to_vec()));
         hs.say_picture("bob", "demo", Some(3_000_000), None); /* the timeline shows the server's thumbnail; opening it fetches the whole picture */
         let plans = hs.add_room("Plans");
@@ -490,7 +495,7 @@ impl App {
         }
         {   /* name, topic, members: for the header and the details panel */
             let (client, id, i) = (client.clone(), id.clone(), i.clone());
-            self.rt().spawn(async move { i.send_details(&client, &id).await; });
+            self.rt().spawn(async move { i.send_details(&client, &id, false).await; });
         }
         let handle = self.rt().spawn(async move {
             use futures_util::StreamExt;
@@ -499,6 +504,10 @@ impl App {
             let Ok(timeline) = ui::open_timeline(&room).await else { return };
             let timeline = Arc::new(timeline);
             *i.timeline.lock().await = Some(timeline.clone());
+            if room.are_members_synced() || room.joined_members_count() <= ui::MEMBERS_AT_OPEN { /* a small room: everybody's names and pictures (the sync brought only the people who wrote lately) */
+                let tl = timeline.clone();
+                tokio::spawn(async move { tl.fetch_members().await; });
+            }
             let me = client.user_id().map(|u| u.to_string()).unwrap_or_default();
             let (initial, mut stream) = timeline.subscribe().await;
             let mut items: Vec<_> = initial.iter().cloned().collect();
@@ -511,17 +520,14 @@ impl App {
                 let mut rows = ui::ui_messages_with(&items, &me, &have);
                 let pinned = ui::pinned_ids(&client, &id);
                 for r in rows.iter_mut() { r.pinned = pinned.contains(&r.id); }
-                {   /* the senders' pictures: what is downloaded is in the rows, the rest is looked up and fetched below */
-                    let senders: Vec<String> = { let mut v: Vec<String> = rows.iter().map(|r| r.sender_id.clone()).collect(); v.sort(); v.dedup(); v };
-                    for u in &senders {
-                        let key = format!("{id}|{u}");
-                        if !i.user_mxc.lock().unwrap().contains_key(&key) {
-                            let mxc = match <&matrix_sdk::ruma::UserId>::try_from(u.as_str()) { Ok(uid) => room.get_member_no_sync(uid).await.ok().flatten().and_then(|m| m.avatar_url().map(|a| a.to_string())), Err(_) => None };
-                            i.user_mxc.lock().unwrap().insert(key, mxc);
-                        }
-                    }
-                    /* one look-up per sender, not per row (and no copy of the whole map) */
-                    let paths: HashMap<&str, String> = { let known = i.user_mxc.lock().unwrap(); senders.iter().filter_map(|u| known.get(&format!("{id}|{u}")).cloned().flatten().map(|m| (u.as_str(), i.avatars.path(&m)))).collect() };
+                /* The senders' pictures: the timeline's own profile of a sender says where the picture is (the SDK fills it in when the member's event arrives or the member list is
+                   loaded, and changes it when the member changes it); what is downloaded is in the rows, the rest is fetched below. One look-up per sender, not per row. */
+                let sender_mxc: HashMap<&str, &matrix_sdk::ruma::MxcUri> = items.iter().filter_map(|x| x.as_event()).filter_map(|e| match e.sender_profile() {
+                    matrix_sdk_ui::timeline::TimelineDetails::Ready(p) => p.avatar_url.as_deref().map(|u| (e.sender().as_str(), u)),
+                    _ => None,
+                }).collect();
+                {
+                    let paths: HashMap<&str, String> = sender_mxc.iter().map(|(u, m)| (*u, i.avatars.path(m.as_str()))).collect();
                     for r in rows.iter_mut() { if let Some(p) = paths.get(r.sender_id.as_str()) { r.avatar_path = p.clone(); } }
                 }
                 for r in rows.iter_mut() { for e in r.emoji.iter_mut() { e.path = i.avatars.path(&e.mxc); } }
@@ -544,7 +550,7 @@ impl App {
                     slow("pictures");
                     if !added.is_empty() { Arc::make_mut(&mut i.images.lock().unwrap()).extend(added); return true; } /* show the pictures that just arrived */
                     {
-                        let wanted: Vec<String> = { let known = i.user_mxc.lock().unwrap(); rows.iter().filter_map(|r| known.get(&format!("{id}|{}", r.sender_id)).cloned().flatten()).filter(|m| i.avatars.wanted(m)).take(4).collect() };
+                        let wanted: Vec<String> = { let mut seen = HashSet::new(); rows.iter().rev().filter_map(|r| sender_mxc.get(r.sender_id.as_str())).filter(|m| seen.insert(m.as_str())).filter(|m| i.avatars.wanted(m.as_str())).take(4).map(|m| m.to_string()).collect() };
                         for m in &wanted { i.avatars.fetch(&client, m, &i.avatar_dir()).await; }
                         slow("avatars");
                         if !wanted.is_empty() { return true; }
@@ -690,7 +696,20 @@ impl App {
             i.notice(match result { Ok(t) => t.to_string(), Err(e) => format!("Failed: {e}") });
             tokio::time::sleep(Duration::from_millis(800)).await; /* let the sync bring the new state */
             let _ = crate::sync_once(&client).await;
-            i.send_details(&client, &room).await;
+            i.send_details(&client, &room, false).await;
+        });
+        Value::Null
+    }
+
+    /// The whole member list of a room, however big (the member list was opened): one request, then the senders that had no name or picture get them.
+    fn load_members(&self, room_id: &str) -> Value {
+        let (i, id) = (self.inner.clone(), room_id.to_string());
+        self.rt().spawn(async move {
+            let Some(client) = i.client() else { return };
+            let Some(room) = <&matrix_sdk::ruma::RoomId>::try_from(id.as_str()).ok().and_then(|rid| client.get_room(rid)) else { return };
+            if let Err(e) = room.sync_members().await { i.notice(format!("Could not load the member list: {e}")); return; }
+            if let Some(tl) = i.open_timeline_of().await.filter(|t| t.room().room_id() == room.room_id()) { tl.fetch_members().await; } /* names and pictures of the senders that had none */
+            i.send_details(&client, &id, true).await;
         });
         Value::Null
     }
@@ -848,7 +867,7 @@ async fn network_loop(i: Arc<Inner>, client: Client) {
     let mut failures = 0u32;
     loop {
         let started = std::time::Instant::now();
-        match client.sync_once(SyncSettings::default().timeout(SYNC_TIMEOUT)).await {
+        match client.sync_once(crate::sync_settings().timeout(SYNC_TIMEOUT)).await {
             Ok(response) => {
                 failures = 0;
                 i.live_rooms.lock().unwrap().extend(response.rooms.joined.keys().cloned());
@@ -1047,6 +1066,28 @@ mod tests {
         let hs = app.inner.fake.lock().unwrap().clone().unwrap();
         assert_eq!(hs.log().iter().filter(|l| l.starts_with("download pic_photo")).count(), 1);
         assert_eq!(hs.log().iter().filter(|l| l.starts_with("thumbnail pic_photo")).count(), 1);
+    }
+
+    #[test]
+    fn a_big_room_opens_with_the_people_the_sync_brought_and_the_rest_when_the_member_list_is_asked_for() {
+        let (app, mut probe, _dir) = app();
+        let fake = app.call("start_fake_server", &Value::Null);
+        let hs = app.inner.fake.lock().unwrap().clone().unwrap();
+        for n in 0..1100 { hs.add_member(&format!("user{n}")); } /* a big room: above `ui::MEMBERS_AT_OPEN` */
+        app.call("login", &json!({"homeserver": fake["homeserver"], "user": "alice", "password": "x"}));
+        probe.wait("state", |v| v["screen"] == "main");
+        probe.wait("rooms", |v| v.as_array().map(|a| a.iter().any(|r| r["id"] == crate::testkit::ROOM)).unwrap_or(false));
+        app.call("select_room", &json!({"room_id": crate::testkit::ROOM}));
+        let d = probe.wait("details", |v| v["id"] == crate::testkit::ROOM);
+        assert_eq!(d["members_complete"], false, "{}", d["members"].as_array().map_or(0, |a| a.len()));
+        assert_eq!(d["member_count"], 1102, "the count is the room's, not the list's");
+        assert!(d["members"].as_array().unwrap().len() < 20, "only the people the sync brought: {}", d["members"].as_array().unwrap().len());
+        assert!(!hs.log().iter().any(|l| l.starts_with("GET ") && l.contains("/members (")), "opening the room did not ask for the member list");
+        app.call("load_members", &json!({"room_id": crate::testkit::ROOM}));
+        let d = probe.wait("details", |v| v["members_complete"] == true);
+        assert_eq!(d["members"].as_array().unwrap().len(), 1102);
+        assert_eq!(d["member_count"], 1102);
+        assert_eq!(hs.log().iter().filter(|l| l.starts_with("GET ") && l.contains("/members (")).count(), 1);
     }
 
     #[test]

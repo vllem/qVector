@@ -36,9 +36,21 @@ pub async fn login_password(client: &Client, user: &str, password: &str, device_
     Ok(())
 }
 
+/// What every sync asks for. The members of a room come only for the people whose events the sync carries (`lazy_load_members`: a first sign-in used to download every
+/// member of every room, tens of thousands of events for a big one); the whole list is asked for when it is wanted (`ui::room_details` for a small room or when the
+/// member list is opened, and the SDK itself before the first message is sent in an encrypted room). No presence at all: the SDK stores every presence event of everybody
+/// one shares a room with and the UI never reads them (it asks the server about the people it shows).
+pub fn sync_settings() -> SyncSettings {
+    use matrix_sdk::ruma::api::client::{filter::{FilterDefinition, LazyLoadOptions}, sync::sync_events::v3::Filter};
+    let mut filter = FilterDefinition::default();
+    filter.room.state.lazy_load_options = LazyLoadOptions::Enabled { include_redundant_members: false };
+    filter.presence.not_types = vec!["*".to_owned()];
+    SyncSettings::default().filter(Filter::FilterDefinition(filter))
+}
+
 /// One round of /sync.
 pub async fn sync_once(client: &Client) -> matrix_sdk::Result<()> {
-    client.sync_once(SyncSettings::default().timeout(std::time::Duration::from_millis(0))).await?;
+    client.sync_once(sync_settings().timeout(std::time::Duration::from_millis(0))).await?;
     Ok(())
 }
 

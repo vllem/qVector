@@ -102,8 +102,15 @@ heap that reuses freed memory, so they read lower (a regression of 10 MB in the 
   asks for `fetch_media` and `media_file` opens the viewer (a gallery item or "Save as" always fetches the original). Files are named `<id>.<ext>` (the picture) and `<id>-t.img`
   (a thumbnail), written through `.part` and renamed, and found again after a restart without asking the server (the picture wins over a thumbnail). A call fetches at most 8 pictures,
   the newest first. Not covered: the pictures qVector sends itself carry no thumbnail (so in an encrypted room others download them whole), GIFs are still frames in the timeline anyway.
-* Not done, with what it would give: the sync has no filter, so the first sign-in of an account downloads every member of every room (`lazy_load_members` and no
-  `presence` in a `FilterDefinition`; the SDK stores presence events the UI never reads); a non-PIE link (another 4 MB resident, but no ASLR for our code); `max_blocking_threads`; a timeline window that drops far-away messages from the document. Qt loads all 11 image plugins (1.6 MB) at the first
+* The sync filter (`crate::sync_settings`, used by `network_loop` and `sync_once`): `lazy_load_members` and no presence. A first sign-in used to download every member of every
+  room (tens of MB for a 20 000-person room) and the SDK stored presence events nobody reads. Now a room's state has the people whose events the sync carries, ourselves and the
+  heroes; the SDK marks the list incomplete by itself when a sync is `limited`, and `are_members_synced` is only set by a `/members`. `ui::room_details` lists everybody at once for a
+  room of up to `MEMBERS_AT_OPEN` (1000) people (one `/members`); a bigger one lists the known people with `members_complete: false` and the room's `member_count`, and
+  `load_members {room_id}` (member panel opened, an `@` completion) asks for the rest. Timeline names and pictures come from the SDK's `sender_profile` (`Timeline::fetch_members`
+  fills the missing ones when the list is in; a sender whose member event never came, e.g. old history of a big room, shows the user name until then). The first message sent into a
+  big encrypted room still downloads the whole list (the SDK needs it to share keys). The fake server does lazy loading (heroes, summary, member events only for senders;
+  `/members` has everybody); `VC_DEMO_MEMBERS=N` makes the demo room a big one with N more people.
+* Not done, with what it would give: a non-PIE link (another 4 MB resident, but no ASLR for our code); `max_blocking_threads`; a timeline window that drops far-away messages from the document. Qt loads all 11 image plugins (1.6 MB) at the first
   `QLineEdit::setClearButtonEnabled`, whatever the app asks of `QImageReader`.
 
 ## The fake homeserver (`core-rs/src/testkit.rs`)
