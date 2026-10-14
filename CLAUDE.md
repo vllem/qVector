@@ -50,6 +50,21 @@ QT_QPA_PLATFORM=offscreen XDG_CONFIG_HOME=$(mktemp -d) ./build/qvector --demo --
 * Use a throw-away config/data dir when running the app for tests: `XDG_CONFIG_HOME=$(mktemp -d)` (QSettings writes drafts, themes, tray choices) and `--data`.
 * The desktop is shared: never kill processes with `pkill -f <pattern>`; do not open windows on the user's display (offscreen only).
 
+## Measuring and the sync loop
+
+* `perf` is blocked here (`perf_event_paranoid=3`, no sudo), so flamegraph/samply do not work. What does: `strace -c -f -p PID` (syscalls; add `-e trace=write,writev,sendto -s 120`
+  and grep `GET|POST|PUT` for the requests a client makes), `pidstat -t -p PID 15 1` (CPU per thread), `heaptrack` on a **dev** build (the stripped release build gives
+  misleading leaf symbols), sampling with `gdb -p PID -batch -ex 'thread apply all bt 30'` in a loop, and the stress suites (`core-rs/src/stress.rs`, `qvector_stress`).
+  Compare builds of the same kind only (a dev build uses 2-3x the CPU of a release build). Find the real PID: `timeout` and `setsid` leave wrapper processes.
+* `app.rs` `sync_loop` is two halves in one task: `network_loop` long-polls `/sync` (30 s, at least 700 ms apart; ended session and back-off handled there) and
+  `housekeeping` (rooms event, avatars, crawler, alerts, key restore, session status) runs when a sync returned or `Inner::wake` is poked, and every 5 s. Anything that must
+  show up without a sync (a recovery, a verification) has to poke `wake`: `Inner::emit` does it for the `verification`, `recovery` and `sessions` events, which also ask for our own identity
+  again (`identity_due`; otherwise every 10 minutes: it is a `/keys/query`). Do not put work back on a fixed timer. The `rooms` event is sent only when the list changed.
+* The fake homeserver holds an idle `/sync` that asks for a `timeout` for up to 1.5 s (the tests' own syncs ask for none), so the demo behaves like a long-polling server.
+* The CMake cache directories (`build`, `build-perf`, `build-release`) remember the checkout they were configured in; after moving the repository delete and configure them again.
+* Known: with the default `--delay` an unoptimised demo may exit while the simulated user "bob" (`testkit::bob_says`) is still opening its client: a panic message from the SDK's
+  store on stderr at exit, nothing to do with the app; the smoke script uses a long delay.
+
 ## The fake homeserver (`core-rs/src/testkit.rs`)
 
 wiremock-based, several users/devices: login, keys upload/query/claim/signatures/device_signing (optional UIA password), to-device, send/redact/state (state PUT is
