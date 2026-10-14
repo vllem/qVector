@@ -80,7 +80,7 @@ heap that reuses freed memory, so they read lower (a regression of 10 MB in the 
   14 photos, +244 MB for 600 sidebar avatars, +1.2 GB for 3 000 members; the same steps now are +26, +6 and +38 MB. Pickers read icons at icon size.
 * `render()` makes a new `QTextDocument`: `setUndoRedoEnabled(false)` after `setHtml` (it switches undo back on, and the partial redraw edits the document: 10 undo
   steps and about 5 KB for every message that arrives, for as long as the room stays open).
-* What a message costs in Qt: about 2.2 KB as rows (29 JSON fields) and 6 KB more while it is in the document (100 are shown, "Show earlier" adds 100). A member
+* What a message costs in Qt: about 1.6 KB as rows (the engine leaves out every field that has its default: a text message has 8 of the 29; it was 2.2 KB with all of them) and 6 KB more while it is in the document (100 are shown, "Show earlier" adds 100). A member
   row about 12 KB with its picture; a closed member list gives its rows back (not when the window is minimised). Remote video pictures wait in one slot per person
   (`Core::pictureTrampoline`): a queue of them was 200 MB in a few seconds of GUI stall.
 * The engine: the timeline and emote-pack events are serialized from borrowed structs, not `json!` (a `Value` tree was five times the text and 200 000 allocations
@@ -98,8 +98,7 @@ heap that reuses freed memory, so they read lower (a regression of 10 MB in the 
 * Not done, with what it would give: the sync has no filter, so the first sign-in of an account downloads every member of every room (`lazy_load_members` and no
   `presence` in a `FilterDefinition`; the SDK stores presence events the UI never reads); timeline pictures are downloaded as full originals (a 25 MB photo is about 50 MB at
   once, file plus HTTP/2 buffers; `info.thumbnail_source` or the server's thumbnail is about 50 KB, but the viewer opens `image_path`, so a click would need to fetch the
-  original); a non-PIE link (another 4 MB resident, but no ASLR for our code); `max_blocking_threads`; leaving default fields out of the `UiMessage` JSON (2.2 KB -> about 1 KB a row,
-  and the tests read `m["pending"] == false`); a timeline window that drops far-away messages from the document. Qt loads all 11 image plugins (1.6 MB) at the first
+  original); a non-PIE link (another 4 MB resident, but no ASLR for our code); `max_blocking_threads`; a timeline window that drops far-away messages from the document. Qt loads all 11 image plugins (1.6 MB) at the first
   `QLineEdit::setClearButtonEnabled`, whatever the app asks of `QImageReader`.
 
 ## The fake homeserver (`core-rs/src/testkit.rs`)

@@ -881,7 +881,7 @@ void MainWindow::onEvent(const QString &name, const QJsonValue &p)
         timeline_->setRows(o["rows"].toArray());
         updateSending(o["rows"].toArray());
         pinned_.clear();
-        for (const QJsonValue &v : o["rows"].toArray()) if (v.toObject()["pinned"].toBool()) pinned_.append(v.toObject());
+        for (const QJsonValue &v : o["rows"].toArray()) if (v.toObject().value("pinned").toBool()) pinned_.append(v.toObject()); /* value(): a row leaves out what is empty, and a non-const [] would insert it (and copy the row) */
         updatePinBar();
     } else if (name == "details") {
         details_ = p.toObject();
@@ -1581,7 +1581,7 @@ void MainWindow::dialogForDemo(const QString &which)
     }
     else if (which.startsWith("audio:")) (new AudioPlayer(which.mid(6), QFileInfo(which.mid(6)).fileName(), this))->show(); /* dev aid: --dialog audio:FILE */
     else if (which == "text") {
-        for (const QJsonValue &v : timeline_->rows()) if (v.toObject()["text_file"].toBool()) { core_->call("fetch_text", {{"event_id", S(v.toObject(), "id")}}); return; }
+        for (const QJsonValue &v : timeline_->rows()) if (v.toObject().value("text_file").toBool()) { core_->call("fetch_text", {{"event_id", S(v.toObject(), "id")}}); return; }
         QTimer::singleShot(1000, this, [this] { dialogForDemo("text"); }); /* the file may not have arrived yet */
     }
 }

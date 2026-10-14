@@ -28,7 +28,12 @@ pub struct UiReaction { pub key: String, pub count: u32, pub mine: bool }
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct UiReply { pub event_id: String, pub sender: String, pub preview: String }
 
-/// One message of a timeline as the UI draws it.
+fn is_false(b: &bool) -> bool { !*b }
+fn is_zero32(n: &u32) -> bool { *n == 0 }
+fn is_zero64(n: &u64) -> bool { *n == 0 }
+
+/// One message of a timeline as the UI draws it. A field that has its default (empty, false, 0, none) is left out of the JSON, and the UI reads a missing field
+/// as that default: of 29 fields a plain text message has 8, which is a third of the JSON and of what the UI holds per message. Only the first seven are always sent.
 #[derive(Debug, Clone, PartialEq, Serialize, Default)]
 pub struct UiMessage {
     pub id: String,
@@ -37,41 +42,62 @@ pub struct UiMessage {
     /// plain text (also what a UI without rich text shows)
     pub body: String,
     /// sanitized HTML of a formatted message, empty for plain text
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub html: String,
     /// "text", "emote", "notice", "image", "file", "video", "audio", "location", "undecryptable", "other"
     pub kind: String,
     pub time: String,
     /// milliseconds since the epoch (sorting; `time` is only the clock for display)
     pub ts: u64,
+    #[serde(skip_serializing_if = "is_false")]
     pub own: bool,
+    #[serde(skip_serializing_if = "is_false")]
     pub edited: bool,
+    #[serde(skip_serializing_if = "is_false")]
     pub pending: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reply: Option<UiReply>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub reactions: Vec<UiReaction>,
     /// a picture: where the cached file is once it has been downloaded (empty before), and its size
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub image_path: String,
+    #[serde(skip_serializing_if = "is_zero32")]
     pub image_w: u32,
+    #[serde(skip_serializing_if = "is_zero32")]
     pub image_h: u32,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub file_name: String,
     /// a file whose contents can be shown as text (by its type or name): the UI offers "Open file"
+    #[serde(skip_serializing_if = "is_false")]
     pub text_file: bool,
+    #[serde(skip_serializing_if = "is_zero64")]
     pub size: u64,
     /// display names of other people whose newest read receipt is on this message
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub seen_by: Vec<String>,
     /// replies in the thread that starts at this message (0: no thread)
+    #[serde(skip_serializing_if = "is_zero32")]
     pub thread_replies: u32,
     /// the card of the first link (filled in by the app when previews are on)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub preview: Option<UiPreview>,
     /// who-wrote-this warning for encrypted messages
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub shield: Option<UiShield>,
     /// pinned in the room (set by the app from the room's state)
+    #[serde(skip_serializing_if = "is_false")]
     pub pinned: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub poll: Option<UiPoll>,
     /// a gallery (several pictures or files sent as one message, MSC4274): its items in order; `body` is the caption
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub gallery: Vec<UiGalleryItem>,
     /// the sender's picture: a file the app downloaded (set by the app, empty until then)
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub avatar_path: String,
     /// custom emoji pictures inside `html` (`mxc://` address and, once the app has downloaded it, the file)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub emoji: Vec<UiEmojiRef>,
 }
 

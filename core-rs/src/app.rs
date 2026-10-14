@@ -970,7 +970,7 @@ mod tests {
         let t = probe.wait("timeline", |v| v["rows"].as_array().map(|a| a.iter().any(|m| m["body"].as_str().unwrap_or("").starts_with("Hello alice"))).unwrap_or(false));
         assert_eq!(t["room_id"], room.as_str());
         app.call("send", &json!({"text": "hi **there**", "reply_to": ""}));
-        let t = probe.wait("timeline", |v| v["rows"].as_array().map(|a| a.iter().any(|m| m["body"] == "hi **there**" && m["pending"] == false)).unwrap_or(false));
+        let t = probe.wait("timeline", |v| v["rows"].as_array().map(|a| a.iter().any(|m| m["body"] == "hi **there**" && !m["pending"].as_bool().unwrap_or(false))).unwrap_or(false));
         let mine = t["rows"].as_array().unwrap().iter().find(|m| m["body"] == "hi **there**").unwrap().clone();
         assert!(mine["html"].as_str().unwrap().contains("<strong>there</strong>"));
         app.call("react", &json!({"event_id": mine["id"], "key": "x"}));
