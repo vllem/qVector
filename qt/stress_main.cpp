@@ -75,18 +75,22 @@ static long rssAnonKiB()
 }
 
 /* What a view really holds once it has settled: pending redraws done, free heap pages given back to the system. */
+static long freeHeapKiB = 0; /* what glibc held on to, free, just before the last malloc_trim */
 static long heldKiB()
 {
     settle();
+    const long pre = rssAnonKiB();
 #ifdef __GLIBC__
     malloc_trim(0);
 #endif
-    return rssAnonKiB();
+    const long post = rssAnonKiB();
+    freeHeapKiB = pre - post;
+    return post;
 }
 
 /* Like step(), for memory: `f` may grow the process by `budgetKiB` at most (resident anonymous memory after everything has settled). The budgets are
    for a screen at scale 1; pictures are drawn at the device's pixels, so at scale 2 (QT_SCALE_FACTOR=2) they have four times the bytes. */
-template <class F> static void memstep(const char *name, long budgetKiB, F f)
+template <class F> static void memstep(const char *name, long budgetKiB, F f, long maxFreeHeapKiB = -1)
 {
     if (!only.isEmpty() && !QString(name).contains(only, Qt::CaseInsensitive)) return;
     const double scale = qMax(1.0, QGuiApplication::primaryScreen()->devicePixelRatio());
@@ -95,9 +99,12 @@ template <class F> static void memstep(const char *name, long budgetKiB, F f)
     f();
     const long grew = heldKiB() - before;
     const bool ok = before < 0 || grew <= budgetKiB;
-    std::printf("%-58s %+8ld KiB  (budget %ld)  %s\n", name, grew, budgetKiB, ok ? "ok" : "TOO MUCH MEMORY");
+    std::printf("%-58s %+8ld KiB  (budget %ld)  %s   [free heap before trim: %ld KiB]\n", name, grew, budgetKiB, ok ? "ok" : "TOO MUCH MEMORY", freeHeapKiB);
     std::fflush(stdout);
     if (!ok) failures++;
+    /* with `maxFreeHeapKiB`: what glibc may keep free between two trims. The app fixes the threshold above which blocks get a mapping of their own (main.cpp),
+       so a picture or a download does not linger in the heap after it is freed: 25 MB were held after the pictures step without that, 2 MB with it. */
+    if (before >= 0 && maxFreeHeapKiB >= 0 && freeHeapKiB > maxFreeHeapKiB) { std::printf("    glibc held %ld KiB of free memory before the trim (limit %ld)\n", freeHeapKiB, maxFreeHeapKiB); failures++; }
 }
 
 /* a row with every field the engine sends (core-rs `UiMessage`), as it comes off the wire: JSON text parsed by Qt, which is what the view really holds per message */
@@ -158,6 +165,10 @@ static QString nest(int depth)
 
 int main(int argc, char **argv)
 {
+#ifdef __GLIBC__
+    mallopt(M_ARENA_MAX, 2); /* as in the app (qt/main.cpp): the memory steps measure what the app does */
+    mallopt(M_MMAP_THRESHOLD, 256 * 1024);
+#endif
     QApplication app(argc, argv);
     if (argc > 1) only = argv[1];
 
@@ -202,7 +213,7 @@ int main(int argc, char **argv)
         app.processEvents();
         memstep("memory: 10 rooms of 14 pictures, visited 3 times", 40000, [&] {
             for (int cycle = 0; cycle < 3; cycle++) for (int r = 0; r < 10; r++) { mtl.reset(); mtl.setRows(room(r)); settle(); }
-        });
+        }, 8000);
         mtl.reset();
         Sidebar msb;
         msb.resize(260, 700);
