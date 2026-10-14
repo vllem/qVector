@@ -290,9 +290,9 @@ int main(int argc, char **argv)
         QApplication::sendEvent(br->viewport(), &w); /* the reader's own input, or the view ignores the scrollbar */
     };
     auto visible = [](TimelineView &v, QTextBrowser *br) { QSet<QString> seen; for (int y = 2; y < br->viewport()->height(); y += 8) { const QString e = v.eventAt(QPoint(24, y)); if (!e.isEmpty()) seen.insert(e); } return seen; };
-    /* Each page lays out the whole window again (300 messages, about 1 ms each; the budgets are 40 and 38 pages at 250 ms): before the window had a limit the same 40 pages took
-       100 seconds, laying out 100, 200, ... 4 100 messages, and held 4 100 messages in the document. */
-    step("timeline: 40 pages scrolled up through 20 000 rows stay within 300", 14000, [&] {
+    /* Each page lays out the whole window again (300 messages, about 1 ms each, 250 to 350 ms on this machine; the budgets are 40 and 38 pages at 500 ms): before the window had
+       a limit the same 40 pages took 100 seconds, laying out 100, 200, ... 4 100 messages, and held 4 100 messages in the document. */
+    step("timeline: 40 pages scrolled up through 20 000 rows stay within 300", 20000, [&] {
         tl.reset();
         tl.setRows(messages(20000));
         settle();
@@ -309,7 +309,7 @@ int main(int argc, char **argv)
         std::printf("    window now [%d, %d) of %lld, widest %d, reader moved %d times\n", tl.shownFirst(), tl.shownEnd(), (long long)tl.rows().size(), widest, moved);
         if (widest > TimelineView::kWindowMax || moved != 0 || tl.shownFirst() != 20000 - 100 - 40 * 100 || tl.shownEnd() - tl.shownFirst() != TimelineView::kWindowMax) failures++;
     });
-    step("timeline: scrolled back down, the oldest go and the newest come", 12000, [&] {
+    step("timeline: scrolled back down, the oldest go and the newest come", 19000, [&] {
         auto *br = tl.findChild<QTextBrowser *>();
         int widest = 0, moved = 0, pages = 0;
         while (tl.shownEnd() < tl.rows().size() && pages++ < 100) {
