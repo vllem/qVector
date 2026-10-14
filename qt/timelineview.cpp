@@ -244,12 +244,13 @@ void TimelineView::onScroll()
     if (programmatic_) return;
     if (!userInput_.isValid() || userInput_.elapsed() > 700) return; /* not the reader: a layout change */
     QScrollBar *sb = view_->verticalScrollBar();
-    stick_ = sb->value() >= sb->maximum() - 4 && shownEnd_ >= rows_.size(); /* the bottom of a document that stops short of the newest message is not the end of the room */
+    const bool following = windowEnd_.isEmpty(); /* the document reaches the room's newest message (the rows may have grown since it was drawn) */
+    stick_ = sb->value() >= sb->maximum() - 4 && following; /* the bottom of a document that stops short of the newest message is not the end of the room */
     fitFetches_ = 0;
     if (sb->value() <= 30) {
         if (hiddenLocal_ > 0) showEarlier();
         else if (canLoadMore_ && !loadingHistory_ && !thread_) { loadingMore_ = true; emit olderRequested(); }
-    } else if (sb->value() >= sb->maximum() - 30 && shownEnd_ < rows_.size()) showLater();
+    } else if (sb->value() >= sb->maximum() - 30 && !following) showLater();
 }
 
 /* The document is a window on the room's messages (laying one out takes about 1 ms, and it is 6 KB in memory): these two move it, a hundred messages at a time,
@@ -267,7 +268,7 @@ void TimelineView::showEarlier()
 void TimelineView::showLater()
 {
     const int n = rows_.size();
-    if (shownEnd_ >= n) return;
+    if (windowEnd_.isEmpty() || shownEnd_ >= n) return;
     const int last = qMin(n, shownEnd_ + 100);
     windowEnd_ = last >= n ? QString() : S(rows_[last].toObject(), "id");
     if (last - hiddenLocal_ > kWindowMax) windowStart_ = S(rows_[last - kWindowMax].toObject(), "id");
