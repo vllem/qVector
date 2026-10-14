@@ -824,6 +824,23 @@ pub async fn save_attachment(client: &Client, timeline: &Timeline, event_id: &st
     Ok(bytes.len() as u64)
 }
 
+/// A file name that is safe to hand to the system's opener: the sender chooses the name, so only characters that cannot form a path are kept, every dot
+/// but the last is dropped, and the extension must be a known one for this kind of media (otherwise it is replaced by a neutral one), so a "video" called
+/// `clip.bat` or `clip.desktop` is never opened as a program.
+fn safe_media_name(kind: &str, file_name: &str) -> String {
+    let clean: String = file_name.rsplit(['/', '\\']).next().unwrap_or("").chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' }).collect();
+    let (stem, ext) = match clean.rsplit_once('.') { Some((s, e)) => (s.to_string(), e.to_ascii_lowercase()), None => (clean.clone(), String::new()) };
+    let known: &[&str] = match kind {
+        "image" => &["png", "jpg", "jpeg", "gif", "webp", "bmp", "avif", "heic", "tif", "tiff", "svg"],
+        "video" => &["mp4", "webm", "mkv", "mov", "avi", "m4v", "ogv", "3gp"],
+        _ => &["mp3", "ogg", "oga", "opus", "wav", "flac", "m4a", "aac", "weba"],
+    };
+    let ext = if known.contains(&ext.as_str()) { ext } else { match kind { "image" => "img", "video" => "vid", _ => "aud" }.to_string() };
+    let stem: String = stem.replace('.', "_");
+    let stem = stem.trim_start_matches('_');
+    format!("{}.{ext}", if stem.is_empty() { "media" } else { stem })
+}
+
 /// Download a picture, video or audio message into `dir` (under a safe version of its file name) so a player can open it; returns the path.
 /// Other kinds of file are refused: they are saved by the user, never opened by the app.
 pub async fn media_copy(client: &Client, timeline: &Timeline, event_id: &str, dir: &Path) -> Result<PathBuf, String> {
@@ -832,11 +849,10 @@ pub async fn media_copy(client: &Client, timeline: &Timeline, event_id: &str, di
     let mut m = ui_messages(&items, "").into_iter().find(|m| m.id == base).ok_or("that message is not in the timeline")?;
     if let Some(g) = item.and_then(|n| m.gallery.get(n)) { m.kind = g.kind.clone(); m.file_name = g.name.clone(); }
     if !matches!(m.kind.as_str(), "image" | "video" | "audio") { return Err("only pictures, videos and audio are opened from here; save other files instead".into()); }
-    let stem: String = m.file_name.rsplit('/').next().unwrap_or("").chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' }).collect();
-    let stem = stem.trim_start_matches('.');
+    let stem = safe_media_name(&m.kind, &m.file_name);
     let id: String = event_id.chars().filter(|c| c.is_ascii_alphanumeric()).take(12).collect::<String>() + item.map(|n| format!("n{n}")).unwrap_or_default().as_str();
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let dest = dir.join(format!("{id}-{}", if stem.is_empty() { "media" } else { stem }));
+    let dest = dir.join(format!("{id}-{stem}"));
     save_attachment(client, timeline, event_id, &dest).await?;
     Ok(dest)
 }
@@ -1063,6 +1079,17 @@ mod tests {
     use super::*;
     use crate::testkit::{FakeHs, ROOM};
     use matrix_sdk_ui::timeline::RoomExt;
+
+    #[test]
+    fn media_names_never_keep_a_program_extension() {
+        assert_eq!(safe_media_name("video", "clip.bat"), "clip.vid");
+        assert_eq!(safe_media_name("video", "../../x/clip.mp4.desktop"), "clip_mp4.vid");
+        assert_eq!(safe_media_name("image", "a.HTA"), "a.img");
+        assert_eq!(safe_media_name("audio", "song.opus"), "song.opus");
+        assert_eq!(safe_media_name("image", "C:\\dir\\pic.PNG"), "pic.png");
+        assert_eq!(safe_media_name("audio", ""), "media.aud");
+        assert_eq!(safe_media_name("video", ".hidden"), "media.vid");
+    }
 
     struct Fixture { hs: FakeHs, client: Client, timeline: Arc<Timeline>, _dir: tempfile::TempDir }
 
