@@ -773,6 +773,11 @@ pub fn remove_fake_clients(port: u16) {
     }
 }
 
+/// Removes a fake client's store folder when the client's task ends (the runtime of a test or of the demo is dropped): /tmp is memory on many systems, and every
+/// run of the tests used to leave about thirty of these behind.
+struct RemoveOnDrop(std::path::PathBuf);
+impl Drop for RemoveOnDrop { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+
 /// Dev aid for running the UI without a real account: once `alice` has logged in (her device keys are on the server), a second client
 /// "bob" says `lines` in the encrypted room, so the UI has encrypted messages to decrypt. Runs until done; spawn it.
 pub async fn bob_says(hs: FakeHs, lines: Vec<String>) {
@@ -782,6 +787,7 @@ pub async fn bob_says(hs: FakeHs, lines: Vec<String>) {
     /* wiremock hands the ports of servers that are done to the next test of the process: the store of an earlier bob must not be opened again (its keys,
        sessions and room key are another server's: alice then never got the key and the message stayed unreadable) */
     let _ = std::fs::remove_dir_all(&dir);
+    let _cleanup = RemoveOnDrop(dir.clone()); /* declared before the client, so it is dropped after it */
     let Ok(bob) = crate::open_client(&hs.uri(), &dir, "pw").await else { return };
     if crate::login_password(&bob, "bob", "x", "bob's phone").await.is_err() { return; } /* also starts the event cache */
     let _ = crate::sync_once(&bob).await;
@@ -818,6 +824,7 @@ pub async fn alice_other_session(hs: FakeHs) {
     use crate::crypto::Verifier;
     let dir = std::env::temp_dir().join(format!("vector-fake-other-{}-{}", std::process::id(), hs.server.address().port()));
     let _ = std::fs::remove_dir_all(&dir); /* a fresh store (see bob_says: ports are reused) */
+    let _cleanup = RemoveOnDrop(dir.clone());
     let Ok(client) = crate::open_client(&hs.uri(), &dir, "pw").await else { return };
     if client.matrix_auth().login_username("alice", "x").device_id("OTHER").initial_device_display_name("Alice's laptop").send().await.is_err() { return; }
     crate::start_event_cache(&client);

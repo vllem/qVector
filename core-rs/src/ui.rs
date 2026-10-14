@@ -1452,7 +1452,10 @@ mod tests {
         let first = wait_for(&f, |m| m.len() == 1).await[0].id.clone();
         send_text(&f.timeline, "answer", Some(&first)).await.unwrap();
         let msgs = wait_for(&f, |m| m.len() == 2 && !m[1].pending).await;
-        load_reply(&f.timeline, &msgs[1].id).await.unwrap();
+        /* the answer has an event id as soon as it has been sent, before the sync brings it back: the timeline can only fetch the details of what it has from the sync */
+        let mut loaded = Err(String::new());
+        for _ in 0..100 { crate::sync_once(&f.client).await.unwrap(); loaded = load_reply(&f.timeline, &msgs[1].id).await; if loaded.is_ok() { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+        loaded.unwrap();
         assert_eq!(wait_for(&f, |m| m.len() == 2 && m[1].reply.as_ref().is_some_and(|r| r.preview == "original")).await.len(), 2);
     }
 
@@ -2179,7 +2182,7 @@ mod tests {
         send_sticker(&f.timeline, "mxc://hs/wave", "wave", 64, 48, "image/png").await.unwrap();
         assert!(send_sticker(&f.timeline, "not an mxc", "x", 0, 0, "").await.is_err());
         let msgs = wait_for(&f, |m| m.len() == 2 && m.iter().all(|x| !x.pending)).await;
-        assert!(msgs[0].html.contains("src=\"mxc://hs/cat\"") && msgs[0].html.contains("<strong>bold</strong>") && msgs[0].html.contains("src=\"mxc://hs/mine\""), "{}", msgs[0].html);
+        assert!(msgs[0].html.contains("src=\"mxc://hs/cat\"") && msgs[0].html.contains("<strong>bold</strong>") && msgs[0].html.contains("src=\"mxc://hs/mine\""), "{msgs:#?}");
         assert_eq!(msgs[0].emoji.iter().map(|e| e.mxc.as_str()).collect::<Vec<_>>(), vec!["mxc://hs/cat", "mxc://hs/mine"]);
         assert_eq!(msgs[0].body, "hello :cat: and **bold** :mine:", "the plain text keeps the shortcodes");
         assert_eq!((msgs[1].kind.as_str(), msgs[1].body.as_str(), msgs[1].image_w, msgs[1].image_h), ("sticker", "wave", 64, 48), "{:#?}", msgs[1]);
