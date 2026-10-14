@@ -684,6 +684,14 @@ impl FakeHs {
     pub fn log(&self) -> Vec<String> { self.st.lock().unwrap().log.clone() }
 }
 
+/// The folders the demo makes in the temporary folder, for the fake server that listened on `port`: the other people's stores (`bob_says`,
+/// `alice_other_session`). They are never needed again once the app is gone, and /tmp is often memory (here 370 MB of them had piled up).
+pub fn remove_fake_clients(port: u16) {
+    for who in ["bob", "other"] {
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!("vector-fake-{who}-{}-{port}", std::process::id())));
+    }
+}
+
 /// Dev aid for running the UI without a real account: once `alice` has logged in (her device keys are on the server), a second client
 /// "bob" says `lines` in the encrypted room, so the UI has encrypted messages to decrypt. Runs until done; spawn it.
 pub async fn bob_says(hs: FakeHs, lines: Vec<String>) {

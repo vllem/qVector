@@ -721,6 +721,8 @@ impl Drop for App {
     /// The SDK's stores need the runtime while they shut down: release them inside it, then stop the runtime.
     fn drop(&mut self) {
         let Some(rt) = self.rt.take() else { return };
+        #[cfg(feature = "testkit")]
+        let demo_port = self.inner.fake.lock().unwrap().as_ref().map(|hs| hs.server.address().port());
         {
             let _g = rt.enter();
             self.stop_tasks();
@@ -732,6 +734,13 @@ impl Drop for App {
             { *self.inner.fake.lock().unwrap() = None; }
         }
         rt.shutdown_timeout(Duration::from_secs(2));
+        /* the demo's data (this app's and the fake people's) lives in the temporary folder, which is often memory: it goes with the demo */
+        #[cfg(feature = "testkit")]
+        if let Some(port) = demo_port {
+            let dir = self.inner.dir();
+            if dir.parent() == Some(std::env::temp_dir().as_path()) && dir.file_name().map_or(false, |n| n.to_string_lossy().starts_with("vector-demo-")) { let _ = std::fs::remove_dir_all(&dir); }
+            crate::testkit::remove_fake_clients(port);
+        }
     }
 }
 
@@ -1002,6 +1011,21 @@ mod tests {
         assert!(app.rt().block_on(app.inner.open_timeline_of()).is_some());
         app.call("select_room", &json!({"room_id": "!nowhere:hs"}));
         assert!(app.rt().block_on(app.inner.open_timeline_of()).is_none(), "the previous room is still the target");
+    }
+
+    #[test]
+    fn the_demo_takes_its_temporary_folders_with_it() {
+        let (app, mut probe, _dir) = app();
+        let fake = app.call("start_fake_server", &Value::Null);
+        app.call("login", &json!({"homeserver": fake["homeserver"], "user": "alice", "password": "x"}));
+        probe.wait("state", |v| v["screen"] == "main");
+        let dir = app.inner.dir();
+        let bob = std::env::temp_dir().join(format!("vector-fake-bob-{}-{}", std::process::id(), fake["homeserver"].as_str().unwrap().rsplit(':').next().unwrap()));
+        for _ in 0..100 { if bob.exists() && dir.exists() { break; } std::thread::sleep(Duration::from_millis(100)); } /* bob opens his store a moment after the sign-in */
+        assert!(dir.exists() && bob.exists(), "the demo made its folders: {} {}", dir.display(), bob.display());
+        drop(app);
+        assert!(!dir.exists(), "the demo's data folder is gone with the app");
+        assert!(!bob.exists(), "so are the fake people's");
     }
 
     #[test]
