@@ -1,5 +1,6 @@
 #include "qt/packpicker.h"
 #include "qt/avatar.h"
+#include "qt/imageload.h"
 #include <QGuiApplication>
 #include <QPixmap>
 #include <QScreen>
@@ -33,13 +34,15 @@ PackPicker::PackPicker(QWidget *parent) : QFrame(parent, Qt::Popup)
     v->addWidget(pack_);
     v->addWidget(grid_, 1);
     v->addWidget(empty_, 1);
-    connect(pack_, &QComboBox::currentIndexChanged, this, [this] { fill(); });
+    connect(pack_, &QComboBox::currentIndexChanged, this, [this] { stale_ = true; if (isVisible()) fill(); });
     connect(grid_, &QListWidget::itemClicked, this, [this](QListWidgetItem *it) {
         emit picked(it->data(Qt::UserRole).toJsonValue().toObject());
         hide();
     });
     fill(); /* shows the "no stickers" note until packs arrive */
 }
+
+/* the stickers of the packs a room sends are drawn (every picture decoded and scaled) when the picker opens, not whenever a room is entered */
 
 void PackPicker::setPacks(const QJsonArray &packs)
 {
@@ -56,11 +59,14 @@ void PackPicker::setPacks(const QJsonArray &packs)
     }
     if (keep >= 0 && keep < pack_->count()) pack_->setCurrentIndex(keep);
     pack_->setVisible(pack_->count() > 1);
-    fill();
+    stale_ = true;
+    if (isVisible()) fill();
+    else { grid_->clear(); const bool any = pack_->count() > 0; grid_->setVisible(any); empty_->setVisible(!any); } /* nothing is drawn for a picker nobody looks at, and the old room's pictures go */
 }
 
 void PackPicker::fill()
 {
+    stale_ = false;
     grid_->clear();
     const QJsonObject pack = pack_->currentData().toJsonValue().toObject();
     const QPalette pal = palette();
@@ -68,8 +74,10 @@ void PackPicker::fill()
     for (const QJsonValue &v : pack["emotes"].toArray()) {
         const QJsonObject e = v.toObject();
         if (!e["sticker"].toBool()) continue;
+        const QSize box = QSize(size, size) * devicePixelRatioF();
+        const QImage img = loadFitted(S(e, "path"), box);
         QPixmap pm;
-        if (!S(e, "path").isEmpty() && pm.load(S(e, "path"))) pm = pm.scaled(QSize(size, size) * devicePixelRatioF(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        if (!img.isNull()) pm = QPixmap::fromImage(img.scaled(box, Qt::KeepAspectRatio, Qt::SmoothTransformation));
         else pm = profilePixmap(QString(), S(e, "mxc"), S(e, "shortcode"), size, devicePixelRatioF(), pal);
         pm.setDevicePixelRatio(devicePixelRatioF());
         auto *it = new QListWidgetItem(QIcon(pm), QString());
@@ -90,6 +98,7 @@ void PackPicker::popupAt(const QPoint &anchor)
     int x = anchor.x() - width(), y = anchor.y() - height() - 4;
     if (y < area.top()) y = qMin(anchor.y() + 28, area.bottom() - height());
     move(qBound(area.left(), x, area.right() - width()), qBound(area.top(), y, area.bottom() - height()));
+    if (stale_) fill();
     show();
 }
 

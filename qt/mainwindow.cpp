@@ -5,6 +5,7 @@
 #include "qt/packpicker.h"
 #include "qt/audioplayer.h"
 #include "qt/avatar.h"
+#include "qt/imageload.h"
 #include "qt/theme.h"
 #include <QApplication>
 #include <QProgressBar>
@@ -1227,7 +1228,7 @@ void MainWindow::stageFiles(const QStringList &paths)
     if (pending_.size() == 1) {
         const QFileInfo fi(pending_[0]);
         what = fi.fileName() + " (" + QLocale().formattedDataSize(fi.size()) + ")";
-        QImage img(pending_[0]);
+        const QImage img = loadFitted(pending_[0], QSize(48, 48)); /* only a 48 pixel thumbnail is wanted: a 50-megapixel photo is not decoded for it */
         if (!img.isNull()) attachThumb_->setPixmap(QPixmap::fromImage(img.scaled(48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
         else attachThumb_->clear();
     } else {

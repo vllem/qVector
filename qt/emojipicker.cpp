@@ -1,4 +1,5 @@
 #include "qt/emojipicker.h"
+#include "qt/imageload.h"
 #include "qt/theme.h"
 #include <QFontDatabase>
 #include <QPixmap>
@@ -104,7 +105,15 @@ void EmojiPicker::setCustom(const QJsonArray &packs)
         for (const QJsonValue &e : p.toObject()["emotes"].toArray()) if (e.toObject()["emoji"].toBool()) custom_ << e.toObject();
     customBtn_->setVisible(!custom_.isEmpty());
     QIcon icon;
-    for (const QJsonObject &e : custom_) { QPixmap pm; if (pm.load(e["path"].toString())) { icon = QIcon(pm); break; } }
+    for (const QJsonObject &e : custom_) { /* the button's picture is 22 points: the file is read at that size, not kept whole */
+        const QSize box = QSize(22, 22) * devicePixelRatioF();
+        const QImage img = loadFitted(e["path"].toString(), box);
+        if (img.isNull()) continue;
+        QPixmap pm = QPixmap::fromImage(img.scaled(box, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        pm.setDevicePixelRatio(devicePixelRatioF());
+        icon = QIcon(pm);
+        break;
+    }
     customBtn_->setIcon(icon);
     customBtn_->setText(icon.isNull() ? "+" : QString());
     customBtn_->setToolButtonStyle(icon.isNull() ? Qt::ToolButtonTextOnly : Qt::ToolButtonIconOnly);
@@ -131,9 +140,10 @@ void EmojiPicker::fill()
     QList<Emoji> shown;
     const QString q = search_->text().trimmed();
     auto addCustom = [&](const QJsonObject &e) {
-        QPixmap pm;
-        if (!pm.load(e["path"].toString())) return;
-        pm = pm.scaled(QSize(28, 28) * devicePixelRatioF(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        const QSize box = QSize(28, 28) * devicePixelRatioF();
+        const QImage img = loadFitted(e["path"].toString(), box);
+        if (img.isNull()) return;
+        QPixmap pm = QPixmap::fromImage(img.scaled(box, Qt::KeepAspectRatio, Qt::SmoothTransformation));
         pm.setDevicePixelRatio(devicePixelRatioF());
         auto *it = new QListWidgetItem(QIcon(pm), QString());
         it->setToolTip(":" + e["shortcode"].toString() + ":");

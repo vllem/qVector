@@ -1,8 +1,8 @@
 #include "qt/avatar.h"
+#include "qt/imageload.h"
 #include "qt/theme.h"
-#include <QHash>
+#include <QCache>
 #include <QImage>
-#include <QImageReader>
 #include <QFont>
 #include <QPainter>
 #include <QPainterPath>
@@ -16,12 +16,11 @@ QPixmap avatarPixmap(const QString &seed, const QString &label, int size, qreal 
     QString initial = text.isEmpty() ? QStringLiteral("?") : QString(text.left(text.at(0).isHighSurrogate() ? 2 : 1)).toUpper();
     QColor bg = nameColor(seed, pal);
     bg.setHsl(bg.hslHue(), 140, isDark(pal) ? 150 : 135);
-    /* The picture depends only on the initial, the colour and the size; a list redraws the same few hundred of them again and again. */
-    static QHash<QString, QPixmap> cache;
+    /* The picture depends only on the initial, the colour and the size; a list redraws the same few hundred of them again and again. The colour comes
+       from a hash of the name (360 hues), so over a long session the combinations are many: the cache is bounded (by bytes) instead of growing. */
+    static QCache<QString, QPixmap> cache(4 << 20);
     const QString key = initial + QChar(1) + QString::number(bg.rgb()) + QChar(1) + QString::number(size) + QChar(1) + QString::number(dpr);
-    const auto hit = cache.constFind(key);
-    if (hit != cache.constEnd()) return hit.value();
-    if (cache.size() > 3000) cache.clear();
+    if (const QPixmap *hit = cache.object(key)) return *hit;
     QPixmap pm(QSize(size, size) * dpr);
     pm.setDevicePixelRatio(dpr);
     pm.fill(Qt::transparent);
@@ -37,27 +36,37 @@ QPixmap avatarPixmap(const QString &seed, const QString &label, int size, qreal 
     p.setPen(QColor(0x1b, 0x1b, 0x1b));
     p.drawText(QRectF(0, 0, size, size), Qt::AlignCenter, initial);
     p.end();
-    cache.insert(key, pm);
+    cache.insert(key, new QPixmap(pm), int(qMin<qint64>(pm.width() * qint64(pm.height()) * 4, 4 << 20)));
     return pm;
+}
+
+/* The picture file of an avatar cut to a square of at most `side` device pixels, rounded up to 32, 64, 96 ...: the sizes a list or a message draws
+   (16 to 32 points) share one picture of 4 KB (16 KB at twice the scale). It is decoded straight to that size and kept in a bounded cache. (The whole decode was kept before, 320 pixels square: 400 KB for every person and room whose picture was ever drawn, 1.2 GB for a room
+   of 3 000 people.) A null image: the file cannot be read. */
+static QImage avatarSquare(const QString &path, int side)
+{
+    static QCache<QString, QImage> cache(24 << 20);
+    const int tier = (qMax(side, 1) + 31) / 32 * 32;
+    const QString key = QString::number(tier) + QChar(1) + path;
+    if (const QImage *hit = cache.object(key)) return *hit;
+    QImage sq;
+    const QImage img = loadFitted(path, QSize(tier, tier), Qt::KeepAspectRatioByExpanding); /* never bigger than needed, never enlarged */
+    if (!img.isNull()) {
+        const int m = qMin(img.width(), img.height());
+        sq = img.copy((img.width() - m) / 2, (img.height() - m) / 2, m, m);
+    }
+    cache.insert(key, new QImage(sq), sq.isNull() ? 1 : int(sq.sizeInBytes()));
+    return sq;
 }
 
 QPixmap profilePixmap(const QString &imagePath, const QString &seed, const QString &label, int size, qreal dpr, const QPalette &pal, bool *loaded)
 {
     if (loaded) *loaded = false;
-    static QHash<QString, QImage> decoded; /* by file: avatars are drawn many times */
-    QImage img;
-    if (!imagePath.isEmpty()) {
-        auto it = decoded.constFind(imagePath);
-        if (it == decoded.cend()) { QImageReader rd(imagePath); rd.setAutoTransform(true); const QSize full = rd.size(); /* avatars are drawn at 100 px at most */
-            if (full.isValid() && qMin(full.width(), full.height()) > 320) rd.setScaledSize(full.scaled(QSize(320, 320), Qt::KeepAspectRatioByExpanding));
-            it = decoded.insert(imagePath, rd.read()); }
-        img = it.value();
-    }
-    if (img.isNull()) return avatarPixmap(seed, label, size, dpr, pal);
-    const QImage *src = &img;
-    QImage sq = src->scaled(QSize(size, size) * dpr, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
-    sq = sq.copy((sq.width() - int(size * dpr)) / 2, (sq.height() - int(size * dpr)) / 2, int(size * dpr), int(size * dpr));
-    QPixmap pm(QSize(size, size) * dpr);
+    const QSize device = QSize(size, size) * dpr;
+    const QImage master = imagePath.isEmpty() ? QImage() : avatarSquare(imagePath, device.width());
+    if (master.isNull()) return avatarPixmap(seed, label, size, dpr, pal);
+    QImage sq = master.size() == device ? master : master.scaled(device, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    QPixmap pm(device);
     pm.setDevicePixelRatio(dpr);
     pm.fill(Qt::transparent);
     QPainter p(&pm);

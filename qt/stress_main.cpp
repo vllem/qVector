@@ -9,10 +9,13 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QGuiApplication>
 #include <QImage>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QListWidget>
 #include <QRandomGenerator>
+#include <QScreen>
 #include <QScrollBar>
 #include <QTemporaryDir>
 #include <QTextBrowser>
@@ -23,6 +26,7 @@
 #include <malloc.h>
 #endif
 #include "qt/memberlist.h"
+#include "qt/packpicker.h"
 #include "qt/sidebar.h"
 #include "qt/timelineview.h"
 
@@ -79,10 +83,13 @@ static long heldKiB()
     return rssAnonKiB();
 }
 
-/* Like step(), for memory: `f` may grow the process by `budgetKiB` at most (resident anonymous memory after everything has settled). */
+/* Like step(), for memory: `f` may grow the process by `budgetKiB` at most (resident anonymous memory after everything has settled). The budgets are
+   for a screen at scale 1; pictures are drawn at the device's pixels, so at scale 2 (QT_SCALE_FACTOR=2) they have four times the bytes. */
 template <class F> static void memstep(const char *name, long budgetKiB, F f)
 {
     if (!only.isEmpty() && !QString(name).contains(only, Qt::CaseInsensitive)) return;
+    const double scale = qMax(1.0, QGuiApplication::primaryScreen()->devicePixelRatio());
+    budgetKiB = long(budgetKiB * scale * scale);
     const long before = heldKiB();
     f();
     const long grew = heldKiB() - before;
@@ -178,8 +185,25 @@ int main(int argc, char **argv)
         mtl.resize(900, 600);
         mtl.show();
         app.processEvents();
-        memstep("memory: 10 rooms of 14 pictures, visited 3 times", 60000, [&] {
+        memstep("memory: 10 rooms of 14 pictures, visited 3 times", 40000, [&] {
             for (int cycle = 0; cycle < 3; cycle++) for (int r = 0; r < 10; r++) { mtl.reset(); mtl.setRows(room(r)); settle(); }
+        });
+        mtl.reset();
+        Sidebar msb;
+        msb.resize(260, 700);
+        msb.show();
+        memstep("memory: 600 rooms with a picture of their own (sidebar)", 12000, [&] {
+            QJsonArray rooms;
+            for (int i = 0; i < 600; i++) rooms.append(QJsonObject{{"id", QString("!m%1:hs").arg(i)}, {"title", QString("room %1").arg(i)}, {"section", "Rooms"}, {"unread", 0}, {"notify", "default"}, {"avatar_path", link(faces[i % faces.size()], QString("room_face%1").arg(i))}});
+            msb.refresh(rooms, "", "");
+        });
+        MemberList mml;
+        mml.resize(240, 600);
+        mml.show();
+        memstep("memory: 3 000 people with a picture each (member list)", 60000, [&] {
+            QJsonArray ms;
+            for (int i = 0; i < 3000; i++) ms.append(QJsonObject{{"user_id", QString("@p%1:hs").arg(i)}, {"name", QString("Person %1").arg(i)}, {"role", "Member"}, {"avatar_path", link(faces[i % faces.size()], QString("member_face%1").arg(i))}});
+            mml.refresh(QJsonObject{{"id", "!big:hs"}, {"members", ms}});
         });
     }
 
@@ -360,6 +384,25 @@ int main(int argc, char **argv)
             for (int i = 0; i < 20000; i++) st.insert(QString("@u%1:hs").arg(i), (i + round) % 3 ? "online" : "offline");
             ml.setPresence(st);
         }
+    });
+
+    /* The sticker picker is a popup nobody looks at most of the time: it must not decode and scale every sticker of a room's packs whenever the room
+       sends them (every room entered did), only when it opens. */
+    step("pickers: stickers are drawn when the picker opens", 1500, [&] {
+        QTemporaryDir dir;
+        const QString png = dir.filePath("sticker.png");
+        QImage(300, 300, QImage::Format_RGB32).save(png);
+        PackPicker pp;
+        QJsonArray emotes;
+        for (int i = 0; i < 30; i++) emotes.append(QJsonObject{{"shortcode", QString("s%1").arg(i)}, {"mxc", QString("mxc://hs/s%1").arg(i)}, {"path", png}, {"sticker", true}, {"emoji", false}});
+        pp.setPacks(QJsonArray{QJsonObject{{"name", "pack"}, {"emotes", emotes}}});
+        auto *grid = pp.findChild<QListWidget *>();
+        const int before = grid->count();
+        pp.popupAt(QPoint(400, 400));
+        const int after = grid->count();
+        pp.hide();
+        std::printf("    stickers in the grid before opening: %d, after: %d\n", before, after);
+        if (before != 0 || after != 30) failures++;
     });
 
     std::printf("\n%d step(s) too slow\n", failures);

@@ -25,6 +25,7 @@ private:
     QComboBox *pack_;
     QListWidget *grid_;
     QLabel *empty_;
+    bool stale_ = false; /* the grid shows another room's stickers (or none): fill it when the popup opens */
 };
 
 }
