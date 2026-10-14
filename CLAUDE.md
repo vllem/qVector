@@ -65,6 +65,39 @@ QT_QPA_PLATFORM=offscreen XDG_CONFIG_HOME=$(mktemp -d) ./build/qvector --demo --
 * Known: with the default `--delay` an unoptimised demo may exit while the simulated user "bob" (`testkit::bob_says`) is still opening its client: a panic message from the SDK's
   store on stderr at exit, nothing to do with the app; the smoke script uses a long delay.
 
+## Memory (what costs what, and what keeps it down)
+
+Measured with `qvector_stress` (the steps called `memory: ...`: resident anonymous memory after a settle and `malloc_trim(0)`, each with a budget that is
+multiplied by the display scale squared: run it with `QT_SCALE_FACTOR=2` too), with heaptrack on a dev build for the engine, and with a counting
+`#[global_allocator]` in a scratch example for data structures (not committed; the numbers are in the commit messages). The demo is too small to show most
+of this: the stress steps make the pictures, rooms and people themselves (real JPEG/PNG files of 4000x3000 and 512x512, `QFile::link` to count them as many).
+
+* Pictures: never keep a decode of a file bigger than what is drawn. `vc::loadFitted` (`qt/imageload.h`) decodes straight to the draw size (JPEG, WebP; PNG is
+  decoded in full and shrunk). The timeline keeps its finished pictures in a `QCache` by byte cost whose limit follows what the last redraw used
+  (`TimelineView::drawn_`), avatars one 32/64 px square per file (`avatarSquare`). A `QHash` of decoded files that nothing empties was +727 MB for ten rooms with
+  14 photos, +244 MB for 600 sidebar avatars, +1.2 GB for 3 000 members; the same steps now are +26, +6 and +38 MB. Pickers read icons at icon size.
+* `render()` makes a new `QTextDocument`: `setUndoRedoEnabled(false)` after `setHtml` (it switches undo back on, and the partial redraw edits the document: 10 undo
+  steps and about 5 KB for every message that arrives, for as long as the room stays open).
+* What a message costs in Qt: about 2.2 KB as rows (29 JSON fields) and 6 KB more while it is in the document (100 are shown, "Show earlier" adds 100). A member
+  row about 12 KB with its picture; a closed member list gives its rows back (not when the window is minimised). Remote video pictures wait in one slot per person
+  (`Core::pictureTrampoline`): a queue of them was 200 MB in a few seconds of GUI stall.
+* The engine: the timeline and emote-pack events are serialized from borrowed structs, not `json!` (a `Value` tree was five times the text and 200 000 allocations
+  for 5 000 rows); the C sink moves the String into the C string; the open room's loop shares the map of downloaded pictures (`Arc`). A camera picture that already
+  fits is not copied before encoding (`Frame::fitted_ref`).
+* glibc (`main.cpp`): `M_ARENA_MAX` 2, `M_MMAP_THRESHOLD` fixed at 256 KB (the dynamic one climbs to the biggest block ever freed and left 25 MB of free heap between two
+  trims; the price is page faults for big blocks, i.e. video frames), `malloc_trim` every 30 s. The stress memory step limits the free heap before the trim.
+* The SDK: its event cache keeps every live event of a room nobody subscribes to (372 events after 300 messages): `ui::shrink_event_caches` asks the rooms a sync
+  touched every 5 minutes, and its test fails if the SDK ever does it itself. Each SQLite connection is capped at 500 KB of page cache (default 2 MB, a dozen of them).
+* The message index (`index.rs`): rows packed into one text arena, 190 bytes a message (was 541), saved as sealed segment files (`seg-NNNNNN.enc`: a save writes what
+  changed; many segments are written again as few; the old single file is read and replaced).
+* Link: `--gc-sections` takes 38 MB off the release binary and 2 MB off its resident size. The demo removes its own temporary folders (`/tmp` was 370 MB of them).
+* Not done, with what it would give: the sync has no filter, so the first sign-in of an account downloads every member of every room (`lazy_load_members` and no
+  `presence` in a `FilterDefinition`; the SDK stores presence events the UI never reads); timeline pictures are downloaded as full originals (a 25 MB photo is about 50 MB at
+  once, file plus HTTP/2 buffers; `info.thumbnail_source` or the server's thumbnail is about 50 KB, but the viewer opens `image_path`, so a click would need to fetch the
+  original); a non-PIE link (another 4 MB resident, but no ASLR for our code); `max_blocking_threads`; leaving default fields out of the `UiMessage` JSON (2.2 KB -> about 1 KB a row,
+  and the tests read `m["pending"] == false`); a timeline window that drops far-away messages from the document. Qt loads all 11 image plugins (1.6 MB) at the first
+  `QLineEdit::setClearButtonEnabled`, whatever the app asks of `QImageReader`.
+
 ## The fake homeserver (`core-rs/src/testkit.rs`)
 
 wiremock-based, several users/devices: login, keys upload/query/claim/signatures/device_signing (optional UIA password), to-device, send/redact/state (state PUT is
