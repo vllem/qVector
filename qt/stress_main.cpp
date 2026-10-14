@@ -360,7 +360,8 @@ int main(int argc, char **argv)
     });
 
     /* ---- memory: what a long session shows (pictures, avatars) must not pile up. Photos and faces are made here, as real JPEG/PNG files. These steps come
-       last: they leave the heap in a state that makes the time steps above slower by a few per cent. ---- */
+       last: they leave the heap in a state that makes the time steps above slower by a few per cent. Their figures and budgets are for `qvector_stress memory` run
+       on its own (a fresh process): in a full run they start from a warm heap that reuses freed memory and read lower. ---- */
     QTemporaryDir farm;
     QStringList photos, faces;
     const bool wantMemory = farm.isValid() && (only.isEmpty() || only.contains("memory", Qt::CaseInsensitive));

@@ -71,6 +71,8 @@ Measured with `qvector_stress` (the steps called `memory: ...`: resident anonymo
 multiplied by the display scale squared: run it with `QT_SCALE_FACTOR=2` too), with heaptrack on a dev build for the engine, and with a counting
 `#[global_allocator]` in a scratch example for data structures (not committed; the numbers are in the commit messages). The demo is too small to show most
 of this: the stress steps make the pictures, rooms and people themselves (real JPEG/PNG files of 4000x3000 and 512x512, `QFile::link` to count them as many).
+The figures below and the budgets are for `qvector_stress memory` run on its own (a fresh process); in a full run the memory steps come last and start from a warm
+heap that reuses freed memory, so they read lower (a regression of 10 MB in the sidebar would pass there; gross ones still do not).
 
 * Pictures: never keep a decode of a file bigger than what is drawn. `vc::loadFitted` (`qt/imageload.h`) decodes straight to the draw size (JPEG, WebP; PNG is
   decoded in full and shrunk). The timeline keeps its finished pictures in a `QCache` by byte cost whose limit follows what the last redraw used
