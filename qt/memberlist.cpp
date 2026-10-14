@@ -4,6 +4,7 @@
 #include <QClipboard>
 #include <QHideEvent>
 #include <QShowEvent>
+#include <QTimer>
 #include <QJsonArray>
 #include <QMenu>
 #include <QPainter>
@@ -60,7 +61,9 @@ void MemberList::hideEvent(QHideEvent *e)
 void MemberList::showEvent(QShowEvent *e)
 {
     QListWidget::showEvent(e);
-    if (count() == 0 && !last_.isEmpty()) refresh(last_);
+    /* later: the toggle that shows the list fills it with the open room's details right after this (the details kept here may be another room's); this is
+       for a list that comes back without a toggle (the window from the tray) */
+    QTimer::singleShot(0, this, [this] { if (isVisible() && count() == 0 && !last_.isEmpty()) refresh(last_); });
 }
 
 void MemberList::setPresence(const QJsonObject &states)

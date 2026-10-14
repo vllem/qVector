@@ -84,8 +84,10 @@ of this: the stress steps make the pictures, rooms and people themselves (real J
 * The engine: the timeline and emote-pack events are serialized from borrowed structs, not `json!` (a `Value` tree was five times the text and 200 000 allocations
   for 5 000 rows); the C sink moves the String into the C string; the open room's loop shares the map of downloaded pictures (`Arc`). A camera picture that already
   fits is not copied before encoding (`Frame::fitted_ref`).
-* glibc (`main.cpp`): `M_ARENA_MAX` 2, `M_MMAP_THRESHOLD` fixed at 256 KB (the dynamic one climbs to the biggest block ever freed and left 25 MB of free heap between two
-  trims; the price is page faults for big blocks, i.e. video frames), `malloc_trim` every 30 s. The stress memory step limits the free heap before the trim.
+* glibc: `M_ARENA_MAX` 2 and a `malloc_trim` every 30 s (`main.cpp`). glibc raises the size above which a block gets a mapping of its own to the biggest block it has freed, so
+  the buffers of a decoded picture stay in the heap when freed (25 MB of free heap after the pictures step): `TimelineView::render` calls `giveBackFreedMemory()` (a
+  `malloc_trim`) once when it decoded files. Do not fix `M_MMAP_THRESHOLD` instead (tried, 256 KB to 4 MB): it also stops that, but every big layout array and video frame becomes
+  a mapping, 4x the page faults (13 k -> 50 k in the resize step, 3% slower, and it broke that step's budget, which is within 3% of the limit even on the old tree).
 * The SDK: its event cache keeps every live event of a room nobody subscribes to (372 events after 300 messages): `ui::shrink_event_caches` asks the rooms a sync
   touched every 5 minutes, and its test fails if the SDK ever does it itself. Each SQLite connection is capped at 500 KB of page cache (default 2 MB, a dozen of them).
 * The message index (`index.rs`): rows packed into one text arena, 190 bytes a message (was 541), saved as sealed segment files (`seg-NNNNNN.enc`: a save writes what

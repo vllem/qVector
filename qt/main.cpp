@@ -46,10 +46,6 @@ int main(int argc, char **argv)
 {
 #ifdef __GLIBC__
     mallopt(M_ARENA_MAX, 2); /* by default every thread gets an arena that keeps its freed memory */
-    /* Fixing the threshold also stops glibc from raising it: it follows the biggest block ever freed (up to 32 MB), after which every picture, JSON text
-       and download of that size comes from the heap and stays there when freed, until the next malloc_trim (25 MB held between two trims in the
-       picture test, 2 MB with this). Costs a page fault per page of such a block: about 2% of a video call's CPU. */
-    mallopt(M_MMAP_THRESHOLD, 256 * 1024);
 #endif
     QApplication app(argc, argv);
 #ifdef __GLIBC__

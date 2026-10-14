@@ -105,8 +105,9 @@ template <class F> static void memstep(const char *name, long budgetKiB, F f, lo
     std::printf("%-58s %+8ld KiB  (budget %ld)  %s   [free heap before trim: %ld KiB]\n", name, grew, budgetKiB, ok ? "ok" : "TOO MUCH MEMORY", freeHeapKiB);
     std::fflush(stdout);
     if (!ok) failures++;
-    /* with `maxFreeHeapKiB`: what glibc may keep free between two trims. The app fixes the threshold above which blocks get a mapping of their own (main.cpp),
-       so a picture or a download does not linger in the heap after it is freed: 25 MB were held after the pictures step without that, 2 MB with it. */
+    /* with `maxFreeHeapKiB`: what glibc may keep free between two trims. glibc raises the size above which a block gets a mapping of its own to the biggest block
+       it has freed, so the buffers of a decoded picture then stay in the heap when they are freed (25 MB were held after the pictures step): the timeline gives
+       the heap back itself when it has decoded pictures (giveBackFreedMemory). */
     if (before >= 0 && maxFreeHeapKiB >= 0 && freeHeapKiB > maxFreeHeapKiB) { std::printf("    glibc held %ld KiB of free memory before the trim (limit %ld)\n", freeHeapKiB, maxFreeHeapKiB); failures++; }
 }
 
@@ -170,7 +171,6 @@ int main(int argc, char **argv)
 {
 #ifdef __GLIBC__
     mallopt(M_ARENA_MAX, 2); /* as in the app (qt/main.cpp): the memory steps measure what the app does */
-    mallopt(M_MMAP_THRESHOLD, 256 * 1024);
 #endif
     QApplication app(argc, argv);
     if (argc > 1) only = argv[1];
@@ -468,8 +468,14 @@ int main(int argc, char **argv)
         states.insert("@h1:hs", "online");
         hidden.setPresence(states); /* news about presence must not rebuild a list nobody sees */
         if (hidden.count() != 0) { std::printf("    %d rows are still there\n", hidden.count()); failures++; }
-        hidden.show(); /* it fills again by itself (the toggle, or the window coming back from the tray) */
+        hidden.show(); /* it fills again by itself (the window coming back from the tray) ... */
+        QApplication::processEvents();
         if (hidden.count() != 3000) { std::printf("    %d rows after showing it again, not 3000\n", hidden.count()); failures++; }
+        hidden.hide();
+        hidden.show(); /* ... but the toggle shows it and fills it with the open room's details at once: the old room's people are not built first */
+        hidden.refresh(QJsonObject{{"id", "!other:hs"}, {"members", QJsonArray{QJsonObject{{"user_id", "@z:hs"}, {"name", "Zed"}, {"role", "Member"}}}}});
+        QApplication::processEvents();
+        if (hidden.count() != 1) { std::printf("    %d rows after a toggle, not the other room's 1\n", hidden.count()); failures++; }
         hidden.hide();
     });
 

@@ -338,10 +338,13 @@ void TimelineView::render()
     const QString look = QString::number(dpr) + QChar(1) + base.name();
     qint64 drawnBytes = 0;
     drawn_.setMaxCost(kMaxDrawnBytes); /* never evict what this redraw has just made */
+    /* a redraw that decoded files has made (and freed) buffers of megabytes: the heap gives them back when this redraw is over (see giveBackFreedMemory) */
+    struct TrimAtEnd { bool decoded = false; ~TrimAtEnd() { if (decoded) giveBackFreedMemory(); } } trimAtEnd;
     auto drawn = [&](const QString &what, const QString &path, const std::function<QImage(const QString &)> &make) -> QImage {
         if (path.isEmpty()) return QImage();
         const QString key = what + QChar(1) + path + QChar(1) + look;
         if (const QImage *hit = drawn_.object(key)) { drawnBytes += hit->sizeInBytes(); return *hit; }
+        trimAtEnd.decoded = true;
         const QImage img = make(path);
         const qsizetype bytes = img.isNull() ? 1 : img.sizeInBytes(); /* a file that cannot be read is remembered too, at no cost */
         drawn_.insert(key, new QImage(img), int(qMin<qsizetype>(bytes, kMaxDrawnBytes)));

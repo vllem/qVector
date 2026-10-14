@@ -1,7 +1,17 @@
 #include "qt/imageload.h"
 #include <QImageReader>
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 
 namespace vc {
+
+void giveBackFreedMemory()
+{
+#ifdef __GLIBC__
+    malloc_trim(0);
+#endif
+}
 
 QImage loadFitted(const QString &path, const QSize &box, Qt::AspectRatioMode mode)
 {
