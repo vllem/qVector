@@ -399,11 +399,16 @@ impl App {
     }
 
     fn sign_out(&self) -> Value {
-        self.stop_tasks();
+        let stopped: Vec<JoinHandle<()>> = {
+            let mut t = self.inner.tasks.lock().unwrap();
+            [t.timeline.take(), t.typing.take(), t.thread.take(), t.sync.take()].into_iter().flatten().collect()
+        };
+        for h in &stopped { h.abort(); }
         let i = self.inner.clone();
         let client = i.client.lock().unwrap().take();
         let held = i.signout.clone().try_lock_owned().ok(); /* taken before returning, so a login that follows has to wait */
         self.rt().spawn(async move {
+            for h in stopped { let _ = h.await; } /* gone for good before anything they use is deleted */
             end_session(&i, client, true).await;
             drop(held);
         });
@@ -727,10 +732,13 @@ async fn end_session(i: &Arc<Inner>, client: Option<Client>, logout: bool) {
     *i.timeline.lock().await = None;
     *i.thread.lock().await = None;
     let calls = i.calls.lock().unwrap().take();
-    if let Some(c) = calls { c.hangup().await; }
+    if let Some(c) = &calls { c.hangup().await; }
     let groups = i.groups.lock().unwrap().take();
-    if let Some(g) = groups { g.leave().await; }
-    if let (true, Some(c)) = (logout, client) { let _ = c.matrix_auth().logout().await; }
+    if let Some(g) = &groups { g.leave().await; }
+    if let (true, Some(c)) = (logout, &client) { let _ = c.matrix_auth().logout().await; }
+    /* every handle on the databases must be gone (the aborted tasks drop theirs at their next step) before the files are deleted and a new login reuses the place */
+    drop((calls, groups, client));
+    tokio::time::sleep(Duration::from_millis(300)).await;
     crate::session::forget(&i.dir());
 }
 
