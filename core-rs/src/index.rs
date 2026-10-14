@@ -1,8 +1,13 @@
 //! A local, encrypted index of message text, so search reaches back through encrypted rooms (the server cannot search those).
-//! Rows are kept in memory and saved as one file sealed with a `StoreCipher` whose key comes from the session secret; the plain text is
-//! never written to disk. Fed from the timelines the app already shows, and from `crawl_room`, which pages back through a room's history.
+//!
+//! In memory the rows are packed: one text arena for the event ids and the bodies, 32 bytes of numbers per message, rooms and senders named once
+//! (about 150 bytes a message; a row of strings in a map was 540). On disk the index is a log of sealed segment files (`seg-000001.enc`, ...), each
+//! holding the rows that were new or changed since the one before, so a save costs what changed and not the whole index (it sealed all of it every
+//! twenty seconds, three times its size in memory at a time); many segments are written again as a few big ones. The plain text is never written to
+//! disk. Fed from the timelines the app already shows, and from `crawl_room`, which pages back through a room's history.
 
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -38,11 +43,63 @@ fn contains_ci(hay: &str, needle: &str) -> bool {
 
 /// A search looks at this many different words of the query at most.
 const MAX_QUERY_WORDS: usize = 16;
+/// The most rows one segment file holds (a save of more writes several): sealing one takes about three times its text in memory for a moment.
+const SEGMENT_ROWS: usize = 20_000;
+/// More segment files than this are written again as a few big ones.
+const MAX_SEGMENTS: usize = 12;
+
+/// What a segment file holds: the rooms forgotten since the last one (their earlier rows are void) and then the rows that are new or changed.
+#[derive(Default, Serialize, Deserialize)]
+struct Segment {
+    #[serde(default)]
+    forgot: Vec<String>,
+    #[serde(default)]
+    rows: Vec<IndexRow>,
+}
+
+/// One message: numbers, and where its event id and body are in the text arena.
+#[derive(Clone, Copy)]
+struct Row { ts: u64, room: u32, sender: u32, id_off: u32, body_off: u32, body_len: u32, id_len: u16 }
+
+/// Names (room ids, sender names) kept once each, numbered in the order they came.
+#[derive(Default)]
+struct Names { list: Vec<Arc<str>>, number: HashMap<Arc<str>, u32> }
+
+impl Names {
+    fn id(&mut self, name: &str) -> u32 {
+        if let Some(&n) = self.number.get(name) { return n; }
+        let n = self.list.len() as u32;
+        let shared: Arc<str> = name.into();
+        self.list.push(shared.clone());
+        self.number.insert(shared, n);
+        n
+    }
+    fn find(&self, name: &str) -> Option<u32> { self.number.get(name).copied() }
+    fn get(&self, n: u32) -> &str { &self.list[n as usize] }
+}
 
 pub struct MessageIndex {
-    file: PathBuf,
-    cipher: StoreCipher,
-    rows: HashMap<String, IndexRow>,
+    dir: PathBuf,
+    cipher: Arc<StoreCipher>,
+    rooms: Names,
+    senders: Names,
+    /// the event ids and bodies of all rows, one after the other
+    text: String,
+    rows: Vec<Row>,
+    /// open-addressing table of row number + 1 (0 = free) by (room, event id); its length is a power of two
+    slots: Vec<u32>,
+    hasher: std::collections::hash_map::RandomState,
+    /// rows that are new or changed since the last save
+    pending: Vec<u32>,
+    /// rooms forgotten since the last save
+    forgot: Vec<String>,
+    /// the segment files on disk, oldest first, and the number the next one gets
+    segments: Vec<u32>,
+    next_segment: u32,
+    /// the index was read from the old single file: the next save writes everything as segments and removes it
+    legacy: bool,
+    /// bytes of `text` that no row refers to any more (a body that was edited)
+    garbage: usize,
     dirty: bool,
 }
 
@@ -66,41 +123,148 @@ pub(crate) fn open_cipher(dir: &Path, stem: &str, secret: &str) -> Result<StoreC
     Ok(c)
 }
 
+fn segment_path(dir: &Path, n: u32) -> PathBuf { dir.join(format!("seg-{n:06}.enc")) }
+
+/// The numbers of the segment files in `dir`, oldest first.
+fn segment_numbers(dir: &Path) -> Vec<u32> {
+    let mut out: Vec<u32> = std::fs::read_dir(dir).into_iter().flatten().flatten()
+        .filter_map(|e| e.file_name().to_str().and_then(|n| n.strip_prefix("seg-")?.strip_suffix(".enc")?.parse().ok()))
+        .collect();
+    out.sort_unstable();
+    out
+}
+
 impl MessageIndex {
-    /// Open (or start) the index in `dir`. A file that cannot be opened with this secret is treated as lost and replaced.
+    /// Open (or start) the index in `dir`. What cannot be opened with this secret is treated as lost and replaced.
     pub fn open(dir: &Path, secret: &str) -> Result<MessageIndex, String> {
-        let cipher = open_cipher(dir, "index", secret)?;
-        let file = dir.join("index.enc");
-        let rows: Vec<IndexRow> = std::fs::read(&file).ok().and_then(|b| cipher.decrypt_value(&b).ok()).unwrap_or_default();
-        Ok(MessageIndex { file, cipher, rows: rows.into_iter().map(|r| (format!("{}|{}", r.room_id, r.event_id), r)).collect(), dirty: false })
+        let cipher = Arc::new(open_cipher(dir, "index", secret)?);
+        let mut idx = MessageIndex {
+            dir: dir.to_path_buf(), cipher, rooms: Names::default(), senders: Names::default(), text: String::new(), rows: Vec::new(), slots: Vec::new(),
+            hasher: Default::default(), pending: Vec::new(), forgot: Vec::new(), segments: Vec::new(), next_segment: 1, legacy: false, garbage: 0, dirty: false,
+        };
+        /* the index of the earlier versions: one sealed file with every row */
+        if let Some(rows) = std::fs::read(dir.join("index.enc")).ok().and_then(|b| idx.cipher.decrypt_value::<Vec<IndexRow>>(&b).ok()) {
+            for r in &rows { idx.upsert(&r.room_id, &r.event_id, &r.sender, r.ts, &r.body); }
+            idx.legacy = true;
+        }
+        for n in segment_numbers(dir) {
+            idx.next_segment = n + 1;
+            let path = segment_path(dir, n);
+            match std::fs::read(&path).ok().and_then(|b| idx.cipher.decrypt_value::<Segment>(&b).ok()) {
+                Some(seg) => {
+                    for room in &seg.forgot { idx.drop_room(room); }
+                    for r in &seg.rows { idx.upsert(&r.room_id, &r.event_id, &r.sender, r.ts, &r.body); }
+                    idx.segments.push(n);
+                }
+                None => { let _ = std::fs::remove_file(&path); } /* sealed with another secret, or damaged */
+            }
+        }
+        idx.pending = Vec::new(); /* what was read is saved already */
+        idx.forgot.clear();
+        idx.dirty = idx.legacy;
+        idx.text.shrink_to_fit(); /* the buffers grew by doubling while the files were read */
+        idx.rows.shrink_to_fit();
+        Ok(idx)
     }
 
     pub fn len(&self) -> usize { self.rows.len() }
 
+    /// About how many bytes the rows take in memory (what the text arena, the rows, the table and the list of unsaved rows hold; not the names). The
+    /// unused end of a buffer that grew is not counted: it was never touched, so it is not resident.
+    pub fn approx_bytes(&self) -> usize { self.text.len() + self.rows.len() * std::mem::size_of::<Row>() + self.slots.len() * 4 + self.pending.len() * 4 }
+
+    fn id_of(&self, r: &Row) -> &str { &self.text[r.id_off as usize..r.id_off as usize + r.id_len as usize] }
+    fn body_of(&self, r: &Row) -> &str { &self.text[r.body_off as usize..r.body_off as usize + r.body_len as usize] }
+
+    /// The row of an event of a room, if it is indexed.
+    fn find(&self, room: u32, event_id: &str) -> Option<u32> {
+        if self.slots.is_empty() { return None; }
+        let mask = self.slots.len() - 1;
+        let mut i = self.hasher.hash_one((room, event_id)) as usize & mask;
+        loop {
+            let s = self.slots[i];
+            if s == 0 { return None; }
+            let r = &self.rows[(s - 1) as usize];
+            if r.room == room && self.id_of(r) == event_id { return Some(s - 1); }
+            i = (i + 1) & mask;
+        }
+    }
+
     /// Is this event indexed already?
-    pub fn knows(&self, room_id: &str, event_id: &str) -> bool { self.rows.contains_key(&format!("{room_id}|{event_id}")) }
+    pub fn knows(&self, room_id: &str, event_id: &str) -> bool { self.rooms.find(room_id).map_or(false, |room| self.find(room, event_id).is_some()) }
+
+    /// The table is made again, big enough for the rows there are (never more than 70% full, 35% after it is made).
+    fn rebuild_slots(&mut self) {
+        self.slots = vec![0; (self.rows.len() * 2).next_power_of_two().max(16)];
+        let mask = self.slots.len() - 1;
+        for (n, r) in self.rows.iter().enumerate() {
+            let mut i = self.hasher.hash_one((r.room, self.id_of(r))) as usize & mask;
+            while self.slots[i] != 0 { i = (i + 1) & mask; }
+            self.slots[i] = n as u32 + 1;
+        }
+    }
+
+    /// Put row `n` (just added to `rows`) in the table.
+    fn place(&mut self, n: u32) {
+        if self.rows.len() * 10 > self.slots.len() * 7 { self.rebuild_slots(); return; } /* includes row n */
+        let mask = self.slots.len() - 1;
+        let r = self.rows[n as usize];
+        let mut i = self.hasher.hash_one((r.room, self.id_of(&r))) as usize & mask;
+        while self.slots[i] != 0 { i = (i + 1) & mask; }
+        self.slots[i] = n + 1;
+    }
+
+    fn push_text(&mut self, s: &str) -> (u32, u32) {
+        let off = self.text.len();
+        self.text.push_str(s);
+        (off as u32, s.len() as u32)
+    }
+
+    /// Add a message, or change the one with this event id (an edit). True when the index changed.
+    fn upsert(&mut self, room_id: &str, event_id: &str, sender: &str, ts: u64, body: &str) -> bool {
+        if event_id.len() > u16::MAX as usize || self.text.len() + event_id.len() + body.len() >= u32::MAX as usize { return false; } /* no room for it */
+        let (room, sender) = (self.rooms.id(room_id), self.senders.id(sender));
+        if let Some(n) = self.find(room, event_id) {
+            let r = self.rows[n as usize];
+            if r.ts == ts && r.sender == sender && self.body_of(&r) == body { return false; }
+            let (off, len) = self.push_text(body); /* the new text goes at the end, the old one is garbage until the arena is packed */
+            self.garbage += r.body_len as usize;
+            let r = &mut self.rows[n as usize];
+            (r.ts, r.sender, r.body_off, r.body_len) = (ts, sender, off, len);
+            self.pending.push(n);
+        } else {
+            let (id_off, id_len) = self.push_text(event_id);
+            let (body_off, body_len) = self.push_text(body);
+            let n = self.rows.len() as u32;
+            self.rows.push(Row { ts, room, sender, id_off, body_off, body_len, id_len: id_len as u16 });
+            self.place(n);
+            self.pending.push(n);
+        }
+        self.dirty = true;
+        true
+    }
 
     #[cfg(test)]
-    pub(crate) fn insert_row(&mut self, row: IndexRow) { self.rows.insert(format!("{}|{}", row.room_id, row.event_id), row); self.dirty = true; }
+    pub(crate) fn insert_row(&mut self, row: IndexRow) { self.upsert(&row.room_id, &row.event_id, &row.sender, row.ts, &row.body); }
 
     /// Add the readable messages of these timeline items (what is not decrypted yet, pending or empty is skipped).
     pub fn add_items(&mut self, room_id: &str, items: &[Arc<TimelineItem>]) -> usize { self.add_messages(room_id, &ui_messages(items, "")) }
 
     /// `add_items` for rows that are already made (the open timeline has just turned its items into rows for the UI: no second pass over them).
+    /// Messages the index has already cost nothing: they are looked up by their text, not copied.
     pub fn add_messages(&mut self, room_id: &str, messages: &[UiMessage]) -> usize {
         let mut added = 0;
         for m in messages {
-            if let Some(row) = self.row_of(room_id, m) {
-                let key = format!("{}|{}", row.room_id, row.event_id);
-                if self.rows.get(&key) != Some(&row) { self.rows.insert(key, row); self.dirty = true; added += 1; }
-            }
+            if m.pending || m.id.starts_with('~') || m.body.is_empty() || !matches!(m.kind.as_str(), "text" | "emote" | "notice" | "image" | "video" | "audio" | "file" | "poll") { continue; }
+            if self.upsert(room_id, &m.id, &m.sender, m.ts, &m.body) { added += 1; }
         }
         added
     }
 
-    fn row_of(&self, room_id: &str, m: &UiMessage) -> Option<IndexRow> {
-        if m.pending || m.id.starts_with('~') || m.body.is_empty() || !matches!(m.kind.as_str(), "text" | "emote" | "notice" | "image" | "video" | "audio" | "file" | "poll") { return None; }
-        Some(IndexRow { room_id: room_id.into(), event_id: m.id.clone(), sender: m.sender.clone(), time: m.time.clone(), ts: m.ts, body: m.body.clone() })
+    /// A row as the callers know it.
+    fn materialize(&self, n: u32) -> IndexRow {
+        let r = &self.rows[n as usize];
+        IndexRow { room_id: self.rooms.get(r.room).into(), event_id: self.id_of(r).into(), sender: self.senders.get(r.sender).into(), time: crate::ui::clock(r.ts), ts: r.ts, body: self.body_of(r).into() }
     }
 
     /// Messages containing every word of `query` (case-insensitive), in one room or all, newest first, at most `limit`.
@@ -112,30 +276,122 @@ impl MessageIndex {
         }
         words.sort_by_key(|w| std::cmp::Reverse(w.len())); /* the longest word is the most selective: most rows fail on it first */
         if words.is_empty() || limit == 0 { return Vec::new(); }
-        let mut hits: Vec<&IndexRow> = self.rows.values().filter(|r| room_id.map(|id| id == r.room_id).unwrap_or(true)
-            && words.iter().all(|w| contains_ci(&r.body, w) || contains_ci(&r.sender, w))).collect();
-        let newest = |a: &&IndexRow, b: &&IndexRow| b.ts.cmp(&a.ts).then(b.event_id.cmp(&a.event_id));
+        let room = match room_id { Some(id) => match self.rooms.find(id) { Some(n) => Some(n), None => return Vec::new() }, None => None };
+        let mut hits: Vec<u32> = (0..self.rows.len() as u32).filter(|&n| {
+            let r = &self.rows[n as usize];
+            room.map_or(true, |x| x == r.room) && words.iter().all(|w| contains_ci(self.body_of(r), w) || contains_ci(self.senders.get(r.sender), w))
+        }).collect();
+        let newest = |a: &u32, b: &u32| {
+            let (ra, rb) = (&self.rows[*a as usize], &self.rows[*b as usize]);
+            rb.ts.cmp(&ra.ts).then_with(|| self.id_of(rb).cmp(self.id_of(ra)))
+        };
         if hits.len() > limit {
             hits.select_nth_unstable_by(limit - 1, newest);
             hits.truncate(limit);
         }
         hits.sort_by(newest);
-        hits.into_iter().cloned().collect()
+        hits.into_iter().map(|n| self.materialize(n)).collect()
     }
 
-    /// Write the index if it changed.
-    pub fn save(&mut self) -> Result<(), String> {
-        if !self.dirty { return Ok(()); }
-        let rows: Vec<&IndexRow> = self.rows.values().collect();
-        let sealed = self.cipher.encrypt_value(&rows).map_err(|e| e.to_string())?;
-        let tmp = self.file.with_extension("tmp");
-        std::fs::write(&tmp, sealed).and_then(|_| std::fs::rename(&tmp, &self.file)).map_err(|e| e.to_string())?;
-        self.dirty = false;
-        Ok(())
+    /// The text arena made again with the rows' text only, without the rooms of `skip` (whose rows go). Row numbers change when rows go: the result says
+    /// where each old row went (`u32::MAX`: nowhere).
+    fn repack(&mut self, skip: Option<u32>) -> Vec<u32> {
+        let mut remap = vec![u32::MAX; self.rows.len()];
+        let mut rows = Vec::with_capacity(self.rows.len());
+        let mut text = String::with_capacity(self.text.len().saturating_sub(self.garbage));
+        for (old, r) in self.rows.iter().enumerate() {
+            if Some(r.room) == skip { continue; }
+            let mut r = *r;
+            let id = &self.text[r.id_off as usize..r.id_off as usize + r.id_len as usize];
+            r.id_off = text.len() as u32;
+            text.push_str(id);
+            let body = &self.text[r.body_off as usize..r.body_off as usize + r.body_len as usize];
+            r.body_off = text.len() as u32;
+            text.push_str(body);
+            remap[old] = rows.len() as u32;
+            rows.push(r);
+        }
+        self.rows = rows;
+        self.text = text;
+        self.garbage = 0;
+        self.rebuild_slots();
+        remap
+    }
+
+    /// Forget the rows of a room (in memory). True when there were any.
+    fn drop_room(&mut self, room_id: &str) -> bool {
+        let Some(room) = self.rooms.find(room_id) else { return false };
+        if !self.rows.iter().any(|r| r.room == room) { return false; }
+        let remap = self.repack(Some(room));
+        self.pending = self.pending.iter().filter_map(|&n| Some(remap[n as usize]).filter(|&m| m != u32::MAX)).collect();
+        true
     }
 
     /// Forget everything of a room (we left it).
-    pub fn forget_room(&mut self, room_id: &str) { let before = self.rows.len(); self.rows.retain(|_, r| r.room_id != room_id); if self.rows.len() != before { self.dirty = true; } }
+    pub fn forget_room(&mut self, room_id: &str) {
+        if self.drop_room(room_id) { self.forgot.push(room_id.to_string()); self.dirty = true; }
+    }
+
+    /// Seal `segment` into a file of its own; returns its number.
+    fn write_segment(&mut self, segment: &Segment) -> Result<u32, String> {
+        let n = self.next_segment;
+        let path = segment_path(&self.dir, n);
+        let sealed = self.cipher.encrypt_value(segment).map_err(|e| e.to_string())?;
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, sealed).and_then(|_| std::fs::rename(&tmp, &path)).map_err(|e| e.to_string())?;
+        self.next_segment += 1;
+        self.segments.push(n);
+        Ok(n)
+    }
+
+    /// Seal rows (by number) and the rooms forgotten since the last save into new segment files, SEGMENT_ROWS rows to a file.
+    fn write_pending(&mut self, pending: &[u32]) -> Result<(), String> {
+        let mut forgot = self.forgot.clone();
+        let mut chunks: Vec<&[u32]> = pending.chunks(SEGMENT_ROWS).collect();
+        if chunks.is_empty() && !forgot.is_empty() { chunks.push(&[]); }
+        for chunk in chunks {
+            let segment = Segment { forgot: std::mem::take(&mut forgot), rows: chunk.iter().map(|&n| self.materialize(n)).collect() };
+            self.write_segment(&segment)?;
+        }
+        Ok(())
+    }
+
+    /// Write what changed since the last save as a new segment file (several when it is a lot); when there are many segments, all rows are written
+    /// again as a few and the old files go.
+    pub fn save(&mut self) -> Result<(), String> {
+        if !self.dirty { return Ok(()); }
+        if self.legacy || self.segments.len() >= MAX_SEGMENTS { return self.compact(); }
+        self.pending.sort_unstable();
+        self.pending.dedup();
+        let pending = std::mem::take(&mut self.pending);
+        if let Err(e) = self.write_pending(&pending) { self.pending = pending; return Err(e); }
+        self.forgot.clear();
+        self.dirty = false;
+        if self.garbage > (1 << 20) && self.garbage * 3 > self.text.len() { self.repack(None); } /* edited bodies: the old texts are given back */
+        Ok(())
+    }
+
+    /// Write every row again as segments of their own and remove the older files (and the single file of the earlier versions).
+    fn compact(&mut self) -> Result<(), String> {
+        let old = self.segments.clone();
+        let total = self.rows.len();
+        let mut from = 0;
+        while from < total {
+            let to = (from + SEGMENT_ROWS).min(total);
+            let segment = Segment { forgot: Vec::new(), rows: (from as u32..to as u32).map(|n| self.materialize(n)).collect() };
+            self.write_segment(&segment)?;
+            from = to;
+        }
+        for n in &old { let _ = std::fs::remove_file(segment_path(&self.dir, *n)); }
+        let _ = std::fs::remove_file(self.dir.join("index.enc"));
+        self.segments.retain(|n| !old.contains(n));
+        self.legacy = false;
+        self.pending.clear();
+        self.forgot.clear();
+        self.dirty = false;
+        if self.garbage > 0 { self.repack(None); }
+        Ok(())
+    }
 }
 
 /// Page back through a room's history (up to `pages` pages of 30 events) and index what is readable. Uses its own timeline, so the one on
@@ -170,7 +426,7 @@ mod tests {
         let mut idx = MessageIndex::open(dir.path(), "s").unwrap();
         for (n, body) in ["the quick brown fox", "the lazy dog", "Brown FOX jumps"].iter().enumerate() {
             let row = IndexRow { room_id: "!r:hs".into(), event_id: format!("$e{n}"), sender: "alice".into(), time: String::new(), ts: n as u64, body: body.to_string() };
-            idx.rows.insert(format!("!r:hs|$e{n}"), row);
+            idx.insert_row(row);
         }
         let ids = |q: &str| idx.search(q, None, 10).into_iter().map(|r| r.event_id).collect::<Vec<_>>();
         assert_eq!(ids("fox"), ids(&"fox ".repeat(5000)));
@@ -180,10 +436,103 @@ mod tests {
         // only the first 16 different words count
         let many: Vec<String> = (0..MAX_QUERY_WORDS).map(|n| format!("word{n}")).collect();
         let row = IndexRow { room_id: "!r:hs".into(), event_id: "$many".into(), sender: "alice".into(), time: String::new(), ts: 9, body: many.join(" ") };
-        idx.rows.insert("!r:hs|$many".into(), row);
+        idx.insert_row(row);
         assert_eq!(idx.search(&many.join(" "), None, 10).len(), 1);
         assert_eq!(idx.search(&format!("{} nowhere", many.join(" ")), None, 10).len(), 1, "the 17th different word is not looked at");
         assert!(idx.search(&format!("nowhere {}", many[..MAX_QUERY_WORDS - 1].join(" ")), None, 10).is_empty(), "the first 16 still have to match");
+    }
+
+    fn row(room: &str, id: &str, who: &str, ts: u64, body: &str) -> IndexRow { IndexRow { room_id: room.into(), event_id: id.into(), sender: who.into(), time: String::new(), ts, body: body.into() } }
+
+    fn segment_files(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("seg-")).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn a_save_writes_only_what_changed_and_everything_comes_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut idx = MessageIndex::open(dir.path(), "s").unwrap();
+        for i in 0..50 { idx.insert_row(row("!a:hs", &format!("$a{i}"), "Alice", 1000 + i, &format!("first batch {i}"))); }
+        idx.save().unwrap();
+        assert_eq!(segment_files(dir.path()).len(), 1);
+        let first = std::fs::metadata(dir.path().join("seg-000001.enc")).unwrap().len();
+        idx.save().unwrap();
+        assert_eq!(segment_files(dir.path()).len(), 1, "a save with nothing new writes nothing");
+        for i in 0..3 { idx.insert_row(row("!b:hs", &format!("$b{i}"), "Bob", 5000 + i, &format!("second batch {i}"))); }
+        idx.save().unwrap();
+        assert_eq!(segment_files(dir.path()).len(), 2);
+        assert!(std::fs::metadata(dir.path().join("seg-000002.enc")).unwrap().len() * 5 < first, "the second segment holds three rows, not all fifty-three");
+        /* an edit: same event, new text; a room we leave */
+        assert!(!idx.knows("!a:hs", "$nothing") && idx.knows("!a:hs", "$a7") && !idx.knows("!b:hs", "$a7"));
+        idx.insert_row(row("!a:hs", "$a7", "Alice", 1007, "first batch seven, edited"));
+        idx.forget_room("!b:hs");
+        idx.save().unwrap();
+        let again = MessageIndex::open(dir.path(), "s").unwrap();
+        assert_eq!(again.len(), 50, "the room that was forgotten stays forgotten");
+        assert_eq!(again.search("edited", None, 10).len(), 1);
+        assert!(again.search("first batch seven", None, 10).iter().all(|r| r.body.contains("edited")), "the old text of an edited message is gone");
+        assert!(again.search("second batch", None, 10).is_empty());
+        assert_eq!(again.search("batch 7", Some("!a:hs"), 10).len(), 4, "every word has to be in the text: 17, 27, 37 and 47 (7 itself was edited)");
+        assert_eq!(again.search("Alice batch", Some("!a:hs"), 100).len(), 50, "the sender's name counts too");
+    }
+
+    #[test]
+    fn many_segments_are_written_again_as_few_and_the_old_files_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut idx = MessageIndex::open(dir.path(), "s").unwrap();
+        for round in 0..(MAX_SEGMENTS + 4) {
+            for i in 0..5 { idx.insert_row(row("!a:hs", &format!("$r{round}e{i}"), "Alice", (round * 10 + i) as u64, &format!("round {round} message {i}"))); }
+            idx.save().unwrap();
+            assert!(segment_files(dir.path()).len() <= MAX_SEGMENTS + 1, "{:?}", segment_files(dir.path()));
+        }
+        assert!(segment_files(dir.path()).len() < MAX_SEGMENTS, "the files were written again as fewer: {:?}", segment_files(dir.path()));
+        let again = MessageIndex::open(dir.path(), "s").unwrap();
+        assert_eq!(again.len(), (MAX_SEGMENTS + 4) * 5);
+        assert_eq!(idx.search("message", None, 1000).len(), again.search("message", None, 1000).len());
+    }
+
+    #[test]
+    fn an_index_of_the_earlier_single_file_form_is_read_and_becomes_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let cipher = open_cipher(dir.path(), "index", "s").unwrap();
+        let old = vec![row("!a:hs", "$1", "Alice", 10, "an old message"), row("!a:hs", "$2", "Bob", 20, "another old one")];
+        std::fs::write(dir.path().join("index.enc"), cipher.encrypt_value(&old).unwrap()).unwrap();
+        let mut idx = MessageIndex::open(dir.path(), "s").unwrap();
+        assert_eq!(idx.len(), 2);
+        assert_eq!(idx.search("another", None, 5)[0].event_id, "$2");
+        idx.save().unwrap();
+        assert!(!dir.path().join("index.enc").exists(), "the old file is replaced");
+        assert_eq!(segment_files(dir.path()).len(), 1);
+        assert_eq!(MessageIndex::open(dir.path(), "s").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn segments_sealed_with_another_secret_are_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut idx = MessageIndex::open(dir.path(), "right").unwrap();
+        idx.insert_row(row("!a:hs", "$1", "Alice", 10, "secret words"));
+        idx.save().unwrap();
+        assert_eq!(segment_files(dir.path()).len(), 1);
+        let other = MessageIndex::open(dir.path(), "wrong").unwrap();
+        assert_eq!(other.len(), 0);
+        assert!(segment_files(dir.path()).is_empty(), "what cannot be read is removed");
+    }
+
+    #[test]
+    fn a_message_costs_about_two_hundred_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut idx = MessageIndex::open(dir.path(), "s").unwrap();
+        for i in 0..20_000u64 {
+            idx.insert_row(row(&format!("!room{}abcdefghijklmnop:example.org", i % 50), &format!("$e{i}abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ"), &format!("Person {}", i % 40), i,
+                &format!("message {i}: the quick brown fox jumps over the lazy dog, again and again until the line wraps")));
+        }
+        let per = idx.approx_bytes() / idx.len();
+        assert!(per < 220, "{per} bytes a message: 150 of text, 32 of numbers and the table (it was 540 as strings in a map)");
+        assert_eq!(idx.search("19999", None, 5).len(), 1);
+        let hit = &idx.search("again", Some("!room3abcdefghijklmnop:example.org"), 1)[0];
+        assert_eq!(hit.time, crate::ui::clock(hit.ts));
     }
 
     #[test]
@@ -298,7 +647,7 @@ mod tests {
         drop(i);
 
         index.lock().unwrap().save().unwrap();
-        let sealed = std::fs::read(idx_dir.join("index.enc")).unwrap();
+        let sealed = std::fs::read(idx_dir.join("seg-000001.enc")).unwrap();
         assert!(!String::from_utf8_lossy(&sealed).contains("quick brown fox"), "the file is sealed");
         let again = MessageIndex::open(&idx_dir, "secret").unwrap();
         assert_eq!(again.search("quick brown", None, 10).len(), 1, "it comes back with the same secret");

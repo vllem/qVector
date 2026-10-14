@@ -454,7 +454,7 @@ pub async fn ui_rooms_with_spaces(client: &Client, spaces: &matrix_sdk_ui::space
     rooms
 }
 
-fn clock(ms: u64) -> String { let s = ms / 1000; format!("{:02}:{:02}", (s / 3600) % 24, (s / 60) % 60) }
+pub(crate) fn clock(ms: u64) -> String { let s = ms / 1000; format!("{:02}:{:02}", (s / 3600) % 24, (s / 60) % 60) }
 
 fn name_of(profile: &TimelineDetails<matrix_sdk_ui::timeline::Profile>, id: &str) -> String {
     /* spec: "Calculating the display name for a user": a name two members share is shown with the user id, so nobody can pass as somebody else */
