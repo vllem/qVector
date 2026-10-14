@@ -80,9 +80,16 @@ heap that reuses freed memory, so they read lower (a regression of 10 MB in the 
   14 photos, +244 MB for 600 sidebar avatars, +1.2 GB for 3 000 members; the same steps now are +26, +6 and +38 MB. Pickers read icons at icon size.
 * `render()` makes a new `QTextDocument`: `setUndoRedoEnabled(false)` after `setHtml` (it switches undo back on, and the partial redraw edits the document: 10 undo
   steps and about 5 KB for every message that arrives, for as long as the room stays open).
-* What a message costs in Qt: about 1.6 KB as rows (the engine leaves out every field that has its default: a text message has 8 of the 29; it was 2.2 KB with all of them) and 6 KB more while it is in the document (100 are shown, "Show earlier" adds 100). A member
+* What a message costs in Qt: about 1.6 KB as rows (the engine leaves out every field that has its default: a text message has 8 of the 29; it was 2.2 KB with all of them) and 6 KB more while it is in the document (see the window below). A member
   row about 12 KB with its picture; a closed member list gives its rows back (not when the window is minimised). Remote video pictures wait in one slot per person
   (`Core::pictureTrampoline`): a queue of them was 200 MB in a few seconds of GUI stall.
+* The timeline document is a window on the room's messages, `[shownFirst(), shownEnd())`, never more than `TimelineView::kWindowMax` (300): it started as the newest 100 and grew by
+  100 for every scroll to the top, to the end of the room and without a limit (30 pages up through a room of 5 000 was +33 MB and 40 pages up through 20 000 took 100 s of layout, a
+  jump to a message 3 000 back laid out 3 000). Now scrolling to the top (or "Show earlier messages") adds 100 above and, past 300, drops the newest, which then wait behind a "Show newer messages" link;
+  scrolling to the bottom of a window that stops short of the newest message adds 100 below and drops the oldest; a jump (`revealMessage`) shows 30 before and 150 after the message.
+  The window is kept as two message ids (`windowStart_`, `windowEnd_`; no end follows the room), so older messages arriving in front change nothing, and new messages arriving while the
+  window stops short of the end do not touch the document at all; `stickToBottom()` (sending) and the link bring it back to the newest. The same scenarios now: +1.4 MB, 12 s
+  (each page lays out the whole window again, about 250 ms on this machine) and +0.6 MB for the jump.
 * The engine: the timeline and emote-pack events are serialized from borrowed structs, not `json!` (a `Value` tree was five times the text and 200 000 allocations
   for 5 000 rows); the C sink moves the String into the C string; the open room's loop shares the map of downloaded pictures (`Arc`). A camera picture that already
   fits is not copied before encoding (`Frame::fitted_ref`).
@@ -110,7 +117,7 @@ heap that reuses freed memory, so they read lower (a regression of 10 MB in the 
   fills the missing ones when the list is in; a sender whose member event never came, e.g. old history of a big room, shows the user name until then). The first message sent into a
   big encrypted room still downloads the whole list (the SDK needs it to share keys). The fake server does lazy loading (heroes, summary, member events only for senders;
   `/members` has everybody); `VC_DEMO_MEMBERS=N` makes the demo room a big one with N more people.
-* Not done, with what it would give: a non-PIE link (another 4 MB resident, but no ASLR for our code); `max_blocking_threads`; a timeline window that drops far-away messages from the document. Qt loads all 11 image plugins (1.6 MB) at the first
+* Not done, with what it would give: a non-PIE link (another 4 MB resident, but no ASLR for our code); `max_blocking_threads`. Qt loads all 11 image plugins (1.6 MB) at the first
   `QLineEdit::setClearButtonEnabled`, whatever the app asks of `QImageReader`.
 
 ## The fake homeserver (`core-rs/src/testkit.rs`)
@@ -142,7 +149,7 @@ the alice/bob direct chat (`m.direct`).
 ## Qt pitfalls
 
 * `QTextBrowser` rendering: messages are HTML built in `TimelineView::render()` (one small table per message, rows mapped to events in `rowEvents_` for the context menu).
-  Pictures/avatars/shields are `QTextDocument` resources. Performance: only the newest 100 messages are laid out (`shownLimit_`), redraws are skipped when html and
+  Pictures/avatars/shields are `QTextDocument` resources. Performance: only a window of at most 300 messages is laid out (the newest 100 while following; `windowStart_`/`windowEnd_`), redraws are skipped when html and
   pictures are unchanged, bursts are merged (150 ms), and a change at the end of the room replaces only the tables from the first changed one (partial update).
 * The default font family is the alias "Sans Serif"; `main.cpp` resolves the real family before adding the colour emoji font (`ensureEmojiFont`). Symbols that exist as
   emoji (◀ ▶ ☺) are written with U+FE0E. The user dislikes coloured-emoji look-alikes for plain symbols and layout glitches: look at a screenshot before reporting done.
@@ -172,6 +179,5 @@ notification text with sender and preview (alerts only carry a count), packaging
 ## Stress tests
 
 `core-rs/src/stress.rs` (ignored by default) and `qt/stress_main.cpp` (`qvector_stress`, not part of `all`) hit the engine and the real widgets with huge or hostile input
-and fail when a step is over its budget. Budgets are for a loaded 4-core laptop; a loosened budget needs a reason in the code. Known limit: jumping to a message far
-back in a long room lays out every message from there on (about 1 ms each), so it is only budgeted for 1500 rows. Message bodies are cut at 20 000 characters in the
+and fail when a step is over its budget. Budgets are for a loaded 4-core laptop; a loosened budget needs a reason in the code. Message bodies are cut at 20 000 characters in the
 timeline (a 5 MB message used to freeze the layout for minutes); "Copy message text" still copies all of it.

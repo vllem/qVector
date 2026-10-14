@@ -175,12 +175,18 @@ void TimelineView::reset()
     rows_ = QJsonArray();
     rowIndex_.clear();
     lastChunks_.clear(); rowEvents_.clear(); lastState_.clear();
-    windowStart_.clear(); shownLimit_ = 100; stick_ = true; loadingMore_ = false; highlight_.clear();
+    windowStart_.clear(); windowEnd_.clear(); hiddenLocal_ = shownEnd_ = 0; shownLimit_ = 100; stick_ = true; loadingMore_ = false; highlight_.clear();
     stopInline();
     canLoadMore_ = false; loadingHistory_ = false;
     programmatic_ = true;
     view_->setHtml(QString());
     programmatic_ = false;
+}
+
+void TimelineView::stickToBottom()
+{
+    stick_ = true;
+    if (!windowEnd_.isEmpty()) { windowEnd_.clear(); windowStart_.clear(); refresh(); } /* a document that stops short of the newest message follows it again */
 }
 
 void TimelineView::setRows(const QJsonArray &rows)
@@ -193,7 +199,7 @@ void TimelineView::setRows(const QJsonArray &rows)
        scroll, and the reader would see nothing happen. */
     const int added = old > 0 && !grew && rows.size() > old && rows[rows.size() - 1].toObject().value("id") == rows_[old - 1].toObject().value("id")
         ? rows.size() - old : 0;
-    if (added > 0 && loadingMore_ && !thread_) { shownLimit_ += size_t(added); windowStart_ = rows[0].toObject().value("id").toString(); }
+    if (added > 0 && loadingMore_ && !thread_) windowStart_ = rows[0].toObject().value("id").toString(); /* the document starts with them (and drops its newest rows once it is over kWindowMax) */
     rows_ = rows;
     if (!grew) rowIndex_.clear();
     for (int i = grew ? old : 0; i < rows.size(); i++) rowIndex_.insert(rows[i].toObject().value("id").toString(), i); /* first of equal ids wins */
@@ -238,12 +244,35 @@ void TimelineView::onScroll()
     if (programmatic_) return;
     if (!userInput_.isValid() || userInput_.elapsed() > 700) return; /* not the reader: a layout change */
     QScrollBar *sb = view_->verticalScrollBar();
-    stick_ = sb->value() >= sb->maximum() - 4;
+    stick_ = sb->value() >= sb->maximum() - 4 && shownEnd_ >= rows_.size(); /* the bottom of a document that stops short of the newest message is not the end of the room */
     fitFetches_ = 0;
     if (sb->value() <= 30) {
-        if (hiddenLocal_ > 0) { shownLimit_ += 100; windowStart_.clear(); loadingMore_ = true; render(); }
+        if (hiddenLocal_ > 0) showEarlier();
         else if (canLoadMore_ && !loadingHistory_ && !thread_) { loadingMore_ = true; emit olderRequested(); }
-    }
+    } else if (sb->value() >= sb->maximum() - 30 && shownEnd_ < rows_.size()) showLater();
+}
+
+/* The document is a window on the room's messages (laying one out takes about 1 ms, and it is 6 KB in memory): these two move it, a hundred messages at a time,
+   and it never holds more than kWindowMax. The reader stays where they were (render() puts the message at the top of the view back). */
+void TimelineView::showEarlier()
+{
+    if (hiddenLocal_ <= 0) return;
+    const int first = qMax(0, hiddenLocal_ - 100);
+    windowStart_ = S(rows_[first].toObject(), "id");
+    if (shownEnd_ - first > kWindowMax) windowEnd_ = S(rows_[first + kWindowMax].toObject(), "id");
+    loadingMore_ = true;
+    render();
+}
+
+void TimelineView::showLater()
+{
+    const int n = rows_.size();
+    if (shownEnd_ >= n) return;
+    const int last = qMin(n, shownEnd_ + 100);
+    windowEnd_ = last >= n ? QString() : S(rows_[last].toObject(), "id");
+    if (last - hiddenLocal_ > kWindowMax) windowStart_ = S(rows_[last - kWindowMax].toObject(), "id");
+    loadingMore_ = true;
+    render();
 }
 
 void TimelineView::onAnchor(const QUrl &u)
@@ -251,9 +280,10 @@ void TimelineView::onAnchor(const QUrl &u)
     const QString s = u.toString();
     auto part = [&](int n) { return QUrl::fromPercentEncoding(s.split('/').value(n).toUtf8()); };
     if (s == "vc:more") {
-        if (hiddenLocal_ > 0) { shownLimit_ += 100; windowStart_.clear(); loadingMore_ = true; render(); }
+        if (hiddenLocal_ > 0) showEarlier();
         else { loadingMore_ = true; emit olderRequested(); }
     }
+    else if (s == "vc:newer") { stick_ = true; windowEnd_.clear(); windowStart_.clear(); loadingMore_ = false; render(); } /* back to the newest messages */
     else if (s.startsWith("vc:img:") || s.startsWith("vc:open:")) emit openRequested(QUrl::fromPercentEncoding(s.mid(s.indexOf(':', 3) + 1).toUtf8())); /* a gallery item is "<event>#<n>" */
     else if (s.startsWith("vc:save:")) emit saveRequested(QUrl::fromPercentEncoding(s.mid(8).toUtf8()));
     else if (s.startsWith("vc:spoiler/")) { const QString k = QUrl::fromPercentEncoding(s.mid(11).toUtf8()); if (!revealed_.remove(k)) revealed_.insert(k); render(); }
@@ -361,17 +391,30 @@ void TimelineView::render()
     QString html; /* the rows; the document is a sequence of small tables, one per message, cut at the \x02 marks */
     QVector<int> chunkStart;
     const int n = rows_.size();
-    /* Laying out a long room is what costs time (about 1 ms per message), so only the newest messages are in the document; the link or scrolling
-       to the top adds more. The first message shown stays the same while new ones are added at the end, so the tables above never change. */
-    int firstShown = 0;
-    if (n > int(shownLimit_)) {
-        int idx = -1;
-        if (!windowStart_.isEmpty()) { const auto it = rowIndex_.constFind(windowStart_); if (it != rowIndex_.constEnd()) idx = it.value(); }
-        if (idx < 0 || n - idx > int(shownLimit_) * 2) idx = n - int(shownLimit_);
+    /* Laying out a long room is what costs time (about 1 ms per message) and a message in the document is about 6 KB, so the document is a window on the
+       room's messages, [firstShown, lastShown). `windowStart_` / `windowEnd_` are the message it starts with and the one it stops before (ids: older messages
+       arriving in front change nothing); no end follows the room's newest message. Following the end it is the newest `shownLimit_` messages, cut back to that
+       once it has grown to twice as many. Scrolling to the top adds messages above and, past kWindowMax, drops the newest; scrolling to the bottom of a window that
+       stops short of the end adds messages below and drops the oldest (showEarlier, showLater). The first message shown stays the same while new ones are added
+       at the end, so the tables above never change. */
+    int firstShown = 0, lastShown = n;
+    auto indexOf = [&](const QString &id) { const auto it = rowIndex_.constFind(id); return it == rowIndex_.constEnd() ? -1 : it.value(); };
+    if (!windowEnd_.isEmpty()) { const int e = indexOf(windowEnd_); if (e > 0 && e < n) lastShown = e; else windowEnd_.clear(); }
+    if (lastShown < n || n > int(shownLimit_)) {
+        int idx = windowStart_.isEmpty() ? -1 : indexOf(windowStart_);
+        if (idx >= lastShown) idx = -1;
+        if (lastShown == n) { /* the window reaches the newest message */
+            if (idx < 0 || (stick_ && n - idx > int(shownLimit_) * 2)) idx = n - int(shownLimit_);
+            else if (n - idx > kWindowMax) { lastShown = idx + kWindowMax; windowEnd_ = S(rows_[lastShown].toObject(), "id"); } /* the reader keeps their place, the newest messages wait below */
+        } else { /* it stops short of the newest message */
+            if (idx < 0) idx = qMax(0, lastShown - int(shownLimit_));
+            if (lastShown - idx > kWindowMax) { lastShown = idx + kWindowMax; windowEnd_ = S(rows_[lastShown].toObject(), "id"); }
+        }
         firstShown = idx;
         windowStart_ = S(rows_[idx].toObject(), "id");
     } else windowStart_.clear();
     hiddenLocal_ = firstShown;
+    shownEnd_ = lastShown;
     if (!thread_ && (firstShown || canLoadMore_)) { /* older messages exist: a link at the top (scrolling there loads them too) */
         rowEvents_ << QString();
         html += "<tr><td colspan=3 align=center style=\"padding:6px\">" +
@@ -386,7 +429,7 @@ void TimelineView::render()
     QString lastSender;
     bool lastMedia = false; /* the previous message was a picture or video */
     qint64 lastTs = 0;
-    for (int i = firstShown; i < n; i++) {
+    for (int i = firstShown; i < lastShown; i++) {
         const QJsonObject r = rows_[i].toObject();
         const QString kind = S(r, "kind"), eid = S(r, "id"), sender = S(r, "sender_id"), name = S(r, "sender");
         QString text = S(r, "body");
@@ -681,6 +724,11 @@ void TimelineView::render()
         }
     }
 
+    if (!thread_ && lastShown < n) { /* the window stops short of the newest message: a link at the bottom (scrolling there adds messages too) */
+        rowEvents_ << QString();
+        html += "<tr><td colspan=3 align=center style=\"padding:6px\"><a href=\"vc:newer\">Show newer messages</a></td></tr>";
+    }
+
     drawn_.setMaxCost(int(qBound<qint64>(qint64(kMinDrawnBytes), drawnBytes + drawnBytes / 4, qint64(kMaxDrawnBytes)))); /* what the next redraw needs plus a quarter, and at least some pictures of other rooms */
 
     /* One small table per message (rather than one table for the room): Qt lays that out about 40% faster, and it lets a change at the end of the
@@ -937,7 +985,11 @@ void TimelineView::revealMessage(const QString &eventId)
     }
     stick_ = false;
     highlight_ = eventId;
-    if (at < hiddenLocal_) { shownLimit_ = qMax(shownLimit_, size_t(rows_.size() - at)); windowStart_ = eventId; } /* still folded away above: show from there */
+    if (stale_ || at < hiddenLocal_ || at >= shownEnd_) { /* outside the document: a window around the message (never everything from it to the end of the room) */
+        const int first = qMax(0, at - 30), last = qMin(int(rows_.size()), at + 150);
+        windowStart_ = S(rows_[first].toObject(), "id");
+        windowEnd_ = last < rows_.size() ? S(rows_[last].toObject(), "id") : QString();
+    }
     if (!isVisible()) { pendingReveal_ = eventId; stale_ = true; return; }
     render();
     QTimer::singleShot(0, this, [this, eventId] {

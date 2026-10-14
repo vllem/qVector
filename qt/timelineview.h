@@ -32,7 +32,7 @@ public:
     void setHistoryState(bool canLoadMore, bool loading) { canLoadMore_ = canLoadMore; loadingHistory_ = loading; if (!loading) continueSeek(); }
     void setBookmarks(const QSet<QString> &ids) { bookmarks_ = ids; }
     void refresh(); /* redraws; a view that is not on screen only notes that it is out of date and redraws when shown */
-    void stickToBottom() { stick_ = true; }
+    void stickToBottom(); /* follow the newest message again (also when the document stops short of it) */
     QString eventAt(const QPoint &pos) const; /* the message under a point of the view ("" for none) */
     void revealMessage(const QString &eventId);
     void setLoading(const QString &eventId); /* shows a spinner on that video's card; empty = none */
@@ -40,6 +40,10 @@ public:
     void setPinned(const QSet<QString> &ids) { pinned_ = ids; }
     QJsonObject row(const QString &eventId) const;
     const QJsonArray &rows() const { return rows_; }
+    /* the document holds the rows [shownFirst(), shownEnd()) of rows(): never more than kWindowMax of them */
+    int shownFirst() const { return hiddenLocal_; }
+    int shownEnd() const { return shownEnd_; }
+    static const int kWindowMax = 300;
 
 signals:
     void olderRequested();
@@ -64,6 +68,8 @@ signals:
 
 private:
     void onScroll();
+    void showEarlier(); /* the reader reached the top of the document: 100 more messages above it (past kWindowMax the newest go) */
+    void showLater();   /* ... the bottom of a document that stops short of the newest message: 100 more below it (the oldest go) */
     void applyStyle();
     void contextMenu(const QPoint &pos);
     void render();
@@ -93,15 +99,15 @@ private:
     QHash<QUrl, QSize> resSizes_;
     QCache<QString, QImage> drawn_;     /* the pictures as they are drawn (scaled to their box, framed), by file and look: what a redraw reuses; cost = bytes */
     QTextDocument *ownDoc_ = nullptr;
-    size_t shownLimit_ = 100;
-    QString windowStart_;
+    size_t shownLimit_ = 100; /* the newest messages shown while the reader follows the end of the room (up to twice as many before the oldest are cut back) */
+    QString windowStart_, windowEnd_; /* the first message the document shows and the one it stops before (ids, so older messages arriving in front change nothing); no end: the room's newest */
     QSet<QString> revealed_; /* spoilers the user clicked open: "<event id>/<n>" */
     QStringList lastChunks_, rowEvents_;
     QVector<int> chunkRowStart_;
     QString lastStyle_;
     QElapsedTimer lastRender_, userInput_;
     bool renderQueued_ = false;
-    int hiddenLocal_ = 0, fitFetches_ = 0;
+    int hiddenLocal_ = 0, shownEnd_ = 0, fitFetches_ = 0;
     QSet<QString> bookmarks_, pinned_;
     QString playingId_, loadingId_;
     QTimer *spinner_ = nullptr;

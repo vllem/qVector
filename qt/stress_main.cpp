@@ -195,8 +195,7 @@ int main(int argc, char **argv)
         for (int i = 0; i < 20000; i += 1) tl.row(QString("$e%1").arg(19999 - i % 40)); /* near the end, like real traffic */
     });
     step("timeline: look up ids at the very start 2000 times", 300, [&] { for (int i = 0; i < 2000; i++) tl.row("$e0"); });
-    /* Jumping lays out every message from the target to the end of the room (about 1 ms each, see CLAUDE.md), so a jump 1500 rows back is the
-       realistic bound; a jump to row 5 of 20 000 freezes the window for a minute (known limit, not asserted). */
+    /* Jumping lays out the messages around the target only (about 1 ms each): the document is a window of at most kWindowMax messages. */
     step("timeline: reveal a message 1500 rows back in 20k rows", 2500, [&] { tl.revealMessage("$e18500"); });
 
     tl.reset();
@@ -284,6 +283,78 @@ int main(int argc, char **argv)
         if (steps != 0) failures++;
     });
     step("timeline: the same rows set 500 times (must be skipped)", 300, [&] { const QJsonArray rows = messages(100); for (int i = 0; i < 500; i++) tl.setRows(rows); });
+    /* The document is a window on the room's messages and never holds more than kWindowMax of them: scrolling up through a long room adds messages above
+       and drops the newest, scrolling back down adds messages below and drops the oldest, and the reader stays where they were. */
+    auto readerInput = [](QTextBrowser *br) {
+        QWheelEvent w(QPointF(50, 50), QPointF(50, 50), QPoint(), QPoint(0, 120), Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+        QApplication::sendEvent(br->viewport(), &w); /* the reader's own input, or the view ignores the scrollbar */
+    };
+    auto visible = [](TimelineView &v, QTextBrowser *br) { QSet<QString> seen; for (int y = 2; y < br->viewport()->height(); y += 8) { const QString e = v.eventAt(QPoint(24, y)); if (!e.isEmpty()) seen.insert(e); } return seen; };
+    /* Each page lays out the whole window again (300 messages, about 1 ms each; the budgets are 40 and 38 pages at 250 ms): before the window had a limit the same 40 pages took
+       100 seconds, laying out 100, 200, ... 4 100 messages, and held 4 100 messages in the document. */
+    step("timeline: 40 pages scrolled up through 20 000 rows stay within 300", 14000, [&] {
+        tl.reset();
+        tl.setRows(messages(20000));
+        settle();
+        auto *br = tl.findChild<QTextBrowser *>();
+        int widest = 0, moved = 0;
+        for (int i = 0; i < 40; i++) {
+            const QString first = QString("$e%1").arg(tl.shownFirst()); /* the oldest message of the document: the reader reaches it, and it must stay in view when more come in above it */
+            readerInput(br);
+            br->verticalScrollBar()->setValue(0);
+            QApplication::processEvents();
+            widest = qMax(widest, tl.shownEnd() - tl.shownFirst());
+            if (!visible(tl, br).contains(first)) moved++;
+        }
+        std::printf("    window now [%d, %d) of %lld, widest %d, reader moved %d times\n", tl.shownFirst(), tl.shownEnd(), (long long)tl.rows().size(), widest, moved);
+        if (widest > TimelineView::kWindowMax || moved != 0 || tl.shownFirst() != 20000 - 100 - 40 * 100 || tl.shownEnd() - tl.shownFirst() != TimelineView::kWindowMax) failures++;
+    });
+    step("timeline: scrolled back down, the oldest go and the newest come", 12000, [&] {
+        auto *br = tl.findChild<QTextBrowser *>();
+        int widest = 0, moved = 0, pages = 0;
+        while (tl.shownEnd() < tl.rows().size() && pages++ < 100) {
+            const QString lastOld = QString("$e%1").arg(tl.shownEnd() - 1); /* the newest message of the document: the reader reaches it, and it must stay in view when more come in below it */
+            readerInput(br);
+            br->verticalScrollBar()->setValue(br->verticalScrollBar()->maximum());
+            QApplication::processEvents();
+            widest = qMax(widest, tl.shownEnd() - tl.shownFirst());
+            if (!visible(tl, br).contains(lastOld)) moved++;
+        }
+        std::printf("    window now [%d, %d) of %lld after %d pages, widest %d, reader moved %d times\n", tl.shownFirst(), tl.shownEnd(), (long long)tl.rows().size(), pages, widest, moved);
+        if (widest > TimelineView::kWindowMax || tl.shownEnd() != tl.rows().size() || moved != 0) failures++;
+    });
+    step("timeline: new messages arriving while the window stops short of the end change nothing", 3000, [&] {
+        tl.reset();
+        QJsonArray rows = messages(1000);
+        tl.setRows(rows);
+        settle();
+        auto *br = tl.findChild<QTextBrowser *>();
+        for (int i = 0; i < 3; i++) { readerInput(br); br->verticalScrollBar()->setValue(0); QApplication::processEvents(); } /* 600 rows: detached from the end */
+        const int first = tl.shownFirst(), end = tl.shownEnd();
+        const QString before = br->toPlainText();
+        for (int i = 0; i < 20; i++) rows.append(message(1000 + i, "arriving"));
+        tl.setRows(rows);
+        settle();
+        const bool same = br->toPlainText() == before && tl.shownFirst() == first && tl.shownEnd() == end;
+        std::printf("    window [%d, %d) before and after 20 new messages: [%d, %d), text %s\n", first, end, tl.shownFirst(), tl.shownEnd(), same ? "the same" : "CHANGED");
+        if (!same || end >= 1020 || !br->toPlainText().contains("Show newer messages")) failures++;
+        tl.stickToBottom(); /* the reader sends a message: follow the end again */
+        settle();
+        if (tl.shownEnd() != 1020 || br->toPlainText().contains("Show newer messages")) { std::printf("    did not follow the end again: [%d, %d)\n", tl.shownFirst(), tl.shownEnd()); failures++; }
+    });
+    step("timeline: reveal the first message of 20 000 rows and then the last", 3000, [&] {
+        tl.reset();
+        tl.setRows(messages(20000));
+        settle();
+        tl.revealMessage("$e5");
+        settle();
+        const bool near = tl.shownFirst() == 0 && tl.shownEnd() <= TimelineView::kWindowMax;
+        std::printf("    after $e5: [%d, %d)\n", tl.shownFirst(), tl.shownEnd());
+        tl.revealMessage("$e19990");
+        settle();
+        std::printf("    after $e19990: [%d, %d)\n", tl.shownFirst(), tl.shownEnd());
+        if (!near || tl.shownEnd() != 20000 || tl.shownEnd() - tl.shownFirst() > TimelineView::kWindowMax) failures++;
+    });
     /* Spec conformance of the renderer: a spoiler hides its text until clicked, colours become CSS (Client-Server API: Spoiler messages, formatted text). */
     step("timeline: spoilers stay hidden until clicked; colours are applied", 1500, [&] {
         tl.reset();
@@ -357,6 +428,21 @@ int main(int argc, char **argv)
             ml.setPresence(st);
         }
     });
+    /* a big room's list holds only the people the sync brought until the rest is loaded: it says so, and the note goes when the list is complete */
+    step("members: a partial list of a big room says how many people are in it", 300, [&] {
+        MemberList ml; /* a list of its own: the other one still holds 20 000 rows to clear */
+        ml.resize(240, 600);
+        ml.show();
+        QJsonArray ms;
+        for (int i = 0; i < 30; i++) ms.append(QJsonObject{{"user_id", QString("@p%1:hs").arg(i)}, {"name", QString("Person %1").arg(i)}, {"role", "Member"}});
+        ml.refresh(QJsonObject{{"id", "!huge:hs"}, {"members", ms}, {"members_complete", false}, {"member_count", 5000}});
+        const QString note = ml.count() ? ml.item(0)->text() : QString();
+        const bool partial = note.contains("30 of 5000 people so far");
+        ml.refresh(QJsonObject{{"id", "!huge:hs"}, {"members", ms}, {"members_complete", true}, {"member_count", 30}});
+        const bool gone = ml.count() > 0 && !ml.item(0)->text().contains("so far");
+        std::printf("    note: \"%s\", gone once complete: %s\n", qPrintable(note), gone ? "yes" : "NO");
+        if (!partial || !gone) failures++;
+    });
 
     /* ---- memory: what a long session shows (pictures, avatars) must not pile up. Photos and faces are made here, as real JPEG/PNG files. These steps come
        last: they leave the heap in a state that makes the time steps above slower by a few per cent. Their figures and budgets are for `qvector_stress memory` run
@@ -408,7 +494,19 @@ int main(int argc, char **argv)
         });
         memstep("memory: a room of 100 messages, as the engine sends them", 1500, [&] { mtl.reset(); mtl.setRows(engineRows(100)); settle(); });
         memstep("memory: a room of 5 000 messages loaded, 100 shown", 12000, [&] { mtl.reset(); mtl.setRows(engineRows(5000)); settle(); });
-        memstep("memory: the same room scrolled back, 3 000 shown", 28000, [&] { mtl.revealMessage("$event2000abcdefghijklmnopqrstuvwxyz0123456789:example.org"); settle(); });
+        memstep("memory: the same room scrolled back to a message 3 000 back (a window of 180)", 5000, [&] { mtl.revealMessage("$event2000abcdefghijklmnopqrstuvwxyz0123456789:example.org"); settle(); });
+        memstep("memory: the same room read 30 pages upwards (a window of 300)", 8000, [&] {
+            mtl.reset(); mtl.setRows(engineRows(5000)); settle();
+            auto *br = mtl.findChild<QTextBrowser *>();
+            for (int i = 0; i < 30; i++) {
+                QWheelEvent w(QPointF(50, 50), QPointF(50, 50), QPoint(), QPoint(0, 120), Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+                QApplication::sendEvent(br->viewport(), &w);
+                br->verticalScrollBar()->setValue(0);
+                QApplication::processEvents();
+            }
+            settle();
+            std::printf("    window [%d, %d)\n", mtl.shownFirst(), mtl.shownEnd());
+        });
         MemberList mml;
         mml.resize(240, 600);
         mml.show();
