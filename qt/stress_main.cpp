@@ -10,6 +10,7 @@
 #include <QJsonObject>
 #include <QScrollBar>
 #include <QTextBrowser>
+#include <QTextDocument>
 #include <QWheelEvent>
 #include <cstdio>
 #include "qt/memberlist.h"
@@ -177,6 +178,19 @@ int main(int argc, char **argv)
         const QString after = top();
         std::printf("    top before %s, after %s (value %d of %d)\n", qPrintable(before), qPrintable(after), br->verticalScrollBar()->value(), br->verticalScrollBar()->maximum());
         if (after != before) failures++;
+    });
+    /* A new message at the end of the room edits the shown document through a cursor. If that document keeps an undo history, every edit keeps the
+       text it replaced for as long as the document lives: nothing ever undoes it, so the history must stay empty. */
+    step("timeline: 30 new messages one by one leave no undo history", 9000, [&] {
+        tl.reset();
+        QJsonArray rows = messages(100);
+        tl.setRows(rows);
+        settle();
+        auto pause = [&](int ms) { QElapsedTimer w; w.start(); while (w.elapsed() < ms) QApplication::processEvents(QEventLoop::AllEvents, 10); };
+        for (int i = 0; i < 30; i++) { rows.append(message(100 + i, "arriving"));  tl.setRows(rows); pause(170); } /* the view merges redraws within 150 ms */
+        const int steps = tl.findChild<QTextBrowser *>()->document()->availableUndoSteps();
+        std::printf("    undo steps kept by the document: %d\n", steps);
+        if (steps != 0) failures++;
     });
     step("timeline: the same rows set 500 times (must be skipped)", 300, [&] { const QJsonArray rows = messages(100); for (int i = 0; i < 500; i++) tl.setRows(rows); });
     /* Spec conformance of the renderer: a spoiler hides its text until clicked, colours become CSS (Client-Server API: Spoiler messages, formatted text). */

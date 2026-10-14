@@ -728,6 +728,7 @@ void TimelineView::render()
         for (auto it = resources_.cbegin(); it != resources_.cend(); ++it) nd->addResource(QTextDocument::ImageResource, it.key(), it.value());
         nd->setPageSize(QSizeF(view_->viewport()->width(), -1));
         nd->setHtml(fullHtml);
+        nd->setUndoRedoEnabled(false); /* setHtml switches it back on, and a document made here (unlike the browser's own) would record every edit: nothing ever undoes them, and each new message at the end of the room replaces tables, so the history grew by about 13 KB per message */
         (void)nd->size(); /* finishes the layout now */
         programmatic_ = true;
         view_->setDocument(nd);
