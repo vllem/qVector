@@ -84,17 +84,21 @@ impl Frame {
         if (w, h) == (self.w, self.h) {
             return Cow::Borrowed(self);
         }
-        let mut rgba = Vec::with_capacity(w as usize * h as usize * 4);
-        for y in 0..h {
+        let cols: Vec<usize> = (0..w as u64).map(|x| (x * self.w as u64 / w as u64) as usize).collect(); /* the source column of each column, the same in every row */
+        let src_row = self.w as usize * 4;
+        let mut rgba = vec![0u8; w as usize * h as usize * 4];
+        for (y, out) in rgba.chunks_exact_mut(w as usize * 4).enumerate() {
             let sy = (y as u64 * self.h as u64 / h as u64) as usize;
-            for x in 0..w {
-                let sx = (x as u64 * self.w as u64 / w as u64) as usize;
-                let i = (sy * self.w as usize + sx) * 4;
-                rgba.extend_from_slice(&self.rgba[i..i + 4]);
-            }
+            let src = &self.rgba[sy * src_row..(sy + 1) * src_row];
+            shrink_row(src, &cols, out); /* a std::simd gather of eight pixels was twice as slow as these four-byte copies */
         }
         Cow::Owned(Frame { w, h, rgba })
     }
+}
+
+/// One row of `Frame::fitted_ref`: pixel `cols[x]` of the source row `src` becomes pixel `x` of `out`.
+fn shrink_row(src: &[u8], cols: &[usize], out: &mut [u8]) {
+    for (o, &c) in out.chunks_exact_mut(4).zip(cols) { o.copy_from_slice(&src[c * 4..c * 4 + 4]); }
 }
 
 /// Pictures larger than this are shrunk before encoding (keeps the bitrate and the CPU modest).
@@ -156,7 +160,7 @@ impl Encoder {
             self.open(f.w, f.h)?;
             self.key = true;
         }
-        let yuv = YUVBuffer::from_rgb_source(RgbaSliceU8::new(&f.rgba, (f.w as usize, f.h as usize)));
+        let yuv = YUVBuffer::from_rgba8_source(RgbaSliceU8::new(&f.rgba, (f.w as usize, f.h as usize))); /* openh264's whole-buffer conversion, not a call per pixel */
         if let Some(enc) = self.h264.as_mut() {
             return Ok(enc.encode(&yuv).map_err(|e| e.to_string())?.to_vec());
         }
@@ -355,5 +359,24 @@ pub mod tests {
         let mut enc = Encoder::new(Codec::Vp8);
         assert!(enc.encode(&picture(0, 1280, 720)).is_ok());
         assert!(enc.encode(&Frame { w: 3, h: 3, rgba: vec![0; 36] }).is_err());
+    }
+
+    /// A picture of `w` x `h` filled from a seed.
+    fn noise(w: u32, h: u32, seed: u32) -> Frame {
+        let mut s = seed;
+        Frame { w, h, rgba: (0..w * h * 4).map(|_| { s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223); (s >> 24) as u8 }).collect() }
+    }
+
+    #[test]
+    fn a_shrunk_picture_takes_each_pixel_from_the_nearest_source_pixel() {
+        for (n, (w, h)) in [(1280, 720), (1920, 1080), (1001, 999), (962, 541)].into_iter().enumerate() {
+            let src = noise(w, h, n as u32);
+            let f = src.fitted(MAX_W, MAX_H);
+            for (y, x) in [(0, 0), (f.h - 1, f.w - 1), (f.h / 2, 7), (3, f.w - 9), (f.h - 1, 0)] {
+                let (sx, sy) = ((x as u64 * w as u64 / f.w as u64) as usize, (y as u64 * h as u64 / f.h as u64) as usize);
+                let (i, j) = (((y * f.w + x) * 4) as usize, (sy * w as usize + sx) * 4);
+                assert_eq!(&f.rgba[i..i + 4], &src.rgba[j..j + 4], "{w}x{h} -> {}x{}, pixel {x},{y}", f.w, f.h);
+            }
+        }
     }
 }

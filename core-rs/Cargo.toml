@@ -46,6 +46,9 @@ incremental = true
 console = ["dep:console-subscriber", "dep:tracing-subscriber", "tokio/tracing"]
 # a tiny fake homeserver (wiremock) for tests and for running the UI without a real account
 testkit = ["dep:wiremock"]
+# std::simd versions of the hot pixel and search loops (video conversion, message search): needs a nightly compiler (`cargo +nightly ... --features simd`);
+# the default build keeps the plain loops, and the tests compare the two
+simd = []
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "std"] }

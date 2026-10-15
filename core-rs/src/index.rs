@@ -25,13 +25,14 @@ pub struct IndexRow { pub room_id: String, pub event_id: String, pub sender: Str
 fn contains_ci(hay: &str, needle: &str) -> bool {
     if !needle.is_ascii() { return hay.to_lowercase().contains(needle); }
     let (h, n) = (hay.as_bytes(), needle.as_bytes());
+    if n.is_empty() { return true; }
     if n.len() > h.len() { return false; }
     let (lo, up) = (n[0].to_ascii_lowercase(), n[0].to_ascii_uppercase());
     let last = h.len() - n.len();
     let mut i = 0;
     while i <= last {
         // skip quickly to the next byte that could start the needle
-        match h[i..=last].iter().position(|&b| b == lo || b == up) {
+        match find_either(&h[i..=last], lo, up) {
             None => return false,
             Some(p) => i += p,
         }
@@ -39,6 +40,28 @@ fn contains_ci(hay: &str, needle: &str) -> bool {
         i += 1;
     }
     false
+}
+
+/// Where the first byte that is `a` or `b` is.
+fn find_either(h: &[u8], a: u8, b: u8) -> Option<usize> {
+    #[cfg(feature = "simd")]
+    return find_either_simd(h, a, b);
+    #[cfg(not(feature = "simd"))]
+    h.iter().position(|&c| c == a || c == b)
+}
+
+/// `find_either` 32 bytes at a time.
+#[cfg(feature = "simd")]
+fn find_either_simd(h: &[u8], a: u8, b: u8) -> Option<usize> {
+    use std::simd::prelude::*;
+    let (sa, sb) = (u8x32::splat(a), u8x32::splat(b));
+    let mut chunks = h.chunks_exact(32);
+    for (n, c) in chunks.by_ref().enumerate() {
+        let v = u8x32::from_slice(c);
+        if let Some(i) = (v.simd_eq(sa) | v.simd_eq(sb)).first_set() { return Some(n * 32 + i); }
+    }
+    let done = h.len() - chunks.remainder().len();
+    chunks.remainder().iter().position(|&c| c == a || c == b).map(|i| done + i)
 }
 
 /// A search looks at this many different words of the query at most.
@@ -419,6 +442,37 @@ mod tests {
     use super::*;
     use crate::testkit::{FakeHs, ROOM};
     use matrix_sdk_ui::timeline::RoomExt;
+
+    #[test]
+    fn a_word_is_found_in_any_case_wherever_it_starts() {
+        for at in [0, 1, 30, 31, 32, 33, 63, 64, 65, 100, 127] { /* around the 32-byte blocks the scan reads, and in the bytes left over after them */
+            for len in [at + 5, at + 6, at + 40, 200] {
+                let mut hay = "x".repeat(len);
+                hay.replace_range(at..at + 5, "HeLlo");
+                assert!(contains_ci(&hay, "hello") && contains_ci(&hay, "HELLO"), "at {at} of {len}");
+                assert!(!contains_ci(&hay, "help"), "at {at} of {len}");
+                hay.replace_range(at..at + 1, "h");
+                assert!(contains_ci(&hay, "hEllo"), "at {at} of {len}");
+            }
+        }
+        assert!(contains_ci(&format!("{}hhhhhhelp", "h".repeat(70)), "help"), "a first letter repeated before the word");
+        assert!(!contains_ci("hel", "help") && contains_ci("abc", "") && !contains_ci("", "a"));
+        assert!(contains_ci("Grüße aus KÖLN", "köln") && contains_ci("ÜBER alles", "über"), "a word with other letters comes lowercased (the search lowercases it)");
+    }
+
+    #[cfg(feature = "simd")]
+    #[test]
+    fn the_simd_scan_finds_the_same_byte_as_the_plain_one() {
+        let mut s = 5u32;
+        for len in [0, 1, 31, 32, 33, 64, 95, 1000] {
+            for _ in 0..50 {
+                let h: Vec<u8> = (0..len).map(|_| { s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223); b'a' + (s >> 24) as u8 % 20 }).collect();
+                for (a, b) in [(b'q', b'Q'), (b'a', b'b'), (b'z', b'Z')] {
+                    assert_eq!(find_either_simd(&h, a, b), h.iter().position(|&c| c == a || c == b), "{len} bytes");
+                }
+            }
+        }
+    }
 
     #[test]
     fn repeated_query_words_cost_nothing_and_long_queries_are_cut() {

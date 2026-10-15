@@ -1,4 +1,5 @@
 #![recursion_limit = "512"]
+#![cfg_attr(feature = "simd", feature(portable_simd))]
 //! vector-core: the Matrix core of Vector, built on matrix-sdk (E2EE through matrix-sdk-crypto / vodozemac).
 //!
 //! The Qt front end (C++) talks to this crate through a small C interface (`capi`, header `vector_app.h`) on the engine in `app`. Everything

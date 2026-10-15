@@ -135,17 +135,93 @@ impl Drop for Vp8Decoder {
 
 /// BT.601 limited-range YUV to RGBA, the conversion cameras and browsers use for video this size.
 pub fn i420_to_rgba(y: &[u8], ys: usize, u: &[u8], v: &[u8], cs: usize, w: usize, h: usize) -> Vec<u8> {
+    #[cfg(feature = "simd")]
+    return i420_to_rgba_simd(y, ys, u, v, cs, w, h);
+    #[cfg(not(feature = "simd"))]
+    i420_to_rgba_scalar(y, ys, u, v, cs, w, h)
+}
+
+/// One pixel of `i420_to_rgba`: red, green, blue.
+#[inline]
+fn yuv_pixel(y: u8, u: u8, v: u8) -> [u8; 3] {
+    let yy = (y as i32 - 16).max(0) * 298;
+    let (uu, vv) = (u as i32 - 128, v as i32 - 128);
+    [((yy + 409 * vv + 128) >> 8).clamp(0, 255) as u8, ((yy - 100 * uu - 208 * vv + 128) >> 8).clamp(0, 255) as u8, ((yy + 516 * uu + 128) >> 8).clamp(0, 255) as u8]
+}
+
+#[cfg_attr(feature = "simd", allow(dead_code))] /* the reference the simd version is tested against */
+fn i420_to_rgba_scalar(y: &[u8], ys: usize, u: &[u8], v: &[u8], cs: usize, w: usize, h: usize) -> Vec<u8> {
     let mut out = vec![255u8; w * h * 4];
     for row in 0..h {
         for col in 0..w {
-            let yy = (y[row * ys + col] as i32 - 16).max(0) * 298;
-            let uu = u[(row / 2) * cs + col / 2] as i32 - 128;
-            let vv = v[(row / 2) * cs + col / 2] as i32 - 128;
+            let c = (row / 2) * cs + col / 2;
             let i = (row * w + col) * 4;
-            out[i] = ((yy + 409 * vv + 128) >> 8).clamp(0, 255) as u8;
-            out[i + 1] = ((yy - 100 * uu - 208 * vv + 128) >> 8).clamp(0, 255) as u8;
-            out[i + 2] = ((yy + 516 * uu + 128) >> 8).clamp(0, 255) as u8;
+            out[i..i + 3].copy_from_slice(&yuv_pixel(y[row * ys + col], u[c], v[c]));
         }
     }
     out
+}
+
+/// `i420_to_rgba` eight pixels at a time (the same integer arithmetic, so the same bytes); the last `w % 8` of a row go one by one.
+#[cfg(feature = "simd")]
+fn i420_to_rgba_simd(y: &[u8], ys: usize, u: &[u8], v: &[u8], cs: usize, w: usize, h: usize) -> Vec<u8> {
+    use std::simd::{prelude::*, simd_swizzle, ToBytes};
+    let k = i32x8::splat;
+    let channel = |x: i32x8| ((x + k(128)) >> k(8)).simd_clamp(k(0), k(255)).cast::<u32>();
+    let mut out = vec![255u8; w * h * 4];
+    let whole = w - w % 8;
+    for row in 0..h {
+        let (yr, cr) = (&y[row * ys..row * ys + w], (row / 2) * cs);
+        let line = &mut out[row * w * 4..(row + 1) * w * 4];
+        for col in (0..whole).step_by(8) {
+            let yy = (u8x8::from_slice(&yr[col..]).cast::<i32>() - k(16)).simd_max(k(0)) * k(298);
+            let chroma = |p: &[u8]| { let four = u8x4::from_slice(&p[cr + col / 2..]).cast::<i32>() - i32x4::splat(128); simd_swizzle!(four, [0, 0, 1, 1, 2, 2, 3, 3]) }; /* one sample for two pixels */
+            let (uu, vv) = (chroma(u), chroma(v));
+            let (r, g, b) = (channel(yy + k(409) * vv), channel(yy - k(100) * uu - k(208) * vv), channel(yy + k(516) * uu));
+            let px = r | (g << u32x8::splat(8)) | (b << u32x8::splat(16)) | u32x8::splat(0xff00_0000);
+            px.to_le_bytes().copy_to_slice(&mut line[col * 4..col * 4 + 32]);
+        }
+        for col in whole..w {
+            let c = cr + col / 2;
+            line[col * 4..col * 4 + 3].copy_from_slice(&yuv_pixel(yr[col], u[c], v[c]));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Planes of `w` x `h` with rows `pad` bytes longer than the picture (as decoders hand them out), filled from a seed.
+    fn planes(w: usize, h: usize, pad: usize, seed: u32) -> (Vec<u8>, usize, Vec<u8>, Vec<u8>, usize) {
+        let mut s = seed;
+        let mut next = || { s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223); (s >> 24) as u8 };
+        let (ys, cs) = (w + pad, w.div_ceil(2) + pad);
+        let ch = h.div_ceil(2);
+        ((0..ys * h).map(|_| next()).collect(), ys, (0..cs * ch).map(|_| next()).collect(), (0..cs * ch).map(|_| next()).collect(), cs)
+    }
+
+    #[test]
+    fn video_yuv_becomes_the_colours_it_stands_for() {
+        let px = |y, u, v| { let o = i420_to_rgba(&[y; 4], 2, &[u], &[v], 1, 2, 2); assert!(o.chunks(4).all(|p| p == &o[..4])); [o[0], o[1], o[2], o[3]] };
+        assert_eq!(px(16, 128, 128), [0, 0, 0, 255], "black");
+        assert_eq!(px(235, 128, 128), [255, 255, 255, 255], "white");
+        assert_eq!(px(81, 90, 240), [255, 0, 0, 255], "red");
+        assert_eq!(px(0, 0, 0)[3], 255);
+        let (y, ys, u, v, cs) = planes(37, 11, 5, 1);
+        let out = i420_to_rgba(&y, ys, &u, &v, cs, 37, 11);
+        assert_eq!(out.len(), 37 * 11 * 4);
+        let (row, col) = (9, 36); /* the last pixel of an odd-sized picture takes the last chroma sample */
+        assert_eq!(&out[(row * 37 + col) * 4..][..3], &yuv_pixel(y[row * ys + col], u[(row / 2) * cs + col / 2], v[(row / 2) * cs + col / 2]));
+    }
+
+    #[cfg(feature = "simd")]
+    #[test]
+    fn the_simd_yuv_conversion_gives_the_same_bytes_as_the_plain_one() {
+        for (n, &(w, h, pad)) in [(8, 2, 0), (16, 16, 0), (17, 9, 3), (960, 540, 32), (641, 361, 7), (7, 5, 1)].iter().enumerate() {
+            let (y, ys, u, v, cs) = planes(w, h, pad, n as u32 + 7);
+            assert_eq!(i420_to_rgba_simd(&y, ys, &u, &v, cs, w, h), i420_to_rgba_scalar(&y, ys, &u, &v, cs, w, h), "{w}x{h}, rows {pad} longer");
+        }
+    }
 }
