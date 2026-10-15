@@ -977,14 +977,27 @@ mod tests {
     /// A UI stand-in: collects the events.
     struct Probe { rx: mpsc::Receiver<(String, String)>, seen: Vec<(String, String)> }
     impl Probe {
-        fn wait(&mut self, what: &str, ok: impl Fn(&Value) -> bool) -> Value {
+        /// The newest event `what` seen so far, or the next one to come, whose JSON payload satisfies `ok` (60 s at most).
+        fn wait(&mut self, what: &str, ok: impl Fn(&Value) -> bool) -> Value { self.wait_since(0, what, ok) }
+
+        /// `wait`, counting only the events that came after `mark()` gave `from` (an older event that matches does not count).
+        fn wait_since(&mut self, from: usize, what: &str, ok: impl Fn(&Value) -> bool) -> Value {
+            let p = self.wait_text_since(from, what, |p| serde_json::from_str::<Value>(p).map_or(false, |v| ok(&v)));
+            serde_json::from_str(&p).unwrap()
+        }
+
+        /// `wait_since` for an event whose payload is plain text, not JSON (`notice`, `open_file`); `from` 0 counts every event seen.
+        fn wait_text_since(&mut self, from: usize, what: &str, ok: impl Fn(&str) -> bool) -> String {
             let deadline = std::time::Instant::now() + Duration::from_secs(60);
             loop {
-                for (n, p) in self.seen.iter().rev() { if n == what { if let Ok(v) = serde_json::from_str::<Value>(p) { if ok(&v) { return v; } } } }
+                for (n, p) in self.seen[from.min(self.seen.len())..].iter().rev() { if n == what && ok(p) { return p.clone(); } }
                 let left = deadline.saturating_duration_since(std::time::Instant::now());
                 match self.rx.recv_timeout(left.min(Duration::from_millis(500))) { Ok(e) => self.seen.push(e), Err(_) if std::time::Instant::now() > deadline => panic!("never saw {what}: {:?}", self.seen), Err(_) => {} }
             }
         }
+
+        /// A point in the stream of events, for `wait_since`: everything already emitted counts as before it.
+        fn mark(&mut self) -> usize { while let Ok(e) = self.rx.try_recv() { self.seen.push(e); } self.seen.len() }
     }
 
     /// How many times alice's own session asked for the whole member list of a room. Only hers: the demo's simulated bob (`testkit::bob_says`) signs in a few
@@ -1033,9 +1046,9 @@ mod tests {
         app.call("login", &creds);
         probe.wait("state", |v| v["screen"] == "main");
         app.call("sign_out", &Value::Null);
-        probe.seen.clear();
+        let m = probe.mark(); /* the first session's events, those still on their way too, are behind this */
         app.call("login", &creds);
-        probe.wait("state", |v| v["screen"] == "main");
+        probe.wait_since(m, "state", |v| v["screen"] == "main");
         std::thread::sleep(Duration::from_secs(3)); /* the old sign-out's clean-up has long finished by now */
         assert!(crate::session::has_saved_session(&app.inner.dir()), "the late clean-up deleted the new session");
     }
