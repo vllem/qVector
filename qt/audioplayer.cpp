@@ -109,10 +109,10 @@ AudioPlayer::AudioPlayer(const QString &path, const QString &title, QWidget *par
     player_ = new QMediaPlayer(this);
     audio_ = new QAudioOutput(this);
     player_->setAudioOutput(audio_);
-    QSettings st("vector", "vector");
+    QSettings st;
     volume_->setValue(st.value("video_volume", 80).toInt());
     audio_->setVolume(volume_->value() / 100.0f);
-    connect(volume_, &QSlider::valueChanged, this, [this](int val) { audio_->setVolume(val / 100.0f); QSettings("vector", "vector").setValue("video_volume", val); });
+    connect(volume_, &QSlider::valueChanged, this, [this](int val) { audio_->setVolume(val / 100.0f); QSettings().setValue("video_volume", val); });
     connect(btn_, &QToolButton::clicked, this, &AudioPlayer::toggle);
     connect(wave_, &WaveformView::seekRequested, this, [this](double f) { if (player_->duration() > 0) player_->setPosition(qint64(f * player_->duration())); });
     connect(player_, &QMediaPlayer::positionChanged, this, [this] { refresh(); });

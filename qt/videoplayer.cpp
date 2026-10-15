@@ -9,7 +9,6 @@
 #include <QStyleOptionSlider>
 #include <QUrl>
 #include <QVBoxLayout>
-#include <cstdio>
 
 namespace vc {
 
@@ -128,7 +127,7 @@ VideoPlayer::VideoPlayer(QWidget *parent) : QWidget(parent)
     player_->setAudioOutput(audio_);
     player_->setVideoOutput(video_);
     {
-        QSettings st("vector", "vector");
+        QSettings st;
         volume_->setValue(st.value("video_volume", 80).toInt());
         audio_->setVolume(volume_->value() / 100.0f);
         audio_->setMuted(st.value("video_muted", false).toBool());
@@ -136,7 +135,7 @@ VideoPlayer::VideoPlayer(QWidget *parent) : QWidget(parent)
     connect(volume_, &QSlider::valueChanged, this, [this](int v2) {
         audio_->setVolume(v2 / 100.0f);
         if (v2 > 0 && audio_->isMuted()) setMuted(false);
-        QSettings("vector", "vector").setValue("video_volume", v2);
+        QSettings().setValue("video_volume", v2);
         refresh();
     });
     connect(mute_, &QToolButton::clicked, this, [this] { setMuted(!audio_->isMuted()); });
@@ -152,7 +151,7 @@ VideoPlayer::VideoPlayer(QWidget *parent) : QWidget(parent)
     connect(player_, &QMediaPlayer::mediaStatusChanged, this, [this] { refresh(); });
     connect(player_, &QMediaPlayer::errorOccurred, this, [this](QMediaPlayer::Error, const QString &msg) {
         error_ = msg;
-        fprintf(stderr, "video: error: %s\n", msg.toUtf8().constData());
+        qWarning("video: error: %s", qUtf8Printable(msg));
         errLabel_->setText("Cannot play the video: " + msg);
         errLabel_->show();
     });
@@ -177,7 +176,7 @@ void VideoPlayer::togglePlay()
 void VideoPlayer::setMuted(bool on)
 {
     audio_->setMuted(on);
-    QSettings("vector", "vector").setValue("video_muted", on);
+    QSettings().setValue("video_muted", on);
     refresh();
 }
 
@@ -207,7 +206,7 @@ bool VideoPlayer::eventFilter(QObject *obj, QEvent *ev)
 
 bool VideoPlayer::open(const QString &path)
 {
-    fprintf(stderr, "video: playing %s with Qt Multimedia\n", path.toUtf8().constData());
+    qInfo("video: playing %s with Qt Multimedia", qUtf8Printable(path));
     player_->setSource(QUrl::fromLocalFile(path));
     player_->play();
     return true; /* failures arrive asynchronously through errorOccurred */
@@ -215,7 +214,7 @@ bool VideoPlayer::open(const QString &path)
 
 bool VideoPlayer::openUrl(const QUrl &url)
 {
-    fprintf(stderr, "video: playing a stream from %s with Qt Multimedia\n", url.host().toUtf8().constData());
+    qInfo("video: playing a stream from %s with Qt Multimedia", qUtf8Printable(url.host()));
     player_->setSource(url);
     player_->play();
     return true;

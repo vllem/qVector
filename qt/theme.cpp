@@ -122,7 +122,7 @@ static QString g_dateFormat, g_timeFormat;
 static void loadTimestampFormats()
 {
     if (!g_dateFormat.isEmpty()) return;
-    QSettings st("vector", "vector");
+    QSettings st;
     g_dateFormat = st.value("date_format", "dd/MM/yyyy").toString();
     g_timeFormat = st.value("time_format", "HH:mm").toString();
     if (g_dateFormat.trimmed().isEmpty()) g_dateFormat = "dd/MM/yyyy";
@@ -136,7 +136,7 @@ void setTimestampFormats(const QString &date, const QString &time)
 {
     g_dateFormat = date.trimmed().isEmpty() ? QString("dd/MM/yyyy") : date;
     g_timeFormat = time.trimmed().isEmpty() ? QString("HH:mm") : time;
-    QSettings st("vector", "vector");
+    QSettings st;
     st.setValue("date_format", g_dateFormat);
     st.setValue("time_format", g_timeFormat);
 }

@@ -3,6 +3,7 @@
 #include "qt/mainwindow.h"
 #include "qt/theme.h"
 #include <QApplication>
+#include <QCommandLineParser>
 #include <QCoreApplication>
 #include <QDialog>
 #include <QDir>
@@ -19,7 +20,6 @@
 #include <QStandardPaths>
 #include <QStyleHints>
 #include <QTimer>
-#include <cstring>
 
 /* Colour emoji come from the system's emoji font (Noto Color Emoji, Twemoji, Apple Color Emoji, Segoe UI Emoji). Qt's own fallback does not always
    reach it, so it is added behind the normal font by name. The picker widgets that show only emoji ask for the family by name (vc::emojiFamily);
@@ -30,7 +30,7 @@ static void ensureEmojiFont()
     const QStringList have = QFontDatabase::families();
     for (const char *want : {"Noto Color Emoji", "Twemoji Mozilla", "Twitter Color Emoji", "Apple Color Emoji", "Segoe UI Emoji"})
         if (have.contains(want)) { family = want; break; }
-    if (family.isEmpty()) { fprintf(stderr, "font: no colour emoji font found (install fonts-noto-color-emoji); emoji will show as boxes\n"); return; }
+    if (family.isEmpty()) { qWarning("font: no colour emoji font found (install fonts-noto-color-emoji); emoji will show as boxes"); return; }
     vc::setEmojiFamily(family);
     /* The normal font first (by its real name: the default "Sans Serif" is only an alias and would be skipped, letting the emoji font
        draw digits and spaces), the emoji font behind it, so emoji codepoints come out in colour everywhere. */
@@ -38,7 +38,7 @@ static void ensureEmojiFont()
     const QString base = QFontInfo(f).family();
     f.setFamilies({base, family});
     QApplication::setFont(f);
-    fprintf(stderr, "font: application font is \"%s\" with \"%s\" for emoji\n", base.toUtf8().constData(), family.toUtf8().constData());
+    qInfo("font: application font is \"%s\" with \"%s\" for emoji", qUtf8Printable(base), qUtf8Printable(family));
 }
 
 
@@ -51,7 +51,7 @@ int main(int argc, char **argv)
 #ifdef __GLIBC__
     { /* give freed heap pages back to the system now and then */
         auto *trim = new QTimer(&app);
-        QObject::connect(trim, &QTimer::timeout, [] { malloc_trim(0); });
+        QObject::connect(trim, &QTimer::timeout, trim, [] { malloc_trim(0); });
         trim->start(30000);
     }
 #endif
@@ -70,33 +70,41 @@ int main(int argc, char **argv)
         p.setColor(QPalette::HighlightedText, QColor(0xfc, 0xfc, 0xfc)); p.setColor(QPalette::PlaceholderText, QColor(0xa1, 0xa9, 0xb1));
         QApplication::setPalette(p);
     }
-    bool demo = false, members = false;
-    QString shot, room, dataDir, dialog, search, thread, server, user, password, sendFile, sendText;
-    bool verify = false, confirm = false;
-    int delay = 6000;
-    const QStringList args = app.arguments();
-    for (int i = 1; i < args.size(); i++) {
-        if (args[i] == "--demo") demo = true; /* a fake homeserver, no account and no network */
-        else if (args[i] == "--screenshot" && i + 1 < args.size()) shot = args[++i];
-        else if (args[i] == "--delay" && i + 1 < args.size()) delay = args[++i].toInt();
-        else if (args[i] == "--room" && i + 1 < args.size()) room = args[++i];
-        else if (args[i] == "--data" && i + 1 < args.size()) dataDir = args[++i];
-        else if (args[i] == "--dialog" && i + 1 < args.size()) dialog = args[++i];
-        else if (args[i] == "--members") members = true;
-        else if (args[i] == "--server" && i + 1 < args.size()) server = args[++i]; /* dev aid: sign in from the command line (with --user and --password) */
-        else if (args[i] == "--user" && i + 1 < args.size()) user = args[++i];
-        else if (args[i] == "--password" && i + 1 < args.size()) password = args[++i];
-        else if (args[i] == "--send-file" && i + 1 < args.size()) sendFile = args[++i]; /* dev aid: send this file into the room that --room opens */
-        else if (args[i] == "--send-text" && i + 1 < args.size()) sendText = args[++i]; /* dev aid: send the text of this file as a message into the room that --room opens */
-        else if (args[i] == "--verify") verify = true;
-        else if (args[i] == "--confirm") confirm = true;
-        else if (args[i] == "--thread" && i + 1 < args.size()) thread = args[++i];
-        else if (args[i] == "--search" && i + 1 < args.size()) search = args[++i];
-        else if (args[i] == "--write-icons" && i + 1 < args.size()) { /* dev aid for packaging: the application icon as PNG files (icon-<size>.png) into a directory */
-            for (int sz : {16, 32, 48, 64, 128, 256, 512}) vc::trayPixmap(0, sz).save(QDir(args[i + 1]).filePath(QString("icon-%1.png").arg(sz)));
-            return 0;
-        }
+    /* Everything but --help is a dev aid. parse(), not process(): an option this build does not know is ignored, as it always was. */
+    QCommandLineParser cli;
+    cli.setApplicationDescription("qVector, a Matrix client");
+    const QCommandLineOption helpOpt = cli.addHelpOption();
+    const QCommandLineOption demoOpt("demo", "Run against an in-process fake homeserver (no account, no network)."),
+        shotOpt("screenshot", "Save a picture of the main window (or the dialog being shown) and quit.", "png"),
+        delayOpt("delay", "Milliseconds before the screenshot; the other dev aids run at half of it.", "ms", "6000"),
+        roomOpt("room", "Open the room with this name.", "name"),
+        dataOpt("data", "Account data directory (default: $VECTOR_DATA, else the app data location).", "dir"),
+        dialogOpt("dialog", "Open a dialog: poll, saved, prefs, verify, recovery, settings, picture, source, ...", "name"),
+        membersOpt("members", "Show the member list."),
+        serverOpt("server", "Sign in to this homeserver (with --user and --password).", "url"),
+        userOpt("user", "User name for --server.", "user"),
+        passwordOpt("password", "Password for --server.", "password"),
+        sendFileOpt("send-file", "Send these files (comma-separated) into the room that --room opens.", "files"),
+        sendTextOpt("send-text", "Send the text of each file (comma-separated, one message each) into the room that --room opens.", "files"),
+        verifyOpt("verify", "Start a verification."),
+        confirmOpt("confirm", "Confirm a verification by itself."),
+        threadOpt("thread", "Open the thread of the message with this text.", "text"),
+        searchOpt("search", "Search the room for this text.", "text"),
+        iconsOpt("write-icons", "Write the application icon as icon-<size>.png into a directory and quit (packaging).", "dir");
+    cli.addOptions({demoOpt, shotOpt, delayOpt, roomOpt, dataOpt, dialogOpt, membersOpt, serverOpt, userOpt, passwordOpt, sendFileOpt, sendTextOpt, verifyOpt,
+                    confirmOpt, threadOpt, searchOpt, iconsOpt});
+    if (!cli.parse(app.arguments())) qWarning("%s", qUtf8Printable(cli.errorText()));
+    if (cli.isSet(helpOpt)) cli.showHelp();
+    if (cli.isSet(iconsOpt)) {
+        for (int sz : {16, 32, 48, 64, 128, 256, 512}) vc::trayPixmap(0, sz).save(QDir(cli.value(iconsOpt)).filePath(QString("icon-%1.png").arg(sz)));
+        return 0;
     }
+    const bool demo = cli.isSet(demoOpt), members = cli.isSet(membersOpt), verify = cli.isSet(verifyOpt), confirm = cli.isSet(confirmOpt);
+    const QString shot = cli.value(shotOpt), room = cli.value(roomOpt), dialog = cli.value(dialogOpt), search = cli.value(searchOpt), thread = cli.value(threadOpt),
+                  server = cli.value(serverOpt), user = cli.value(userOpt), password = cli.value(passwordOpt), sendFile = cli.value(sendFileOpt),
+                  sendText = cli.value(sendTextOpt);
+    QString dataDir = cli.value(dataOpt);
+    const int delay = cli.value(delayOpt).toInt();
     if (qEnvironmentVariableIsSet("VC_DEMO_FONT")) { /* dev aid: the font a desktop theme would give, "Family" or "Family,pixel size" (an offscreen run has only Qt's default) */
         const QStringList fp = qEnvironmentVariable("VC_DEMO_FONT").split(',');
         QFont f(fp[0]);

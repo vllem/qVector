@@ -179,6 +179,8 @@ int main(int argc, char **argv)
     mallopt(M_ARENA_MAX, 2); /* as in the app (qt/main.cpp): the memory steps measure what the app does */
 #endif
     QApplication app(argc, argv);
+    QApplication::setApplicationName("vector"); /* as in the app: the widgets read their QSettings under these names */
+    QApplication::setOrganizationName("vector");
     if (argc > 1) only = argv[1];
 
     TimelineView tl;

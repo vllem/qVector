@@ -221,7 +221,7 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
 {
     setWindowTitle("qVector");
     resize(1100, 740);
-    notify_ = QSettings("vector", "vector").value("notifications", true).toBool();
+    notify_ = QSettings().value("notifications", true).toBool();
     notifier_ = new Notifier(this);
     connect(notifier_, &Notifier::activated, this, [this](const QString &id) { showNormal(); raise(); activateWindow(); openRoom(id); });
     setWindowIcon(appIcon());
@@ -239,7 +239,7 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
             if (why != QSystemTrayIcon::Trigger) return;
             if (isVisible() && isActiveWindow()) hide(); else { showNormal(); raise(); activateWindow(); }
         });
-        tray_->setVisible(QSettings("vector", "vector").value("tray", true).toBool());
+        tray_->setVisible(QSettings().value("tray", true).toBool());
         notifier_->setTray(tray_);
     }
     root_ = new QStackedWidget;
@@ -692,7 +692,7 @@ void MainWindow::buildMenus()
 {
     QMenu *view = menuBar()->addMenu("&View"), *ws = menuBar()->addMenu("&Workspace"), *ch = menuBar()->addMenu("&Channel"),
           *tools = menuBar()->addMenu("&Tools"), *help = menuBar()->addMenu("&Help");
-    QSettings st("vector", "vector");
+    QSettings st;
     view->addAction("Toggle sidebar", QKeySequence("Ctrl+B"), this, [this] { sidebar_->setVisible(!sidebar_->isVisible()); });
     view->addAction("Search messages", QKeySequence("Ctrl+F"), this, [this] { toggleSearch(); });
     view->addAction("Member list", QKeySequence("Ctrl+M"), this, [this] { toggleMembers(); });
@@ -701,12 +701,12 @@ void MainWindow::buildMenus()
     actNotify_ = view->addAction("Desktop notifications");
     actNotify_->setCheckable(true);
     actNotify_->setChecked(notify_);
-    connect(actNotify_, &QAction::toggled, this, [this](bool on) { notify_ = on; QSettings("vector", "vector").setValue("notifications", on); });
+    connect(actNotify_, &QAction::toggled, this, [this](bool on) { notify_ = on; QSettings().setValue("notifications", on); });
     actTyping_ = view->addAction("Send typing notifications");
     actTyping_->setCheckable(true);
     sendTyping_ = st.value("typing", true).toBool();
     actTyping_->setChecked(sendTyping_);
-    connect(actTyping_, &QAction::toggled, this, [this](bool on) { sendTyping_ = on; if (!on) core_->call("typing", {{"typing", false}}); QSettings("vector", "vector").setValue("typing", on); });
+    connect(actTyping_, &QAction::toggled, this, [this](bool on) { sendTyping_ = on; if (!on) core_->call("typing", {{"typing", false}}); QSettings().setValue("typing", on); });
     actPreviews_ = view->addAction("Link previews (asked from your homeserver)");
     actPreviews_->setCheckable(true);
     actPreviews_->setToolTip("The preview is fetched by your homeserver, which therefore sees the link");
@@ -730,12 +730,12 @@ void MainWindow::buildMenus()
     actCloseTray_->setCheckable(true);
     actCloseTray_->setChecked(st.value("close_to_tray", false).toBool());
     connect(actTray_, &QAction::toggled, this, [this](bool on) {
-        QSettings("vector", "vector").setValue("tray", on);
+        QSettings().setValue("tray", on);
         if (tray_) tray_->setVisible(on);
         if (!on && actCloseTray_) actCloseTray_->setChecked(false);
     });
     connect(actCloseTray_, &QAction::toggled, this, [this](bool on) {
-        QSettings("vector", "vector").setValue("close_to_tray", on);
+        QSettings().setValue("close_to_tray", on);
         if (on && actTray_ && !actTray_->isChecked()) actTray_->setChecked(true);
     });
     ws->addAction("Start a direct message...", this, [this] { plus_->menu()->actions().at(0)->trigger(); });
@@ -1182,13 +1182,13 @@ void MainWindow::startSending(const QString &what)
     sendLabel_->show();
     sendBar_->show();
     sendTimeout_->start(120000); /* never leave the bar up forever */
-    if (qEnvironmentVariableIsSet("VC_SEND_LOG")) fprintf(stderr, "sendbar: shown '%s'\n", qUtf8Printable(sendLabel_->text()));
+    if (qEnvironmentVariableIsSet("VC_SEND_LOG")) qInfo("sendbar: shown '%s'", qUtf8Printable(sendLabel_->text()));
 }
 
 void MainWindow::stopSending()
 {
     sendTimeout_->stop();
-    if (sendBar_->isVisible() && qEnvironmentVariableIsSet("VC_SEND_LOG")) fprintf(stderr, "sendbar: hidden after %lld ms\n", QDateTime::currentMSecsSinceEpoch() - sendStart_);
+    if (sendBar_->isVisible() && qEnvironmentVariableIsSet("VC_SEND_LOG")) qInfo("sendbar: hidden after %lld ms", QDateTime::currentMSecsSinceEpoch() - sendStart_);
     sendLabel_->hide();
     sendBar_->hide();
 }
@@ -1604,7 +1604,7 @@ void MainWindow::showPreferences()
 void MainWindow::saveDrafts()
 {
     if (!current_.isEmpty()) drafts_[current_] = composer_->text();
-    QSettings st("vector", "vector");
+    QSettings st;
     st.beginGroup("drafts");
     st.remove("");
     for (auto it = drafts_.cbegin(); it != drafts_.cend(); ++it) if (!it.value().isEmpty()) st.setValue(QString::fromLatin1(it.key().toUtf8().toBase64()), it.value());
@@ -1613,7 +1613,7 @@ void MainWindow::saveDrafts()
 
 void MainWindow::loadDrafts()
 {
-    QSettings st("vector", "vector");
+    QSettings st;
     st.beginGroup("drafts");
     for (const QString &k : st.childKeys()) drafts_.insert(QString::fromUtf8(QByteArray::fromBase64(k.toLatin1())), st.value(k).toString());
     st.endGroup();

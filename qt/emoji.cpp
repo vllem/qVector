@@ -42,11 +42,11 @@ QList<Emoji> searchEmoji(const QString &query, int limit)
     return exact.mid(0, limit);
 }
 
-QStringList recentEmoji() { return QSettings("vector", "vector").value("recent_emoji").toStringList(); }
+QStringList recentEmoji() { return QSettings().value("recent_emoji").toStringList(); }
 
 void rememberEmoji(const QString &glyph)
 {
-    QSettings s("vector", "vector");
+    QSettings s;
     QStringList l = s.value("recent_emoji").toStringList();
     l.removeAll(glyph);
     l.prepend(glyph);
@@ -57,7 +57,7 @@ void rememberEmoji(const QString &glyph)
 QList<Sticker> savedStickers()
 {
     QList<Sticker> out;
-    const QJsonArray arr = QJsonDocument::fromJson(QSettings("vector", "vector").value("stickers").toByteArray()).array();
+    const QJsonArray arr = QJsonDocument::fromJson(QSettings().value("stickers").toByteArray()).array();
     for (const QJsonValue &v : arr) {
         const QJsonObject o = v.toObject();
         Sticker s;
@@ -71,7 +71,7 @@ static void storeStickers(const QList<Sticker> &list)
 {
     QJsonArray arr;
     for (const Sticker &s : list) arr.append(QJsonObject{{"mxc", s.mxc}, {"body", s.body}, {"mime", s.mime}, {"w", s.w}, {"h", s.h}});
-    QSettings("vector", "vector").setValue("stickers", QJsonDocument(arr).toJson(QJsonDocument::Compact));
+    QSettings().setValue("stickers", QJsonDocument(arr).toJson(QJsonDocument::Compact));
 }
 
 void saveSticker(const Sticker &s)

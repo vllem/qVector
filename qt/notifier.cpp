@@ -1,7 +1,6 @@
 #include "qt/notifier.h"
 #include <QSystemTrayIcon>
 #include <QVariantMap>
-#include <cstdio>
 #ifdef Q_OS_LINUX
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
@@ -19,7 +18,7 @@ Notifier::Notifier(QObject *parent) : QObject(parent)
 {
     QDBusConnection bus = QDBusConnection::sessionBus();
     available_ = bus.isConnected() && bus.interface() && bus.interface()->isServiceRegistered(SERVICE);
-    if (!available_) { fprintf(stderr, "notify: no notification service on the session bus; popups are disabled\n"); return; }
+    if (!available_) { qWarning("notify: no notification service on the session bus; popups are disabled"); return; }
     bus.connect(SERVICE, PATH, IFACE, "ActionInvoked", this, SLOT(onAction(uint, QString)));
     bus.connect(SERVICE, PATH, IFACE, "NotificationClosed", this, SLOT(onClosed(uint, uint)));
 }
@@ -33,7 +32,7 @@ void Notifier::show(const QString &roomId, const QString &title, const QString &
     hints.insert("desktop-entry", "vector");
     uint replaces = byRoom_.value(roomId, 0);
     QDBusReply<uint> r = iface.call("Notify", "qVector", replaces, "mail-unread", title, body, QStringList{"default", "Open"}, hints, highlight ? 0 : 8000);
-    if (!r.isValid()) { fprintf(stderr, "notify: %s\n", r.error().message().toUtf8().constData()); return; }
+    if (!r.isValid()) { qWarning("notify: %s", qUtf8Printable(r.error().message())); return; }
     rooms_.insert(r.value(), roomId);
     byRoom_.insert(roomId, r.value());
 }
