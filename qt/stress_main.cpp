@@ -21,8 +21,11 @@
 #include <QScreen>
 #include <QScrollBar>
 #include <QTemporaryDir>
+#include <QTextBlock>
+#include <QTextBoundaryFinder>
 #include <QTextBrowser>
 #include <QTextDocument>
+#include <QTextFragment>
 #include <QWheelEvent>
 #include <cstdio>
 #include <thread>
@@ -489,6 +492,88 @@ int main(int argc, char **argv)
         }
         std::printf("    %lld kinds of message, %d wider than the window, %d with a split flag\n", (long long)cases.size(), wideCases, splitFlags);
         if (wideCases || splitFlags) failures++;
+    });
+
+    /* Consecutive messages from one sender are drawn without a header. Qt's HTML import gave the anchor that finds such a message to the first UTF-16 unit of its text, on its
+       own, so an emoji at the start was cut in two (two replacement characters), and in a run of flags every flag after it paired up one off: wrong flags, and no place to break the
+       line, so the view grew a horizontal scrollbar. Nothing else here puts messages of one sender next to each other, so this is the only step that draws a message without a header. */
+    step("timeline: a message grouped under the previous one is not cut in two by its anchor", 3000, [&] {
+        TimelineView g;
+        g.resize(900, 600);
+        { /* the font as the app sets it */
+            QFont f = QApplication::font();
+            const QStringList have = QFontDatabase::families();
+            for (const char *want : {"Noto Color Emoji", "Twemoji Mozilla", "Twitter Color Emoji", "Apple Color Emoji", "Segoe UI Emoji"}) if (have.contains(want)) { f.setFamilies({QFontInfo(f).family(), want}); break; }
+            g.setFont(f);
+        }
+        g.show();
+        QTextBrowser *view = g.findChild<QTextBrowser *>();
+        auto *bar = view->horizontalScrollBar();
+        /* a text fragment that starts or ends inside a grapheme cluster (a surrogate pair, a flag, a joined sequence, a letter and its accent) is shaped in pieces */
+        auto cuts = [](QTextDocument *d) {
+            int n = 0;
+            for (QTextBlock b = d->begin(); b.isValid(); b = b.next()) {
+                const QString text = b.text();
+                if (text.isEmpty()) continue;
+                QTextBoundaryFinder finder(QTextBoundaryFinder::Grapheme, text);
+                for (QTextBlock::Iterator it = b.begin(); !it.atEnd(); ++it) {
+                    const int at = it.fragment().position() - b.position();
+                    if (at <= 0 || at >= text.size()) continue;
+                    finder.setPosition(at);
+                    if (!finder.isAtBoundary()) n++;
+                }
+            }
+            return n;
+        };
+        auto u = [](const char *utf8) { return QString::fromUtf8(utf8); };
+        const QString il = u("\xF0\x9F\x87\xAE\xF0\x9F\x87\xB1");
+        auto run = [](int n, const QString &unit) { QString t; while (t.size() < n) t += unit; return t.left(n); };
+        struct Case { QString name; QJsonObject row; bool flags = false; };
+        QList<Case> cases;
+        auto text = [&](const QString &n, const QString &t, bool flags = false) { cases.append({n, message(5, t), flags}); }; /* message(5, ...) has the sender of message(0, ...) */
+        text("15 Israeli flags", run(60, il), true); text("497 Israeli flags", run(497 * 4, il), true); text("one flag", il, true);
+        text("grinning face", u("\xF0\x9F\x98\x80 hello")); text("thumbs up with a skin tone", u("\xF0\x9F\x91\x8D\xF0\x9F\x8F\xBD ok"));
+        text("family (joined)", u("\xF0\x9F\x91\xA8\xE2\x80\x8D\xF0\x9F\x91\xA9\xE2\x80\x8D\xF0\x9F\x91\xA7 family")); text("rainbow flag", u("\xF0\x9F\x8F\xB3\xEF\xB8\x8F\xE2\x80\x8D\xF0\x9F\x8C\x88 pride"));
+        text("red heart (a character and a variation selector)", u("\xE2\x9D\xA4\xEF\xB8\x8F love")); text("e and a combining accent", u("e\xCC\x81 cafe")); text("keycap", u("1\xEF\xB8\x8F\xE2\x83\xA3 one"));
+        cases.append({"formatted text", message(5, "x", u("\xF0\x9F\x98\x80 <b>bold</b>")), false});
+        { QJsonObject r = message(5, "x"); r["kind"] = "poll"; r["poll"] = QJsonObject{{"question", u("\xF0\x9F\x8D\x95 pizza?")}, {"answers", QJsonArray{QJsonObject{{"id", "a"}, {"text", u("\xF0\x9F\x87\xAE\xF0\x9F\x87\xB1 yes")}, {"votes", 0}, {"mine", false}}}}, {"max_selections", 1}, {"total_votes", 0}, {"ended", false}};
+          cases.append({"poll question", r, false}); }
+        int cutCases = 0, wideCases = 0, splitFlags = 0;
+        for (const Case &c : cases) {
+            g.reset();
+            g.setRows(QJsonArray{message(0, "before"), c.row});
+            QElapsedTimer pause; pause.start(); while (pause.elapsed() < 170) QApplication::processEvents(QEventLoop::AllEvents, 10); /* the view merges redraws within 150 ms */
+            excludedMs += pause.elapsed();
+            const int n = cuts(view->document());
+            if (n) { std::printf("    CUT IN %d PLACES: %s\n", n, qPrintable(c.name)); cutCases++; }
+            if (bar->maximum() > 0) { std::printf("    WIDER THAN THE WINDOW by %d px: %s\n", bar->maximum(), qPrintable(c.name)); wideCases++; }
+            if (c.flags) { /* red is the neighbours' flags; the Israeli one has none (only the sender's name is dark red, at the top) */
+                const QImage img = g.grab().toImage();
+                int red = 0;
+                for (int y = 100; y < img.height() - 100; y++) for (int x = 40; x < img.width() - 20; x++) { const QRgb px = img.pixel(x, y); if (qRed(px) > 170 && qGreen(px) < 90 && qBlue(px) < 90) red++; }
+                if (red > 40) { std::printf("    FLAGS SPLIT (%d red pixels): %s\n", red, qPrintable(c.name)); splitFlags++; }
+            }
+        }
+        { /* a message that starts a conversation shows its sender's name: that does not get cut either */
+            for (const QString &name : {u("\xF0\x9F\x87\xAE\xF0\x9F\x87\xB1 Dan"), u("\xF0\x9F\x98\x80 Zed")}) {
+                QJsonObject r = message(0, "hi"); r["sender"] = name;
+                g.reset(); g.setRows(QJsonArray{r});
+                QElapsedTimer pause; pause.start(); while (pause.elapsed() < 170) QApplication::processEvents(QEventLoop::AllEvents, 10);
+                excludedMs += pause.elapsed();
+                if (cuts(view->document())) { std::printf("    CUT: the name %s\n", qPrintable(name)); cutCases++; }
+            }
+        }
+        std::printf("    %lld kinds of grouped message and 2 names: %d cut, %d wider than the window, %d with a split flag\n", (long long)cases.size(), cutCases, wideCases, splitFlags);
+        if (cutCases || wideCases || splitFlags) failures++;
+        { /* the anchor of a grouped message still finds it: revealing one in the middle of a long run from one sender puts it at the top of the view */
+            QJsonArray many;
+            for (int k = 0; k < 150; k++) many.append(message(k * 5, QString("line %1 of a long run from one sender").arg(k)));
+            g.reset(); g.setRows(many); settle();
+            g.revealMessage("$e500"); settle();
+            const QString top = g.eventAt(QPoint(40, 8));
+            std::printf("    revealing $e500 in a run of 150 grouped messages: the message at the top is %s\n", qPrintable(top.isEmpty() ? QString("(none)") : top));
+            if (top != "$e500") failures++;
+        }
     });
 
     Sidebar sb;

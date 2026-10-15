@@ -44,7 +44,8 @@ QT_QPA_PLATFORM=offscreen XDG_CONFIG_HOME=$(mktemp -d) ./build/qvector --demo --
 * **Do not set LD_LIBRARY_PATH to ~/Qt** (a Qt 6.10 install used by the dropped QtBridge experiment): the Widgets app uses the system Qt 6.8.
 * `--demo` starts the in-process fake homeserver (feature `testkit`, CMake option `VC_DEMO`) with alice (you), bob, a space, an invite, 40 history messages and a photo from bob (`--dialog picture` opens it as a click does, `--dialog nothumbs` clears the Preferences checkbox).
   Dev aids: `--room NAME --members --search T --thread T --dialog poll|saved|prefs|verify|recovery|settings --delay MS --data DIR --server URL --user U --password P
-  --verify --confirm`. Screenshots grab the main window (or the dialog being demonstrated); popups/menus are not captured.
+  --verify --confirm --send-text FILE[,FILE...]` (one message per file, sent through the composer). `VC_DEMO_FONT=Family[,pixel size]` sets the font a desktop theme would give: an offscreen run only has
+  Qt's default, and the user's session was "Ubuntu" 32 px (12 pt at 192 dpi, `Xft.dpi`). Screenshots grab the main window (or the dialog being demonstrated); popups/menus are not captured.
 * A real run signs in a *new device* on the account and needs re-verification: ask the user before pointing it at their real account. Use `core-rs/examples/fakehs.rs`
   (`cargo run -p vector-core --features testkit --example fakehs`) for a standalone fake server with alice's other session (it prints a recovery key).
 * Use a throw-away config/data dir when running the app for tests: `XDG_CONFIG_HOME=$(mktemp -d)` (QSettings writes drafts, themes, tray choices) and `--data`.
@@ -163,9 +164,16 @@ the alice/bob direct chat (`m.direct`).
   `<pre>` lines (`applyStyle()` gives `pre` `white-space: pre-wrap`), an `<img width="100000">` in somebody's formatted body (every `<img>` that is not our own `emo:` picture is replaced by its
   alt text), and long unbreakable text wraps by itself. The horizontal scrollbar is switched off as well. The stress step "no kind of message widens the view" lists 31 kinds, flags and
   code blocks among them. Emoji cost about a millisecond each to lay out (Qt asks the colour font for the bitmap of every glyph; letters are microseconds): 500 flags were 0.4 s on every redraw of
-  the room, so a message is laid out up to `kMaxShownEmoji` (400) emoji and then cut with the usual note. A flag is two regional indicators: when the first one of a run is lost or corrupt
-  (a lone UTF-16 half shows as "?"), every flag after it pairs with the wrong neighbour (Israel's I, L become Liechtenstein's L, I). "View source..." in a message's menu shows the event as the
+  the room, so a message is laid out up to `kMaxShownEmoji` (400) emoji and then cut with the usual note. "View source..." in a message's menu shows the event as the
   server sent it and the first UTF-16 units of the text the timeline was given (`event_source` call, `source` event, `--dialog source`).
+* **Never put an `<a name>` anchor in front of text that is not ours.** Qt's HTML import gives a pending anchor name to the first UTF-16 *unit* of the next text, inserted on its own
+  (`appendNodeText` in qtextdocumentfragment.cpp: `for (QChar ch : text)` ... `cursor.insertText(ch, format)`; an `<img>` or an empty `<a>` does not use it up, only a character does). An
+  anchor in front of an emoji therefore cut its surrogate pair into two fragments, each shaped on its own: two replacement characters ("��"), and in a run of flags every flag after it paired one off (Israel's I, L
+  became Liechtenstein's L, I, with a lone L at the end); with the glyph clusters one off from the grapheme boundaries the line had no place left to break, so the view grew a horizontal
+  scrollbar ("the emoji do not wrap"). It only happened to a message drawn without a header (one under another from the same sender: the anchor stood in front of its text), and to a
+  name that began with an emoji. The anchors (`ev<hash>`, found by `scrollToAnchor`) now stand in front of text we write ourselves: the time of a message with a header, a `&nbsp;` in the
+  empty left cell of one without. The stress step "a message grouped under the previous one is not cut in two by its anchor" checks that no text fragment starts inside a grapheme cluster;
+  the other timeline steps build `message(i, ...)` with `who[i % 5]` as the sender, so none of them ever drew a message without a header.
 * The default font family is the alias "Sans Serif"; `main.cpp` resolves the real family before adding the colour emoji font (`ensureEmojiFont`). Symbols that exist as
   emoji (◀ ▶ ☺) are written with U+FE0E. The user dislikes coloured-emoji look-alikes for plain symbols and layout glitches: look at a screenshot before reporting done.
 * `QLayout::takeAt()` on a nested layout returns the layout itself: delete it once, not "the item" too. Popups must be clamped to the screen (`EmojiPicker::popupAt`).

@@ -722,7 +722,13 @@ void TimelineView::render()
                        (desc.isEmpty() ? QString() : "<br>" + esc(desc)) + "</td></tr></table>";
         }
 
-        const QString anchor = eid.isEmpty() ? QString() : "<a name=\"ev" + QString::number(qHash(eid)) + "\"></a>";
+        /* What scrollToAnchor finds this message by. Qt's HTML import gives a pending anchor name to the first UTF-16 *unit* of the next text it inserts, on its own (qtextdocumentfragment.cpp,
+           appendNodeText), so an anchor in front of an emoji cut its surrogate pair in two: two replacement characters, and in a run of flags the pairs after it were one off, which left
+           no place to break the line (the view grew a horizontal scrollbar). The anchor therefore goes in front of text that is ours and starts with a plain character: the time of a
+           message with a header, a non-breaking space in the otherwise empty left cell of one without. */
+        const QString anchorName = eid.isEmpty() ? QString() : "ev" + QString::number(qHash(eid));
+        const QString anchorBeforeTime = anchorName.isEmpty() ? QString() : "<a name=\"" + anchorName + "\"></a>";
+        const QString anchorInBlank = anchorName.isEmpty() ? QString() : "<a name=\"" + anchorName + "\">&nbsp;</a>";
         const QString hl = !highlight_.isEmpty() && eid == highlight_ ? "bgcolor=\"" + hex(pal.color(QPalette::Highlight).lighter(isDark(pal) ? 100 : 150)) + "\"" : QString();
         if (!grouped) {
             html += QChar(2);
@@ -737,12 +743,12 @@ void TimelineView::render()
                 haveAvatars.insert(key);
             }
             html += "<tr><td width=40 rowspan=2 valign=top style=\"padding-top:6px\"><img src=\"" + key + "\" width=32 height=32></td>"
-                    "<td " + hl + " style=\"padding-top:6px\">" + anchor + "<b><font color=\"" + hex(nameColor(sender, pal)) + "\">" + esc(name) + "</font></b>" + shieldHtml + "</td>"
-                    "<td " + hl + " align=right style=\"padding-top:6px\"><font color=\"" + muted + "\">" + esc(when) + "</font></td></tr>"
+                    "<td " + hl + " style=\"padding-top:6px\"><b><font color=\"" + hex(nameColor(sender, pal)) + "\">" + esc(name) + "</font></b>" + shieldHtml + "</td>"
+                    "<td " + hl + " align=right style=\"padding-top:6px\">" + anchorBeforeTime + "<font color=\"" + muted + "\">" + esc(when) + "</font></td></tr>"
                     "<tr><td " + hl + " colspan=2>" + content + "</td></tr>";
         } else {
             rowEvents_ << eid;
-            html += "<tr><td width=40></td><td " + hl + " colspan=2" + (gapAbove ? " style=\"padding-top:8px\"" : "") + ">" + anchor + content + "</td></tr>";
+            html += "<tr><td width=40>" + anchorInBlank + "</td><td " + hl + " colspan=2" + (gapAbove ? " style=\"padding-top:8px\"" : "") + ">" + content + "</td></tr>";
         }
         const QJsonArray seen = r.value("seen_by").toArray();
         if (!seen.isEmpty()) {

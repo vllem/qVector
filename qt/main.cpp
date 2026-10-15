@@ -97,6 +97,12 @@ int main(int argc, char **argv)
             return 0;
         }
     }
+    if (qEnvironmentVariableIsSet("VC_DEMO_FONT")) { /* dev aid: the font a desktop theme would give, "Family" or "Family,pixel size" (an offscreen run has only Qt's default) */
+        const QStringList fp = qEnvironmentVariable("VC_DEMO_FONT").split(',');
+        QFont f(fp[0]);
+        if (fp.size() > 1 && fp[1].toInt() > 0) f.setPixelSize(fp[1].toInt());
+        QApplication::setFont(f);
+    }
     ensureEmojiFont();
     app.setWindowIcon(vc::appIcon());
     app.setQuitOnLastWindowClosed(false); /* the tray icon may keep us running; closeEvent decides */
@@ -119,7 +125,11 @@ int main(int argc, char **argv)
         if (!room.isEmpty()) QTimer::singleShot(delay / 2, &w, [&] { w.openRoomByTitle(room); });
         if (!thread.isEmpty()) QTimer::singleShot(delay / 2 + 500, &w, [&] { w.threadForDemo(thread); });
         if (!sendFile.isEmpty()) QTimer::singleShot(delay / 2 + 4000, &w, [&] { w.sendFilesForDemo(sendFile.split(','), "a gallery"); });
-        if (!sendText.isEmpty()) QTimer::singleShot(delay / 2 + 1000, &w, [&] { QFile f(sendText); if (f.open(QIODevice::ReadOnly)) w.sendForDemo(QString::fromUtf8(f.readAll())); });
+        int sentAt = delay / 2 + 1000;
+        for (const QString &path : sendText.split(',', Qt::SkipEmptyParts)) { /* one message per file, in order */
+            QTimer::singleShot(sentAt, &w, [&w, path] { QFile f(path); if (f.open(QIODevice::ReadOnly)) w.sendForDemo(QString::fromUtf8(f.readAll())); });
+            sentAt += 1200;
+        }
         if (members) QTimer::singleShot(delay / 2 + 500, &w, [&] { w.membersForDemo(); });
         if (!search.isEmpty()) QTimer::singleShot(delay / 2 + 500, &w, [&] { w.searchForDemo(search); });
         if (!dialog.isEmpty()) QTimer::singleShot(delay / 2 + 500, &w, [&] { w.dialogForDemo(dialog); });
