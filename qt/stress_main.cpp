@@ -28,7 +28,9 @@
 #ifdef __GLIBC__
 #include <malloc.h>
 #endif
+#include <QImageReader>
 #include "qt/core.h"
+#include "qt/imageload.h"
 #include "qt/memberlist.h"
 #include "qt/packpicker.h"
 #include "qt/sidebar.h"
@@ -459,6 +461,50 @@ int main(int argc, char **argv)
         if (!partial || !gone) failures++;
     });
 
+    /* the pictures that are sent: their size and, when they are big, a thumbnail for the receivers (the engine has no image decoders) */
+    step("pictures: the thumbnails of pictures that are sent", 800, [&] {
+        QTemporaryDir dir;
+        QElapsedTimer whole, inThumbnails; /* making the test pictures is not what is measured */
+        whole.start();
+        qint64 spent = 0;
+        auto pictureInfo = [&](const QString &path, const QString &d, const QString &name) { inThumbnails.start(); const vc::PictureInfo i = vc::pictureInfo(path, d, name); spent += inThumbnails.nsecsElapsed(); return i; };
+        auto save = [&](const QString &name, const QImage &img, const char *fmt, int q = -1) { const QString p = dir.filePath(name); img.save(p, fmt, q); return p; };
+        auto check = [&](const char *what, bool ok) { if (!ok) { std::printf("    WRONG: %s\n", what); failures++; } };
+        const QString big = save("big.jpg", photo(4000, 3000, 1), "JPEG", 85);
+        const PictureInfo b = pictureInfo(big, dir.path(), "t-big");
+        const QImage bt(b.thumbPath);
+        std::printf("    4000x3000 JPEG of %lld KB: %dx%d, thumbnail %dx%d %s of %lld KB\n", (long long)QFileInfo(big).size() / 1024, b.width, b.height, b.thumbWidth, b.thumbHeight, qPrintable(b.thumbMime), (long long)QFileInfo(b.thumbPath).size() / 1024);
+        check("a big JPEG gets its size and a JPEG thumbnail that fits 800x600", b.width == 4000 && b.height == 3000 && b.thumbMime == "image/jpeg" && b.thumbWidth == 800 && b.thumbHeight == 600 && bt.size() == QSize(800, 600) && QFileInfo(b.thumbPath).size() < QFileInfo(big).size() / 5);
+        const QString shot = save("shot.png", photo(2560, 1440, 2), "PNG"); /* opaque: JPEG */
+        const PictureInfo sh = pictureInfo(shot, dir.path(), "t-shot");
+        check("an opaque PNG gets a JPEG thumbnail of the right proportions", sh.width == 2560 && sh.height == 1440 && sh.thumbMime == "image/jpeg" && sh.thumbWidth == 800 && sh.thumbHeight == 450);
+        QImage argb = photo(1600, 1200, 3).convertToFormat(QImage::Format_ARGB32); /* an alpha channel that is not used (the clipboard gives these): still JPEG */
+        const PictureInfo ar = pictureInfo(save("clip.png", argb, "PNG"), dir.path(), "t-clip");
+        check("an unused alpha channel does not make the thumbnail a PNG", ar.thumbMime == "image/jpeg");
+        for (int y = 0; y < argb.height(); y++) for (int x = 0; x < argb.width(); x++) argb.setPixel(x, y, qRgba(qRed(argb.pixel(x, y)), 100, 50, y * 255 / argb.height()));
+        const PictureInfo tr = pictureInfo(save("alpha.png", argb, "PNG"), dir.path(), "t-alpha");
+        const QImage trt(tr.thumbPath);
+        check("a picture with transparency gets a PNG thumbnail that keeps it", tr.thumbMime == "image/png" && trt.hasAlphaChannel() && qAlpha(trt.pixel(10, 5)) < 20 && qAlpha(trt.pixel(10, trt.height() - 5)) > 235);
+        const PictureInfo sm = pictureInfo(save("small.jpg", photo(300, 200, 4), "JPEG", 85), dir.path(), "t-small");
+        check("a small picture has its size and no thumbnail", sm.width == 300 && sm.height == 200 && sm.thumbPath.isEmpty());
+        const PictureInfo lowres = pictureInfo(save("noisy.png", photo(700, 500, 5), "PNG"), dir.path(), "t-noisy"); /* big in bytes, small in pixels: nothing to scale to */
+        check("a picture that fits 800x600 has no thumbnail whatever its bytes", lowres.width == 700 && lowres.thumbPath.isEmpty());
+        /* the EXIF orientation: a picture that is stored sideways is as big as it is shown, and so is its thumbnail (Qt cannot write the orientation: the tag is put into the file by hand) */
+        { QFile f(big); f.open(QIODevice::ReadOnly); QByteArray jpeg = f.readAll();
+          static const char exif[] = "\xff\xe1\x00\x22" "Exif\0\0" "MM\0\x2a\0\0\0\x08" "\0\x01" "\x01\x12\0\x03\0\0\0\x01\0\x06\0\0" "\0\0\0\0"; /* orientation 6: turned a quarter */
+          jpeg.insert(2, QByteArray(exif, 36));
+          QFile o(dir.filePath("turned.jpg")); o.open(QIODevice::WriteOnly); o.write(jpeg); o.close();
+          const PictureInfo t = pictureInfo(dir.filePath("turned.jpg"), dir.path(), "t-turned");
+          const QImage tt(t.thumbPath);
+          std::printf("    stored 4000x3000, turned a quarter: %dx%d, thumbnail %dx%d\n", t.width, t.height, t.thumbWidth, t.thumbHeight);
+          check("a picture stored sideways is measured as it is shown", t.width == 3000 && t.height == 4000 && t.thumbHeight == 600 && t.thumbWidth == 450 && tt.size() == QSize(450, 600)); }
+        /* what the engine does not send as a picture, and what cannot be read */
+        QFile bad(dir.filePath("garbage.jpg")); bad.open(QIODevice::WriteOnly); bad.write(QByteArray(400000, 'x')); bad.close();
+        check("a file that is no picture gets nothing", pictureInfo(dir.filePath("garbage.jpg"), dir.path(), "t-bad").width == 0 && pictureInfo(dir.filePath("nothing.jpg"), dir.path(), "t-none").width == 0);
+        check("a bitmap is sent as a file, with no picture info", pictureInfo(save("a.bmp", photo(1600, 1200, 7), "BMP"), dir.path(), "t-bmp").width == 0);
+        excludedMs = whole.nsecsElapsed() / 1e6 - spent / 1e6;
+    });
+
     /* ---- memory: what a long session shows (pictures, avatars) must not pile up. Photos and faces are made here, as real JPEG/PNG files. These steps come
        last: they leave the heap in a state that makes the time steps above slower by a few per cent. Their figures and budgets are for `qvector_stress memory` run
        on its own (a fresh process): in a full run they start from a warm heap that reuses freed memory and read lower. ---- */
@@ -498,6 +544,10 @@ int main(int argc, char **argv)
         memstep("memory: 10 rooms of 14 pictures, visited 3 times", 40000, [&] {
             for (int cycle = 0; cycle < 3; cycle++) for (int r = 0; r < 10; r++) { mtl.reset(); mtl.setRows(room(r)); settle(); }
         }, 8000);
+        memstep("memory: thumbnails of nine photos that are sent (eight of 12 megapixels)", 8000, [&] {
+            int n = 0;
+            for (const QString &p : photos) { const PictureInfo i = pictureInfo(p, farm.path(), QString("sent-%1").arg(n++)); if (i.thumbPath.isEmpty()) failures++; }
+        });
         mtl.reset();
         Sidebar msb;
         msb.resize(260, 700);

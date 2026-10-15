@@ -81,6 +81,15 @@ pub struct App {
 }
 
 fn s(v: &Value, k: &str) -> String { v[k].as_str().unwrap_or("").to_string() }
+
+/// What the UI says about a picture it sends (see the `send_files` call); None for an entry that says nothing.
+fn picture_info_of(v: &Value) -> Option<ui::PictureInfo> {
+    let n = |x: &Value, k: &str| x[k].as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(0);
+    if !v.is_object() || (n(v, "width") == 0 && n(v, "height") == 0 && !v["thumb"].is_object()) { return None; }
+    let t = &v["thumb"];
+    let thumb = if t.is_object() && !s(t, "path").is_empty() { Some(ui::ThumbFile { path: PathBuf::from(s(t, "path").trim_start_matches("file://")), width: n(t, "width"), height: n(t, "height"), mime: s(t, "mime") }) } else { None };
+    Some(ui::PictureInfo { width: n(v, "width"), height: n(v, "height"), thumb })
+}
 fn b(v: &Value, k: &str) -> bool { v[k].as_bool().unwrap_or(false) }
 
 impl Inner {
@@ -184,10 +193,12 @@ impl App {
             "emote_packs" => self.send_emote_packs(&s(args, "room_id")),
             "send_sticker" => { let (m, b, w, h, mime) = (s(args, "mxc"), s(args, "body"), args["width"].as_u64().unwrap_or(0) as u32, args["height"].as_u64().unwrap_or(0) as u32, s(args, "mime")); self.on_timeline(move |i, tl| async move { if let Err(e) = ui::send_sticker(&tl, &m, &b, w, h, &mime).await { i.notice(format!("Cannot send the sticker: {e}")); } }); Value::Null }
             "send_file" => { let p = PathBuf::from(s(args, "path").trim_start_matches("file://")); let cap = s(args, "caption"); self.on_timeline(move |i, tl| async move { if let Err(e) = ui::send_file(&tl, &p, Some(&cap)).await { i.notice(format!("Cannot send the file: {e}")); } }); Value::Null }
-            "send_files" => { /* several files become one gallery message; `paths`: array of paths */
+            "send_files" => { /* several files become one gallery message; `paths`: array of paths; `pictures` (optional): array, one entry for each path, of what the UI knows about it:
+                                 {"width", "height", "thumb": {"path", "width", "height", "mime"}} (a picture is sent with its size, and with the thumbnail file when there is one) */
                 let ps: Vec<PathBuf> = args.get("paths").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).map(|p| PathBuf::from(p.trim_start_matches("file://"))).collect()).unwrap_or_default();
+                let infos: Vec<Option<ui::PictureInfo>> = args.get("pictures").and_then(|v| v.as_array()).map(|a| a.iter().map(picture_info_of).collect()).unwrap_or_default();
                 let cap = s(args, "caption");
-                self.on_timeline(move |i, tl| async move { if let Err(e) = ui::send_gallery(&tl, &ps, Some(&cap)).await { i.notice(format!("Cannot send the files: {e}")); } }); Value::Null }
+                self.on_timeline(move |i, tl| async move { if let Err(e) = ui::send_gallery_with(&tl, &ps, Some(&cap), &infos).await { i.notice(format!("Cannot send the files: {e}")); } }); Value::Null }
             "react" => { let (e, k) = (s(args, "event_id"), s(args, "key")); self.on_timeline(move |_, tl| async move { let _ = ui::toggle_reaction(&tl, &e, &k).await; }); Value::Null }
             "edit" => { let (e, t) = (s(args, "event_id"), s(args, "text"));
                 let mentions: Vec<(String, String)> = args.get("mentions").and_then(|v| v.as_array()).map(|a| a.iter().map(|m| (s(m, "id"), s(m, "label"))).collect()).unwrap_or_default();
@@ -1105,6 +1116,30 @@ mod tests {
         probe.wait("timeline", |v| v["rows"].as_array().map(|a| !a.is_empty()).unwrap_or(false));
         std::thread::sleep(Duration::from_secs(2)); /* the timeline's own fetch of the members has long finished */
         assert_eq!(hs.log().iter().filter(|l| l.starts_with("GET ") && l.contains("/members (")).count(), 1, "the room details and the timeline share one request");
+    }
+
+    #[test]
+    fn pictures_sent_through_the_engine_call_carry_their_size_and_thumbnail() {
+        let (app, mut probe, dir) = app();
+        let fake = app.call("start_fake_server", &Value::Null);
+        app.call("login", &json!({"homeserver": fake["homeserver"], "user": "alice", "password": "x"}));
+        probe.wait("state", |v| v["screen"] == "main");
+        probe.wait("rooms", |v| v.as_array().map(|a| a.iter().any(|r| r["id"] == crate::testkit::ROOM)).unwrap_or(false));
+        app.call("select_room", &json!({"room_id": crate::testkit::ROOM}));
+        probe.wait("timeline", |v| v["rows"].as_array().map(|a| !a.is_empty()).unwrap_or(false));
+        let (pic, thumb) = (dir.path().join("big.jpg"), dir.path().join("thumb.jpg"));
+        std::fs::write(&pic, vec![1u8; 300_000]).unwrap();
+        std::fs::write(&thumb, vec![2u8; 5_000]).unwrap();
+        let hs = app.inner.fake.lock().unwrap().clone().unwrap();
+        let before = hs.uploaded().len(); /* the demo's emoji pack is in there */
+        app.call("send_files", &json!({"paths": [pic.to_string_lossy()], "caption": "",
+            "pictures": [{"width": 4000, "height": 3000, "thumb": {"path": thumb.to_string_lossy(), "width": 800, "height": 600, "mime": "image/jpeg"}}]}));
+        let t = probe.wait("timeline", |v| v["rows"].as_array().is_some_and(|a| a.iter().any(|m| m["file_name"] == "big.jpg" && m["image_w"] == 4000 && !m["pending"].as_bool().unwrap_or(false))));
+        assert!(t["rows"].as_array().unwrap().iter().any(|m| m["file_name"] == "big.jpg"));
+        assert_eq!(hs.uploaded().len() - before, 2, "the picture and its thumbnail were uploaded");
+        /* an entry that says nothing, and no entries at all, still send the files */
+        app.call("send_files", &json!({"paths": [pic.to_string_lossy()], "caption": "", "pictures": [null]}));
+        probe.wait("timeline", |v| v["rows"].as_array().is_some_and(|a| a.iter().filter(|m| m["file_name"] == "big.jpg" && !m["pending"].as_bool().unwrap_or(false)).count() == 2));
     }
 
     #[test]

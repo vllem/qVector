@@ -108,7 +108,13 @@ heap that reuses freed memory, so they read lower (a regression of 10 MB in the 
   declares under 256 KB is fetched whole. `Inner.images` maps event id to `ui::Pic {path, thumb}`; a row with `image_thumb` has the smaller one, and `MainWindow::openPicture` then
   asks for `fetch_media` and `media_file` opens the viewer (a gallery item or "Save as" always fetches the original; `media_copy` keeps the opened file in `media/open/` and uses it the next time). Files are named `<id>.<ext>` (the picture) and `<id>-t.img`
   (a thumbnail), written through `.part` and renamed, and found again after a restart without asking the server (the picture wins over a thumbnail). A call fetches at most 8 pictures,
-  the newest first. Not covered: the pictures qVector sends itself carry no thumbnail (so in an encrypted room others download them whole), GIFs are still frames in the timeline anyway.
+  the newest first. GIFs are still frames in the timeline anyway.
+* Pictures that qVector sends carry their size and, when they are big, a thumbnail (so in an encrypted room others do not download them whole, and our own timeline shows the thumbnail too).
+  The engine has no image decoder; Qt makes the thumbnail when the file is staged (`vc::pictureInfo` in `qt/imageload.cpp`, one thread, `MainWindow::prepareThumbnail`): JPEG, PNG and WebP of
+  over 256 KB that do not fit 800x600 get a thumbnail of at most 800x600 (JPEG quality 82; PNG when the picture really uses transparency; JPEG and WebP decode at that size, so a photo is
+  never decoded in full), the EXIF orientation is applied to both sizes, GIFs get no thumbnail (a still picture would replace the animation), other types are sent as files with no info. The
+  files wait in `pasteDir_` until the program ends; `send_files {paths, caption, pictures: [{width, height, thumb: {path, width, height, mime}}]}` carries them to `ui::send_gallery_with` /
+  `send_file_with`, which attach them (`PictureInfo`, `ThumbFile`; a thumbnail that cannot be read or is no smaller than the picture is left out: it must never stop a picture from going out).
 * The sync filter (`crate::sync_settings`, used by `network_loop` and `sync_once`): `lazy_load_members` and no presence. A first sign-in used to download every member of every
   room (tens of MB for a 20 000-person room) and the SDK stored presence events nobody reads. Now a room's state has the people whose events the sync carries, ourselves and the
   heroes; the SDK marks the list incomplete by itself when a sync is `limited`, and `are_members_synced` is only set by a `/members`. `ui::room_details` lists everybody at once for a

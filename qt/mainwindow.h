@@ -18,6 +18,8 @@
 #include <QHash>
 #include <QImage>
 #include <QTemporaryDir>
+#include <QMutex>
+#include <QThreadPool>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QLabel>
@@ -75,6 +77,7 @@ public:
     void openRoomByTitle(const QString &title); /* dev aid: opens the first room with this name */
     void dialogForDemo(const QString &which);   /* dev aid */
     void sendForDemo(const QString &text) { composer_->setText(text); send(); } /* through the composer, like a person pressing Enter */
+    void sendFilesForDemo(const QStringList &paths, const QString &caption) { stageFiles(paths); composer_->setText(caption); send(); } /* the files are staged and sent as when they are chosen, the caption typed and Enter pressed */
     void membersForDemo() { toggleMembers(); }
     void setAutoConfirm(bool on) { autoConfirm_ = on; } /* dev aid: confirm the emoji by itself */
     void verifyForDemo() { core_->call("request_verification"); }
@@ -165,7 +168,14 @@ private:
     QWidget *attachBar_;
     QLabel *attachThumb_, *attachLabel_;
     QStringList pending_;
-    QTemporaryDir *pasteDir_ = nullptr;
+    QTemporaryDir *pasteDir_ = nullptr; /* pasted pictures and the thumbnails of the pictures that are sent */
+    /* what the engine is told about each staged file (size, thumbnail), made on a thread of its own when the file is staged: a photo takes tens of milliseconds, a gallery many times that */
+    QThreadPool thumbPool_;
+    QMutex pictureMutex_;
+    QHash<QString, QJsonObject> pictureInfo_;
+    int thumbSeq_ = 0;
+    void prepareThumbnail(const QString &path);
+    QJsonArray pictureInfos(const QStringList &paths);
     QStackedWidget *timelines_;
     Composer *composer_;
     QToolButton *attach_ = nullptr, *emojiBtn_ = nullptr, *stickerBtn_ = nullptr;

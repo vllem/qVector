@@ -1065,12 +1065,46 @@ pub async fn send_sticker(timeline: &Timeline, mxc: &str, body: &str, width: u32
     timeline.send(AnyMessageLikeEventContent::Sticker(StickerEventContent::new(body.to_string(), info, uri.to_owned()))).await.map(|_| ()).map_err(|e| e.to_string())
 }
 
-pub async fn send_file(timeline: &Timeline, path: &Path, caption: Option<&str>) -> Result<(), String> {
+/// A smaller version of a picture that goes out with it: a file of its own that the front end made (Qt has the image decoders, the engine has none), `mime` its type.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThumbFile { pub path: PathBuf, pub width: u32, pub height: u32, pub mime: String }
+
+/// What the front end knows about a picture it sends: its size in pixels as it is shown (the EXIF orientation applied) and, when it is big, a thumbnail. Receivers show
+/// the thumbnail instead of downloading the whole file, and for an encrypted picture it is the only small version there is (the server cannot scale what it cannot read).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PictureInfo { pub width: u32, pub height: u32, pub thumb: Option<ThumbFile> }
+
+/// The thumbnail file as the SDK wants it. None (the picture goes out without one) when the file cannot be read, is empty, is not a picture type or is no smaller than the
+/// picture: a thumbnail is only an economy, it must never be the reason a picture is not sent.
+fn read_thumbnail(t: &ThumbFile, picture_bytes: Option<u64>) -> Option<matrix_sdk::attachment::Thumbnail> {
+    let data = std::fs::read(&t.path).ok()?;
+    let content_type: mime::Mime = t.mime.parse().ok()?;
+    if data.is_empty() || content_type.type_() != mime::IMAGE || picture_bytes.is_some_and(|n| data.len() as u64 >= n) { return None; }
+    let size = matrix_sdk::ruma::UInt::try_from(data.len() as u64).ok()?;
+    Some(matrix_sdk::attachment::Thumbnail { data, content_type, height: t.height.into(), width: t.width.into(), size })
+}
+
+/// The attachment info (the size in bytes, and in pixels when the front end said) and the thumbnail of a file that is about to be sent; None for anything that is not a picture.
+fn picture_attachment(path: &Path, mime: &mime::Mime, info: Option<&PictureInfo>) -> Option<(matrix_sdk::attachment::AttachmentInfo, Option<matrix_sdk::attachment::Thumbnail>)> {
+    use matrix_sdk::{attachment::{AttachmentInfo, BaseImageInfo}, ruma::UInt};
+    if mime.type_() != mime::IMAGE { return None; }
+    let bytes = std::fs::metadata(path).ok().map(|m| m.len());
+    let pixels = |n: u32| if n > 0 { Some(UInt::from(n)) } else { None };
+    let base = BaseImageInfo { width: info.and_then(|i| pixels(i.width)), height: info.and_then(|i| pixels(i.height)), size: bytes.and_then(|n| UInt::try_from(n).ok()), blurhash: None, is_animated: None };
+    Some((AttachmentInfo::Image(base), info.and_then(|i| i.thumb.as_ref()).and_then(|t| read_thumbnail(t, bytes))))
+}
+
+pub async fn send_file(timeline: &Timeline, path: &Path, caption: Option<&str>) -> Result<(), String> { send_file_with(timeline, path, caption, None).await }
+
+/// `send_file` for a file the front end has looked at: a picture goes out with its size and thumbnail (see `PictureInfo`).
+pub async fn send_file_with(timeline: &Timeline, path: &Path, caption: Option<&str>, info: Option<&PictureInfo>) -> Result<(), String> {
     use matrix_sdk::ruma::events::room::message::TextMessageEventContent;
     use matrix_sdk_ui::timeline::AttachmentConfig;
+    let mime = mime_of(path);
     let mut config = AttachmentConfig::default();
     if let Some(c) = caption.filter(|c| !c.is_empty()) { config.caption = Some(TextMessageEventContent::markdown(c)); }
-    timeline.send_attachment(path.to_path_buf(), mime_of(path), config).await.map_err(|e| e.to_string())?;
+    if let Some((attachment, thumbnail)) = picture_attachment(path, &mime, info) { config.info = Some(attachment); config.thumbnail = thumbnail; }
+    timeline.send_attachment(path.to_path_buf(), mime, config).await.map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1088,20 +1122,24 @@ fn mime_of(path: &Path) -> mime::Mime {
 
 /// Send several files as ONE message (a media gallery, MSC4274: `dm.filament.gallery`, the way Element X shows several pictures at once);
 /// `caption` (Markdown) belongs to the whole message. One file is sent as an ordinary attachment, as clients that do not know galleries show nothing useful for them.
-pub async fn send_gallery(timeline: &Timeline, paths: &[PathBuf], caption: Option<&str>) -> Result<(), String> {
-    use matrix_sdk::attachment::{AttachmentInfo, BaseFileInfo, BaseImageInfo};
+pub async fn send_gallery(timeline: &Timeline, paths: &[PathBuf], caption: Option<&str>) -> Result<(), String> { send_gallery_with(timeline, paths, caption, &[]).await }
+
+/// `send_gallery`, with what the front end knows about the files (`infos[n]` is about `paths[n]`; a missing or empty one means nothing is known).
+pub async fn send_gallery_with(timeline: &Timeline, paths: &[PathBuf], caption: Option<&str>, infos: &[Option<PictureInfo>]) -> Result<(), String> {
+    use matrix_sdk::attachment::{AttachmentInfo, BaseFileInfo};
     use matrix_sdk::ruma::events::room::message::TextMessageEventContent;
     use matrix_sdk_ui::timeline::{GalleryConfig, GalleryItemInfo};
+    let info_of = |n: usize| infos.get(n).and_then(|i| i.as_ref());
     match paths {
         [] => return Err("no files to send".into()),
-        [one] => return send_file(timeline, one, caption).await,
+        [one] => return send_file_with(timeline, one, caption, info_of(0)).await,
         _ => {}
     }
     let mut config = GalleryConfig::new();
-    for p in paths {
+    for (n, p) in paths.iter().enumerate() {
         let mime = mime_of(p);
-        let attachment_info = if mime.type_() == mime::IMAGE { AttachmentInfo::Image(BaseImageInfo::default()) } else { AttachmentInfo::File(BaseFileInfo::default()) };
-        config = config.add_item(GalleryItemInfo { source: p.clone().into(), content_type: mime, attachment_info, caption: None, thumbnail: None });
+        let (attachment_info, thumbnail) = picture_attachment(p, &mime, info_of(n)).unwrap_or_else(|| (AttachmentInfo::File(BaseFileInfo::default()), None));
+        config = config.add_item(GalleryItemInfo { source: p.clone().into(), content_type: mime, attachment_info, caption: None, thumbnail });
     }
     config = config.caption(caption.filter(|c| !c.is_empty()).map(TextMessageEventContent::markdown));
     timeline.send_gallery(config).await.map_err(|e| e.to_string())?;
@@ -1584,6 +1622,69 @@ mod tests {
         assert!(!f.hs.log().iter().any(|l| l.starts_with("thumbnail ")), "an encrypted picture is never asked of the thumbnail endpoint");
         let off = fetch_images(&f.client, &items, &dir.path().join("cache"), &got, false).await;
         assert!(off.len() == 1 && !off[&a].thumb && std::fs::read(&off[&a].path).unwrap() == big(), "switched off: the first one comes whole too");
+    }
+
+    #[tokio::test]
+    async fn a_big_picture_goes_out_with_its_size_and_a_thumbnail_that_the_other_side_shows() {
+        use matrix_sdk::ruma::events::room::MediaSource;
+        let f = fixture().await;
+        let dir = tempfile::tempdir().unwrap();
+        let (pic, thumb) = (dir.path().join("big.jpg"), dir.path().join("thumb.jpg"));
+        std::fs::write(&pic, big()).unwrap();
+        std::fs::write(&thumb, small()).unwrap();
+        let info = PictureInfo { width: 4000, height: 3000, thumb: Some(ThumbFile { path: thumb, width: 800, height: 600, mime: "image/jpeg".into() }) };
+        send_file_with(&f.timeline, &pic, Some("holiday"), Some(&info)).await.unwrap_or_else(|e| panic!("{e}; {:#?}", f.hs.log().iter().filter(|l| l.contains("UNHANDLED")).collect::<Vec<_>>()));
+        let msgs = wait_for(&f, |m| m.len() == 1 && m[0].kind == "image" && !m[0].pending).await;
+        assert_eq!((msgs[0].image_w, msgs[0].image_h), (4000, 3000), "the size in pixels goes out");
+        let up = f.hs.uploaded();
+        assert_eq!(up.len(), 2, "the picture and its thumbnail");
+        assert!(up.iter().all(|u| *u != big() && *u != small()), "the room is encrypted: neither of them is on the server as it is");
+        let items = items_of(&f).await;
+        let ev = items.iter().find_map(|i| i.as_event()).unwrap();
+        let MessageType::Image(img) = ev.content().as_message().unwrap().msgtype() else { panic!("not a picture") };
+        let sent = img.info.as_ref().unwrap();
+        assert_eq!(sent.size.map(u64::from), Some(300_000), "the size in bytes goes out too");
+        assert!(matches!(sent.thumbnail_source, Some(MediaSource::Encrypted(_))), "{:?}", sent.thumbnail_source);
+        let ti = sent.thumbnail_info.as_ref().unwrap();
+        assert_eq!((ti.width.map(u64::from), ti.height.map(u64::from), ti.size.map(u64::from), ti.mimetype.as_deref()), (Some(800), Some(600), Some(5_000), Some("image/jpeg")));
+        /* the other side shows the thumbnail, or the picture when it wants that */
+        let got = fetch_images(&f.client, &items, &dir.path().join("cache"), &HashMap::new(), true).await;
+        let pic_on = got.values().next().unwrap();
+        assert!(pic_on.thumb && std::fs::read(&pic_on.path).unwrap() == small(), "the thumbnail, decrypted");
+        let off = fetch_images(&f.client, &items, &dir.path().join("cache"), &got, false).await;
+        assert!(!off.values().next().unwrap().thumb && std::fs::read(&off.values().next().unwrap().path).unwrap() == big());
+    }
+
+    #[tokio::test]
+    async fn a_gallery_sends_each_picture_with_its_own_thumbnail_and_a_missing_one_is_never_the_reason_not_to_send() {
+        use matrix_sdk::ruma::events::room::{message::GalleryItemType, MediaSource};
+        let f = fixture().await;
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b, c) = (dir.path().join("a.jpg"), dir.path().join("b.jpg"), dir.path().join("c.jpg"));
+        std::fs::write(&a, big()).unwrap();
+        std::fs::write(&b, vec![3u8; 100]).unwrap(); /* a small picture: a thumbnail of 5 KB would be bigger than it */
+        std::fs::write(&c, big()).unwrap();
+        let thumb = dir.path().join("thumb.jpg");
+        std::fs::write(&thumb, small()).unwrap();
+        let thumb_file = |path: std::path::PathBuf| Some(ThumbFile { path, width: 800, height: 600, mime: "image/jpeg".into() });
+        let infos = vec![
+            Some(PictureInfo { width: 4000, height: 3000, thumb: thumb_file(thumb.clone()) }),
+            Some(PictureInfo { width: 20, height: 10, thumb: thumb_file(thumb.clone()) }),
+            Some(PictureInfo { width: 4000, height: 3000, thumb: thumb_file(dir.path().join("gone.jpg")) }), /* the file is not there */
+        ];
+        send_gallery_with(&f.timeline, &[a, b, c], None, &infos).await.unwrap_or_else(|e| panic!("{e}; {:#?}", f.hs.log().iter().filter(|l| l.contains("UNHANDLED")).collect::<Vec<_>>()));
+        let msgs = wait_for(&f, |m| m.len() == 1 && m[0].kind == "gallery" && !m[0].pending).await;
+        assert_eq!(f.hs.uploaded().len(), 4, "three pictures and one thumbnail");
+        assert_eq!(msgs[0].gallery.iter().map(|g| (g.image_w, g.image_h, g.size)).collect::<Vec<_>>(), vec![(4000, 3000, 300_000), (20, 10, 100), (4000, 3000, 300_000)]);
+        let items = items_of(&f).await;
+        let ev = items.iter().find_map(|i| i.as_event()).unwrap();
+        let MessageType::Gallery(g) = ev.content().as_message().unwrap().msgtype() else { panic!("not a gallery") };
+        let thumbs: Vec<bool> = g.itemtypes.iter().map(|it| match it { GalleryItemType::Image(i) => matches!(i.info.as_ref().and_then(|x| x.thumbnail_source.as_ref()), Some(MediaSource::Encrypted(_))), _ => false }).collect();
+        assert_eq!(thumbs, vec![true, false, false]);
+        let got = fetch_images(&f.client, &items, &dir.path().join("cache"), &HashMap::new(), true).await;
+        let id = &msgs[0].id;
+        assert!(got[&format!("{id}#0")].thumb && std::fs::read(&got[&format!("{id}#0")].path).unwrap() == small());
+        assert!(!got[&format!("{id}#1")].thumb && !got[&format!("{id}#2")].thumb, "the others come whole");
     }
 
     #[tokio::test]

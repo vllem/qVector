@@ -19,6 +19,21 @@ void giveBackFreedMemory();
    once. An unreadable file gives a null image. */
 QImage loadFitted(const QString &path, const QSize &box, Qt::AspectRatioMode mode = Qt::KeepAspectRatio);
 
+/* What the engine is told about a picture that is sent (`pictures` of `send_files`, core-rs/src/app.rs): its size in pixels as it is shown (the EXIF orientation applied)
+   and, when it is big, a thumbnail that is made here because the engine has no image decoders. Receivers show the thumbnail instead of downloading the whole file, and
+   for a picture in an encrypted room it is the only small version there is (the server cannot scale what it cannot read). */
+struct PictureInfo {
+    int width = 0, height = 0;                     /* 0: not a picture the engine sends as one */
+    QString thumbPath, thumbMime;                  /* empty: no thumbnail */
+    int thumbWidth = 0, thumbHeight = 0;
+};
+
+/* The size of the picture in `path` and, for a JPEG, PNG or WebP of more than 256 KB that does not fit in 800x600, a thumbnail of it: at most 800x600 (what Element makes and the
+   biggest thumbnail a Synapse has by default), JPEG at quality 82, PNG when the picture uses transparency, written to `thumbDir`/`thumbName`.jpg or .png. JPEG and WebP are
+   decoded at the thumbnail's size, never in full. No thumbnail for a small file, for a GIF (it would be a still picture) and for what cannot be read; only the file types the
+   engine sends as pictures (png, jpg, jpeg, gif, webp) get an answer at all. Safe to call from a thread. */
+PictureInfo pictureInfo(const QString &path, const QString &thumbDir, const QString &thumbName);
+
 }
 
 #endif

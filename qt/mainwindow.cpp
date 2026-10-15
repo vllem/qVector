@@ -677,7 +677,7 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     loadDrafts();
 }
 
-MainWindow::~MainWindow() { saveDrafts(); }
+MainWindow::~MainWindow() { saveDrafts(); thumbPool_.waitForDone(); delete pasteDir_; }
 
 QJsonObject MainWindow::roomRow(const QString &id) const
 {
@@ -1216,7 +1216,7 @@ void MainWindow::send()
     if (current_.isEmpty()) return;
     if (!pending_.isEmpty()) {
         /* several files go out as one gallery message; the typed text is its caption */
-        core_->call("send_files", {{"paths", QJsonArray::fromStringList(pending_)}, {"caption", text}});
+        core_->call("send_files", {{"paths", QJsonArray::fromStringList(pending_)}, {"caption", text}, {"pictures", pictureInfos(pending_)}});
         startSending(pending_.size() == 1 ? QFileInfo(pending_[0]).fileName() : QString::number(pending_.size()) + " files");
         composer_->clear(); drafts_.remove(current_);
         cancelAttachment();
@@ -1246,7 +1246,7 @@ void MainWindow::stageFiles(const QStringList &paths)
 {
     if (current_.isEmpty() || paths.isEmpty()) return;
     cancelContext();
-    for (const QString &p : paths) if (!pending_.contains(p)) pending_ << p; /* pasting or choosing more adds to the same message */
+    for (const QString &p : paths) if (!pending_.contains(p)) { pending_ << p; prepareThumbnail(p); } /* pasting or choosing more adds to the same message */
     QString what;
     if (pending_.size() == 1) {
         const QFileInfo fi(pending_[0]);
@@ -1276,6 +1276,49 @@ void MainWindow::cancelAttachment()
 {
     pending_.clear();
     attachBar_->hide();
+    QMutexLocker l(&pictureMutex_);
+    pictureInfo_.clear(); /* the thumbnail files stay until the program ends: the engine reads them when it sends. A job that is still running puts its answer back: one small object */
+}
+
+/* what the engine is told about a file: its stamp (size and time) says whether it is still the file that was looked at */
+static QString fileStamp(const QString &path)
+{
+    const QFileInfo fi(path);
+    return QString::number(fi.size()) + "/" + QString::number(fi.lastModified().toMSecsSinceEpoch());
+}
+
+static QJsonObject pictureJson(const PictureInfo &i, const QString &path)
+{
+    QJsonObject o{{"stamp", fileStamp(path)}};
+    if (i.width > 0) { o["width"] = i.width; o["height"] = i.height; }
+    if (!i.thumbPath.isEmpty()) o["thumb"] = QJsonObject{{"path", i.thumbPath}, {"width", i.thumbWidth}, {"height", i.thumbHeight}, {"mime", i.thumbMime}};
+    return o;
+}
+
+void MainWindow::prepareThumbnail(const QString &path)
+{
+    if (!pasteDir_) pasteDir_ = new QTemporaryDir;
+    if (!pasteDir_->isValid()) return;
+    const QString dir = pasteDir_->path(), name = QString("thumb-%1").arg(++thumbSeq_);
+    thumbPool_.setMaxThreadCount(1); /* one picture at a time: a big PNG is decoded in full */
+    thumbPool_.start([this, path, dir, name] {
+        const QJsonObject o = pictureJson(pictureInfo(path, dir, name), path);
+        QMutexLocker l(&pictureMutex_);
+        pictureInfo_.insert(path, o);
+    });
+}
+
+QJsonArray MainWindow::pictureInfos(const QStringList &paths)
+{
+    thumbPool_.waitForDone(); /* usually long done: the files were staged when they were chosen */
+    QJsonArray out;
+    for (const QString &p : paths) {
+        QJsonObject o;
+        { QMutexLocker l(&pictureMutex_); o = pictureInfo_.value(p); }
+        if (o.value("stamp").toString() != fileStamp(p) && pasteDir_ && pasteDir_->isValid()) o = pictureJson(pictureInfo(p, pasteDir_->path(), QString("thumb-%1").arg(++thumbSeq_)), p); /* changed since it was staged */
+        out.append(o);
+    }
+    return out;
 }
 
 void MainWindow::dragEnterEvent(QDragEnterEvent *e)
