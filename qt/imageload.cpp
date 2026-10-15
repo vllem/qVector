@@ -55,7 +55,7 @@ static bool usesAlpha(const QImage &img)
 PictureInfo pictureInfo(const QString &path, const QString &thumbDir, const QString &thumbName)
 {
     static const qint64 kSmall = 256 * 1024; /* as in the engine (ui.rs SMALL_PICTURE): a picture this small is fetched whole, a thumbnail would hardly be smaller */
-    static const QSize kBox(800, 600);
+    static const QSize kBox(960, 640); /* what the timeline draws a picture at on a screen with twice the pixels (480x320 points): a smaller thumbnail is enlarged there and looks soft */
     PictureInfo out;
     const QFileInfo fi(path);
     const QString ext = fi.suffix().toLower();

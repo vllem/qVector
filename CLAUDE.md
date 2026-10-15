@@ -111,7 +111,7 @@ heap that reuses freed memory, so they read lower (a regression of 10 MB in the 
   the newest first. GIFs are still frames in the timeline anyway.
 * Pictures that qVector sends carry their size and, when they are big, a thumbnail (so in an encrypted room others do not download them whole, and our own timeline shows the thumbnail too).
   The engine has no image decoder; Qt makes the thumbnail when the file is staged (`vc::pictureInfo` in `qt/imageload.cpp`, one thread, `MainWindow::prepareThumbnail`): JPEG, PNG and WebP of
-  over 256 KB that do not fit 800x600 get a thumbnail of at most 800x600 (JPEG quality 82; PNG when the picture really uses transparency; JPEG and WebP decode at that size, so a photo is
+  over 256 KB that do not fit 960x640 get a thumbnail of at most 960x640 (what the timeline draws at twice the pixels; Element's are 800x600; JPEG quality 82; PNG when the picture really uses transparency; JPEG and WebP decode at that size, so a photo is
   never decoded in full), the EXIF orientation is applied to both sizes, GIFs get no thumbnail (a still picture would replace the animation), other types are sent as files with no info. The
   files wait in `pasteDir_` until the program ends; `send_files {paths, caption, pictures: [{width, height, thumb: {path, width, height, mime}}]}` carries them to `ui::send_gallery_with` /
   `send_file_with`, which attach them (`PictureInfo`, `ThumbFile`; a thumbnail that cannot be read or is no smaller than the picture is left out: it must never stop a picture from going out).

@@ -28,8 +28,8 @@ struct PictureInfo {
     int thumbWidth = 0, thumbHeight = 0;
 };
 
-/* The size of the picture in `path` and, for a JPEG, PNG or WebP of more than 256 KB that does not fit in 800x600, a thumbnail of it: at most 800x600 (what Element makes and the
-   biggest thumbnail a Synapse has by default), JPEG at quality 82, PNG when the picture uses transparency, written to `thumbDir`/`thumbName`.jpg or .png. JPEG and WebP are
+/* The size of the picture in `path` and, for a JPEG, PNG or WebP of more than 256 KB that does not fit in 960x640, a thumbnail of it: at most 960x640 (what the timeline draws a picture
+   at on a screen with twice the pixels; Element makes 800x600 ones, which look soft there), JPEG at quality 82, PNG when the picture uses transparency, written to `thumbDir`/`thumbName`.jpg or .png. JPEG and WebP are
    decoded at the thumbnail's size, never in full. No thumbnail for a small file, for a GIF (it would be a still picture) and for what cannot be read; only the file types the
    engine sends as pictures (png, jpg, jpeg, gif, webp) get an answer at all. Safe to call from a thread. */
 PictureInfo pictureInfo(const QString &path, const QString &thumbDir, const QString &thumbName);

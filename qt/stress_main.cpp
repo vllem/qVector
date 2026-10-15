@@ -474,10 +474,10 @@ int main(int argc, char **argv)
         const PictureInfo b = pictureInfo(big, dir.path(), "t-big");
         const QImage bt(b.thumbPath);
         std::printf("    4000x3000 JPEG of %lld KB: %dx%d, thumbnail %dx%d %s of %lld KB\n", (long long)QFileInfo(big).size() / 1024, b.width, b.height, b.thumbWidth, b.thumbHeight, qPrintable(b.thumbMime), (long long)QFileInfo(b.thumbPath).size() / 1024);
-        check("a big JPEG gets its size and a JPEG thumbnail that fits 800x600", b.width == 4000 && b.height == 3000 && b.thumbMime == "image/jpeg" && b.thumbWidth == 800 && b.thumbHeight == 600 && bt.size() == QSize(800, 600) && QFileInfo(b.thumbPath).size() < QFileInfo(big).size() / 5);
+        check("a big JPEG gets its size and a JPEG thumbnail that fits 960x640", b.width == 4000 && b.height == 3000 && b.thumbMime == "image/jpeg" && b.thumbWidth == 853 && b.thumbHeight == 640 && bt.size() == QSize(853, 640) && QFileInfo(b.thumbPath).size() < QFileInfo(big).size() / 5);
         const QString shot = save("shot.png", photo(2560, 1440, 2), "PNG"); /* opaque: JPEG */
         const PictureInfo sh = pictureInfo(shot, dir.path(), "t-shot");
-        check("an opaque PNG gets a JPEG thumbnail of the right proportions", sh.width == 2560 && sh.height == 1440 && sh.thumbMime == "image/jpeg" && sh.thumbWidth == 800 && sh.thumbHeight == 450);
+        check("an opaque PNG gets a JPEG thumbnail of the right proportions", sh.width == 2560 && sh.height == 1440 && sh.thumbMime == "image/jpeg" && sh.thumbWidth == 960 && sh.thumbHeight == 540);
         QImage argb = photo(1600, 1200, 3).convertToFormat(QImage::Format_ARGB32); /* an alpha channel that is not used (the clipboard gives these): still JPEG */
         const PictureInfo ar = pictureInfo(save("clip.png", argb, "PNG"), dir.path(), "t-clip");
         check("an unused alpha channel does not make the thumbnail a PNG", ar.thumbMime == "image/jpeg");
@@ -488,7 +488,7 @@ int main(int argc, char **argv)
         const PictureInfo sm = pictureInfo(save("small.jpg", photo(300, 200, 4), "JPEG", 85), dir.path(), "t-small");
         check("a small picture has its size and no thumbnail", sm.width == 300 && sm.height == 200 && sm.thumbPath.isEmpty());
         const PictureInfo lowres = pictureInfo(save("noisy.png", photo(700, 500, 5), "PNG"), dir.path(), "t-noisy"); /* big in bytes, small in pixels: nothing to scale to */
-        check("a picture that fits 800x600 has no thumbnail whatever its bytes", lowres.width == 700 && lowres.thumbPath.isEmpty());
+        check("a picture that fits 960x640 has no thumbnail whatever its bytes", lowres.width == 700 && lowres.thumbPath.isEmpty());
         /* the EXIF orientation: a picture that is stored sideways is as big as it is shown, and so is its thumbnail (Qt cannot write the orientation: the tag is put into the file by hand) */
         { QFile f(big); f.open(QIODevice::ReadOnly); QByteArray jpeg = f.readAll();
           static const char exif[] = "\xff\xe1\x00\x22" "Exif\0\0" "MM\0\x2a\0\0\0\x08" "\0\x01" "\x01\x12\0\x03\0\0\0\x01\0\x06\0\0" "\0\0\0\0"; /* orientation 6: turned a quarter */
@@ -497,7 +497,7 @@ int main(int argc, char **argv)
           const PictureInfo t = pictureInfo(dir.filePath("turned.jpg"), dir.path(), "t-turned");
           const QImage tt(t.thumbPath);
           std::printf("    stored 4000x3000, turned a quarter: %dx%d, thumbnail %dx%d\n", t.width, t.height, t.thumbWidth, t.thumbHeight);
-          check("a picture stored sideways is measured as it is shown", t.width == 3000 && t.height == 4000 && t.thumbHeight == 600 && t.thumbWidth == 450 && tt.size() == QSize(450, 600)); }
+          check("a picture stored sideways is measured as it is shown", t.width == 3000 && t.height == 4000 && t.thumbHeight == 640 && t.thumbWidth == 480 && tt.size() == QSize(480, 640)); }
         /* what the engine does not send as a picture, and what cannot be read */
         QFile bad(dir.filePath("garbage.jpg")); bad.open(QIODevice::WriteOnly); bad.write(QByteArray(400000, 'x')); bad.close();
         check("a file that is no picture gets nothing", pictureInfo(dir.filePath("garbage.jpg"), dir.path(), "t-bad").width == 0 && pictureInfo(dir.filePath("nothing.jpg"), dir.path(), "t-none").width == 0);
