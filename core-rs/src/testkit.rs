@@ -286,7 +286,9 @@ impl FakeHs {
             st.counter += 1;
             let id = format!("$ev{}", st.counter);
             let (sender, _) = split_who(who);
-            st.events.push(json!({"type": ty, "sender": format!("@{sender}:hs"), "event_id": id, "origin_server_ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(1000) + st.counter, "content": body(req)}));
+            let txn = req.url.path().rsplit('/').next().unwrap_or("").to_string();
+            /* `_dev` and `_txn` are the sending device and its transaction id: the sync tells that device (and only it) the id, as a real homeserver does */
+            st.events.push(json!({"type": ty, "sender": format!("@{sender}:hs"), "event_id": id, "origin_server_ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(1000) + st.counter, "content": body(req), "_dev": who, "_txn": txn}));
             json!({"event_id": id})
         }).await;
         Mock::given(method("POST")).and(path_regex(r"^/_matrix/media/v3/upload$")).respond_with(Upload(st.clone())).mount(&*server).await;
@@ -371,7 +373,16 @@ impl FakeHs {
             let first = !u.state_sent;
             u.state_sent = true;
             let counts = otk_counts(u);
-            let events = st.events[from..].to_vec();
+            /* what a real homeserver does: the device that sent an event is told its transaction id, which is how a timeline matches the event with the local echo of it
+               (without it a sync that comes before the answer to the send can put two messages that were sent in a row in the other order) */
+            let events: Vec<Value> = st.events[from..].iter().map(|e| {
+                let mut e = e.clone();
+                if let Some(o) = e.as_object_mut() {
+                    let (dev, txn) = (o.remove("_dev"), o.remove("_txn"));
+                    if let (Some(d), Some(t)) = (dev, txn) { if d.as_str() == Some(who) { o.insert("unsigned".into(), json!({"transaction_id": t})); } }
+                }
+                e
+            }).collect();
             let me_local = user_of(who);
             let heroes: Vec<String> = member_names.iter().filter(|m| **m != me_local).take(5).cloned().collect();
             let mut new_members: Vec<Value> = vec![];
