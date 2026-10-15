@@ -16,7 +16,7 @@ opt-level = 3
 
 # A smaller program keeps fewer code pages in memory (profiles only count in the workspace root).
 [profile.release]
-opt-level = "s"
+opt-level = "3"
 lto = "fat"
 strip = true
 panic = "abort"
