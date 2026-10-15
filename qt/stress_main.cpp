@@ -536,6 +536,9 @@ int main(int argc, char **argv)
         text("family (joined)", u("\xF0\x9F\x91\xA8\xE2\x80\x8D\xF0\x9F\x91\xA9\xE2\x80\x8D\xF0\x9F\x91\xA7 family")); text("rainbow flag", u("\xF0\x9F\x8F\xB3\xEF\xB8\x8F\xE2\x80\x8D\xF0\x9F\x8C\x88 pride"));
         text("red heart (a character and a variation selector)", u("\xE2\x9D\xA4\xEF\xB8\x8F love")); text("e and a combining accent", u("e\xCC\x81 cafe")); text("keycap", u("1\xEF\xB8\x8F\xE2\x83\xA3 one"));
         cases.append({"formatted text", message(5, "x", u("\xF0\x9F\x98\x80 <b>bold</b>")), false});
+        /* Matrix lets a sender put name="..." on a link; that anchor would be given to the first unit of the text after it just the same */
+        cases.append({"sender's own <a name> in front of flags", message(5, "x", "<a name=\"x\"></a>" + run(60, il)), true});
+        cases.append({"sender's own <a name> on a link that starts with an emoji", message(5, "x", "<a name=\"x\" href=\"https://example.org/\">" + u("\xF0\x9F\x98\x80") + " link</a>"), false});
         { QJsonObject r = message(5, "x"); r["kind"] = "poll"; r["poll"] = QJsonObject{{"question", u("\xF0\x9F\x8D\x95 pizza?")}, {"answers", QJsonArray{QJsonObject{{"id", "a"}, {"text", u("\xF0\x9F\x87\xAE\xF0\x9F\x87\xB1 yes")}, {"votes", 0}, {"mine", false}}}}, {"max_selections", 1}, {"total_votes", 0}, {"ended", false}};
           cases.append({"poll question", r, false}); }
         int cutCases = 0, wideCases = 0, splitFlags = 0;
@@ -554,6 +557,18 @@ int main(int argc, char **argv)
                 if (red > 40) { std::printf("    FLAGS SPLIT (%d red pixels): %s\n", red, qPrintable(c.name)); splitFlags++; }
             }
         }
+        { /* the time of a bookmarked message starts with a star and a variation selector, a pinned one with a word, a message with a header has its anchor in front of the time */
+            for (int how = 0; how < 2; how++) {
+                g.reset();
+                if (how == 0) g.setBookmarks({"$e0"}); else g.setPinned({"$e0"});
+                g.setRows(QJsonArray{message(0, "hi")});
+                QElapsedTimer pause; pause.start(); while (pause.elapsed() < 170) QApplication::processEvents(QEventLoop::AllEvents, 10);
+                excludedMs += pause.elapsed();
+                const bool shownMarked = view->toPlainText().contains(how == 0 ? QString::fromUtf8("\xE2\x98\x85") : QString("pinned"));
+                if (cuts(view->document()) || !shownMarked) { std::printf("    %s: %s (cut in %d places)\n", how == 0 ? "bookmarked message" : "pinned message", shownMarked ? "CUT" : "NOT SHOWN", cuts(view->document())); cutCases++; }
+            }
+            g.setBookmarks({}); g.setPinned({});
+        }
         { /* a message that starts a conversation shows its sender's name: that does not get cut either */
             for (const QString &name : {u("\xF0\x9F\x87\xAE\xF0\x9F\x87\xB1 Dan"), u("\xF0\x9F\x98\x80 Zed")}) {
                 QJsonObject r = message(0, "hi"); r["sender"] = name;
@@ -563,7 +578,7 @@ int main(int argc, char **argv)
                 if (cuts(view->document())) { std::printf("    CUT: the name %s\n", qPrintable(name)); cutCases++; }
             }
         }
-        std::printf("    %lld kinds of grouped message and 2 names: %d cut, %d wider than the window, %d with a split flag\n", (long long)cases.size(), cutCases, wideCases, splitFlags);
+        std::printf("    %lld kinds of grouped message, 2 names, 2 marked times: %d cut, %d wider than the window, %d with a split flag\n", (long long)cases.size(), cutCases, wideCases, splitFlags);
         if (cutCases || wideCases || splitFlags) failures++;
         { /* the anchor of a grouped message still finds it: revealing one in the middle of a long run from one sender puts it at the top of the view */
             QJsonArray many;

@@ -170,10 +170,12 @@ the alice/bob direct chat (`m.direct`).
   (`appendNodeText` in qtextdocumentfragment.cpp: `for (QChar ch : text)` ... `cursor.insertText(ch, format)`; an `<img>` or an empty `<a>` does not use it up, only a character does). An
   anchor in front of an emoji therefore cut its surrogate pair into two fragments, each shaped on its own: two replacement characters ("��"), and in a run of flags every flag after it paired one off (Israel's I, L
   became Liechtenstein's L, I, with a lone L at the end); with the glyph clusters one off from the grapheme boundaries the line had no place left to break, so the view grew a horizontal
-  scrollbar ("the emoji do not wrap"). It only happened to a message drawn without a header (one under another from the same sender: the anchor stood in front of its text), and to a
-  name that began with an emoji. The anchors (`ev<hash>`, found by `scrollToAnchor`) now stand in front of text we write ourselves: the time of a message with a header, a `&nbsp;` in the
-  empty left cell of one without. The stress step "a message grouped under the previous one is not cut in two by its anchor" checks that no text fragment starts inside a grapheme cluster;
-  the other timeline steps build `message(i, ...)` with `who[i % 5]` as the sender, so none of them ever drew a message without a header.
+  scrollbar ("the emoji do not wrap"). It happened to a message drawn without a header (one under another from the same sender: the anchor stood in front of its text), to a name that
+  began with an emoji, and would to a bookmarked message's time (it starts with a star and U+FE0E, which an anchor splits). Every message anchor (`ev<hash>`, found by `scrollToAnchor`) is now
+  `<a name="ev...">&nbsp;</a>`, so it uses itself up, and stands where the blank is not seen: at the left end of the right-aligned time of a message with a header, in the empty left cell of
+  one without. A sender's own `name=` on an `<a>` in a formatted body (the spec allows it) is removed for the same reason. The stress step "a message grouped under the previous one is not
+  cut in two by its anchor" checks that no text fragment starts inside a grapheme cluster; the other timeline steps build `message(i, ...)` with `who[i % 5]` as the sender, so none of them
+  ever drew a message without a header.
 * The default font family is the alias "Sans Serif"; `main.cpp` resolves the real family before adding the colour emoji font (`ensureEmojiFont`). Symbols that exist as
   emoji (◀ ▶ ☺) are written with U+FE0E. The user dislikes coloured-emoji look-alikes for plain symbols and layout glitches: look at a screenshot before reporting done.
 * `QLayout::takeAt()` on a nested layout returns the layout itself: delete it once, not "the item" too. Popups must be clamped to the screen (`EmojiPicker::popupAt`).
