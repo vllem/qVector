@@ -2008,7 +2008,7 @@ mod tests {
     async fn reading_sends_a_receipt_for_the_newest_event_and_typing_is_announced() {
         let f = fixture().await;
         send_text(&f.timeline, "hello", None).await.unwrap();
-        let id = wait_for(&f, |m| m.len() == 1 && !m[0].pending).await[0].id.clone();
+        let id = wait_until(&f, |items, m| m.len() == 1 && echoed(items)).await[0].id.clone(); /* a receipt is for the server's copy of the message */
         let mut sent = false;
         for _ in 0..20 { if mark_read(&f.timeline).await.unwrap_or(false) { sent = true; break; } tokio::time::sleep(std::time::Duration::from_millis(100)).await; }
         let log = f.hs.log();

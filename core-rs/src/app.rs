@@ -46,6 +46,8 @@ struct Inner {
     signout: Arc<tokio::sync::Mutex<()>>,
     /// Poked when the local work of `housekeeping` should run now (a sync came back, a recovery or verification moved on).
     wake: tokio::sync::Notify,
+    /// A room of at most this many people lists all of them when it is opened (`ui::MEMBERS_AT_OPEN`; the tests make a "big" room with fewer people).
+    members_at_open: std::sync::atomic::AtomicU64,
     /// Our own identity has to be asked for again (after a verification or a recovery).
     identity_due: AtomicBool,
     data_dir: Mutex<PathBuf>,
@@ -134,7 +136,7 @@ impl Inner {
     /// Room details with the members' pictures: those already downloaded are in, the rest are fetched and the details are sent again. `everybody`: the whole member
     /// list, however big the room (otherwise a big room whose list has not been loaded gives the people the sync has brought, see `ui::MEMBERS_AT_OPEN`).
     async fn send_details(&self, client: &Client, room_id: &str, everybody: bool) {
-        let Ok(mut d) = ui::room_details_for(client, room_id, everybody, ui::MEMBERS_AT_OPEN).await else { return };
+        let Ok(mut d) = ui::room_details_for(client, room_id, everybody, self.members_at_open.load(Ordering::Relaxed)).await else { return };
         let fill = |d: &mut ui::UiRoomDetails| { for m in d.members.iter_mut().chain(d.banned.iter_mut()) { m.avatar_path = self.avatars.path(&m.avatar_mxc); } };
         fill(&mut d);
         self.emit_json("details", &d);
@@ -162,7 +164,7 @@ impl App {
         }); } /* listens on 127.0.0.1:6669 for `tokio-console` */
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("tokio runtime");
         let inner = Arc::new(Inner {
-            sink, signout: Default::default(), wake: Default::default(), identity_due: AtomicBool::new(true), data_dir: Mutex::new(data_dir), client: Mutex::new(None), secret: Mutex::new(None), verifier: Mutex::new(None), calls: Mutex::new(None), video_sink: Mutex::new(None), groups: Mutex::new(None), tasks: Mutex::new(Tasks::default()),
+            sink, signout: Default::default(), wake: Default::default(), members_at_open: ui::MEMBERS_AT_OPEN.into(), identity_due: AtomicBool::new(true), data_dir: Mutex::new(data_dir), client: Mutex::new(None), secret: Mutex::new(None), verifier: Mutex::new(None), calls: Mutex::new(None), video_sink: Mutex::new(None), groups: Mutex::new(None), tasks: Mutex::new(Tasks::default()),
             timeline: Default::default(), thread: Default::default(), images: Default::default(), thumbs: tokio::sync::watch::channel(true).0, opening: Default::default(), previews: Default::default(), live_rooms: Default::default(), index: Default::default(), avatars: Default::default(),
             bookmarks: Default::default(), focused: AtomicBool::new(true), previews_on: AtomicBool::new(false), busy: AtomicBool::new(false),
             screen: Mutex::new("login".into()),
@@ -516,7 +518,7 @@ impl App {
             let Ok(timeline) = ui::open_timeline(&room).await else { return };
             let timeline = Arc::new(timeline);
             *i.timeline.lock().await = Some(timeline.clone());
-            if room.are_members_synced() || room.joined_members_count() <= ui::MEMBERS_AT_OPEN { /* a small room: everybody's names and pictures (the sync brought only the people who wrote lately) */
+            if room.are_members_synced() || room.joined_members_count() <= i.members_at_open.load(Ordering::Relaxed) { /* a small room: everybody's names and pictures (the sync brought only the people who wrote lately) */
                 let tl = timeline.clone();
                 tokio::spawn(async move { tl.fetch_members().await; });
             }
@@ -1102,21 +1104,22 @@ mod tests {
         let (app, mut probe, _dir) = app();
         let fake = app.call("start_fake_server", &Value::Null);
         let hs = app.inner.fake.lock().unwrap().clone().unwrap();
-        for n in 0..1100 { hs.add_member(&format!("user{n}")); } /* a big room: above `ui::MEMBERS_AT_OPEN` */
+        app.inner.members_at_open.store(20, Ordering::Relaxed); /* a big room is one of more than 1000 people: storing that many takes the SDK a minute on a loaded machine */
+        for n in 0..23 { hs.add_member(&format!("user{n}")); }
         app.call("login", &json!({"homeserver": fake["homeserver"], "user": "alice", "password": "x"}));
         probe.wait("state", |v| v["screen"] == "main");
         probe.wait("rooms", |v| v.as_array().map(|a| a.iter().any(|r| r["id"] == crate::testkit::ROOM)).unwrap_or(false));
         app.call("select_room", &json!({"room_id": crate::testkit::ROOM}));
         let d = probe.wait("details", |v| v["id"] == crate::testkit::ROOM);
         assert_eq!(d["members_complete"], false, "{}", d["members"].as_array().map_or(0, |a| a.len()));
-        assert_eq!(d["member_count"], 1102, "the count is the room's, not the list's");
+        assert_eq!(d["member_count"], 25, "the count is the room's, not the list's");
         assert!(d["members"].as_array().unwrap().len() < 20, "only the people the sync brought: {}", d["members"].as_array().unwrap().len());
         probe.wait("timeline", |v| v["rows"].as_array().map(|a| !a.is_empty()).unwrap_or(false)); /* the open timeline has decided not to fetch the members itself */
         assert_eq!(member_list_requests(&hs), 0, "opening the room did not ask for the member list");
         app.call("load_members", &json!({"room_id": crate::testkit::ROOM}));
         let d = probe.wait("details", |v| v["members_complete"] == true);
-        assert_eq!(d["members"].as_array().unwrap().len(), 1102);
-        assert_eq!(d["member_count"], 1102);
+        assert_eq!(d["members"].as_array().unwrap().len(), 25);
+        assert_eq!(d["member_count"], 25);
         assert_eq!(member_list_requests(&hs), 1);
     }
 
