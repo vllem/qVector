@@ -742,9 +742,9 @@ impl App {
         let (i, id) = (self.inner.clone(), event_id.to_string());
         self.rt().spawn(async move {
             let Some(tl) = i.open_timeline_of().await else { return };
-            let items: Vec<_> = tl.items().await.iter().cloned().collect();
+            let Some(item) = tl.items().await.iter().find(|x| x.as_event().and_then(|e| e.event_id()).map_or(false, |e| e.as_str() == id)).cloned() else { return };
             let room = tl.room().room_id().to_string();
-            let Some(m) = ui::ui_messages(&items, "").into_iter().find(|m| m.id == id) else { return };
+            let Some(m) = ui::ui_messages(&[item], "").into_iter().next() else { return }; /* only this message's row, not the whole room's */
             let list = {
                 let mut g = i.bookmarks.lock().unwrap();
                 let Some(bk) = g.as_mut() else { return };
@@ -1068,6 +1068,24 @@ mod tests {
         assert!(app.rt().block_on(app.inner.open_timeline_of()).is_some());
         app.call("select_room", &json!({"room_id": "!nowhere:hs"}));
         assert!(app.rt().block_on(app.inner.open_timeline_of()).is_none(), "the previous room is still the target");
+    }
+
+    #[test]
+    fn a_message_of_the_open_room_is_bookmarked_with_its_sender_and_text_and_unbookmarked_again() {
+        let (app, mut probe, _dir) = app();
+        let fake = app.call("start_fake_server", &Value::Null);
+        app.call("login", &json!({"homeserver": fake["homeserver"], "user": "alice", "password": "x"}));
+        probe.wait("state", |v| v["screen"] == "main");
+        probe.wait("rooms", |v| v.as_array().map(|a| a.iter().any(|r| r["id"] == crate::testkit::ROOM)).unwrap_or(false));
+        app.call("select_room", &json!({"room_id": crate::testkit::ROOM}));
+        let t = probe.wait("timeline", |v| v["rows"].as_array().map(|a| a.iter().any(|m| m["body"].as_str().unwrap_or("").starts_with("Hello alice"))).unwrap_or(false));
+        let m = t["rows"].as_array().unwrap().iter().find(|m| m["body"].as_str().unwrap_or("").starts_with("Hello alice")).unwrap().clone();
+        app.call("toggle_bookmark", &json!({"event_id": m["id"]}));
+        let b = probe.wait("bookmarks", |v| v.as_array().map_or(false, |a| a.len() == 1));
+        assert_eq!((&b[0]["event_id"], &b[0]["room_id"], &b[0]["sender"], &b[0]["body"]), (&m["id"], &json!(crate::testkit::ROOM), &m["sender"], &m["body"]), "{b}");
+        let mark = probe.mark();
+        app.call("toggle_bookmark", &json!({"event_id": m["id"]}));
+        probe.wait_since(mark, "bookmarks", |v| v.as_array().map_or(false, |a| a.is_empty()));
     }
 
     #[test]
