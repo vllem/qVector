@@ -1034,16 +1034,13 @@ pub fn with_mentions(text: &str, html: Option<&str>, mentions: &[(String, String
 pub async fn send_text_full(timeline: &Timeline, text: &str, reply_to: Option<&str>, emoji: &HashMap<String, String>, mentions: &[(String, String)]) -> Result<(), String> {
     let (msgtype, m) = text_content(text, emoji, mentions);
     /* always present, empty when nobody is mentioned: servers and clients that still have the old body-matching push rules would otherwise notify on a name in the text */
-    let mut content = RoomMessageEventContentWithoutRelation::new(msgtype.clone()).add_mentions(m.clone());
+    let content = RoomMessageEventContentWithoutRelation::new(msgtype).add_mentions(m);
     match reply_to.filter(|r| !r.is_empty()) {
         Some(id) => {
             let id: OwnedEventId = id.try_into().map_err(|e| format!("bad event id: {e}"))?;
             timeline.send_reply(content, id).await.map_err(|e| e.to_string())?;
         }
-        None => {
-            let mut plain = RoomMessageEventContent::new(msgtype);
-            plain = plain.add_mentions(m);
-            timeline.send(plain.into()).await.map_err(|e| e.to_string())?; }
+        None => { timeline.send(content.with_relation(None).into()).await.map_err(|e| e.to_string())?; }
     }
     Ok(())
 }
