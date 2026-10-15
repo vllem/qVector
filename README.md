@@ -14,7 +14,7 @@ qt/        the Qt6 Widgets front end (C++17): it only draws what the engine send
 
 Sign in with a homeserver URL or bare domain (with an optional passphrase for the saved session), rooms, direct messages, invitations, spaces as sidebar
 sections, favourites / low priority, history paging, formatted messages (Markdown out, sanitized HTML in), replies, reactions with an emoji picker, edits,
-deletes, forwarding, edit history, threads (own panel), polls, pinned messages, saved messages, pictures / files / video / audio (sending with encrypted upload,
+deletes, forwarding, edit history, view source of a message, threads (own panel), polls, pinned messages, saved messages, pictures / files / video / audio (sending with encrypted upload,
 viewer, save, inline video; the timeline shows thumbnails of big pictures and fetches the whole picture when you open it: Preferences > Pictures; big pictures you send carry a thumbnail), link previews (through your homeserver, opt-in), read receipts and typing indicators (both ways), desktop notifications and a tray
 icon, search of the open room and (opt-in, with a local encrypted index) of all your messages, member list with moderation (kick, ban, unban, roles, invite; a big room loads its members when the list is opened),
 room settings, start a conversation (user directory search), create / browse / join rooms, avatars, light and dark theme, per-room notification levels (right-click a

@@ -144,6 +144,7 @@ TimelineView::TimelineView(bool thread, QWidget *parent) : QWidget(parent), thre
     view_ = new QTextBrowser;
     view_->setOpenLinks(false);
     view_->setFrameShape(QFrame::NoFrame);
+    view_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff); /* messages wrap; a scrollbar for the whole room because of one wide message is never what is wanted */
     view_->document()->setDocumentMargin(6);
     applyStyle();
     v->addWidget(view_, 1);
@@ -166,6 +167,25 @@ TimelineView::TimelineView(bool thread, QWidget *parent) : QWidget(parent), thre
 }
 
 static const int kMaxShownChars = 20000;
+/* Laying out an emoji costs about a millisecond (Qt asks the colour font for the bitmap of every glyph it places; a letter takes a few microseconds): 500 flags took 0.4 s on every
+   redraw of the room, the 5 000 that fit in kMaxShownChars 5 s, and a room with such a message was slow to open and to scroll. A text is laid out up to its kMaxShownEmoji-th emoji. */
+static const int kMaxShownEmoji = 400;
+
+/* Where the text has its kMaxShownEmoji + 1st emoji (the place to cut it), or -1. A flag is two code points (regional indicators): the cut never falls between them. */
+static int emojiCut(const QString &t)
+{
+    int count = 0, indicators = 0; /* the regional indicators just before this place */
+    for (int i = 0; i < t.size(); i++) {
+        uint cp = t[i].unicode();
+        int len = 1;
+        if (QChar::isHighSurrogate(cp) && i + 1 < t.size() && t[i + 1].isLowSurrogate()) { cp = QChar::surrogateToUcs4(QChar(cp), t[i + 1]); len = 2; }
+        const bool indicator = cp >= 0x1F1E6 && cp <= 0x1F1FF;
+        if (((cp >= 0x1F000 && cp <= 0x1FAFF) || (cp >= 0x2600 && cp <= 0x27BF)) && ++count > kMaxShownEmoji) return indicator && (indicators & 1) ? i - 2 : i;
+        indicators = indicator ? indicators + 1 : 0;
+        i += len - 1;
+    }
+    return -1;
+}
 static const int kMinDrawnBytes = 24 << 20, kMaxDrawnBytes = 512 << 20; /* the picture cache of a view (see drawn_): never below / above this */
 
 TimelineView::~TimelineView() { stopInline(); }
@@ -434,8 +454,9 @@ void TimelineView::render()
         const QJsonObject r = rows_[i].toObject();
         const QString kind = S(r, "kind"), eid = S(r, "id"), sender = S(r, "sender_id"), name = S(r, "sender");
         QString text = S(r, "body");
-        /* A multi-megabyte message makes the text layout run for minutes and freezes the window, so only the start is drawn. */
-        if (text.size() > kMaxShownChars) text = text.left(kMaxShownChars) + QString::fromUtf8("\u2026 (message cut, %1 characters in all)").arg(text.size());
+        /* A multi-megabyte message makes the text layout run for minutes and freezes the window, so only the start is drawn (and as many emoji as kMaxShownEmoji). */
+        const int emojiAt = emojiCut(text), shownChars = emojiAt >= 0 ? qMin(emojiAt, kMaxShownChars) : kMaxShownChars;
+        if (text.size() > shownChars) text = text.left(shownChars) + QString::fromUtf8("\u2026 (message cut, %1 characters in all)").arg(text.size());
         const qint64 ts = qint64(r.value("ts").toDouble());
         const bool pending = B(r, "pending");
         const bool grouped = sender == lastSender && ts - lastTs < 5 * 60 * 1000 && ts >= lastTs;
@@ -588,7 +609,7 @@ void TimelineView::render()
             else if (kind == "emote") t = "* " + name + " " + text;
             if (kind == "notice" || kind == "emote" || pending) style = "color:" + muted;
             QString shown = linkify(t);
-            const QString fb = S(r, "html").size() > 4 * kMaxShownChars ? QString() : S(r, "html");
+            const QString fb = S(r, "html").size() > 4 * kMaxShownChars || emojiCut(S(r, "html")) >= 0 ? QString() : S(r, "html"); /* too much of either: the plain text, cut, instead */
             if (kind == "text" && fb.isEmpty() && emojiOnly(text)) shown = "<span style=\"font-size:30pt\">" + esc(text) + "</span>";
             if (!fb.isEmpty() && kind != "undecryptable") { /* formatted text: sanitized HTML */
                 shown = fb;
@@ -616,6 +637,13 @@ void TimelineView::render()
                         shown.replace(m.capturedStart(), m.capturedLength(), alt);
                         at = m.capturedStart() + alt.size();
                     }
+                }
+                /* the pictures that are left (not ours, "emo:") are other people's: Qt would draw an empty box as wide as the sender said (width="100000" made the whole view
+                   100 000 pixels wide), and a picture that is not one of ours has no file here to show anyway: its description stands in for it */
+                static const QRegularExpression strayImage("<img\\b(?![^>]*\\bsrc=\"emo:)[^>]*>");
+                for (QRegularExpressionMatch m = strayImage.match(shown); m.hasMatch(); m = strayImage.match(shown)) {
+                    const QRegularExpressionMatch am = QRegularExpression("\\balt=\"([^\"]*)\"").match(m.captured(0));
+                    shown.replace(m.capturedStart(), m.capturedLength(), am.hasMatch() ? am.captured(1) : QString());
                 }
                 shown.replace("<del>", "<s>").replace("</del>", "</s>"); /* Qt knows <s> */
                 /* spoilers (data-mx-spoiler) stay hidden until clicked (spec: Spoiler messages); the span is closed by counting nested spans, so
@@ -953,6 +981,7 @@ void TimelineView::contextMenu(const QPoint &pos)
         if (kind == "image" || kind == "video" || kind == "file" || kind == "audio") menu.addAction("Save as...", this, [this, eid] { emit saveRequested(eid); });
         if (kind != "poll") menu.addAction("Forward...", this, [this, eid] { emit forwardRequested(eid); });
         if (B(r, "edited")) menu.addAction("Edit history...", this, [this, eid] { emit historyRequested(eid); });
+        menu.addAction("View source...", this, [this, eid] { emit sourceRequested(eid); });
         if (mine) {
             menu.addSeparator();
             menu.addAction("Delete", this, [this, eid] { emit deleteRequested(eid); });
@@ -968,7 +997,7 @@ void TimelineView::applyStyle()
     const QString mutedc = hex(pal.color(QPalette::PlaceholderText)), codebg = hex(pal.color(QPalette::AlternateBase).darker(isDark(pal) ? 115 : 104));
     view_->document()->setDefaultStyleSheet(
         "blockquote { margin-left: 10px; margin-top: 2px; margin-bottom: 2px; color: " + mutedc + "; }"
-        "pre { background-color: " + codebg + "; margin-top: 3px; margin-bottom: 3px; }"
+        "pre { background-color: " + codebg + "; margin-top: 3px; margin-bottom: 3px; white-space: pre-wrap; }" /* a long line wraps: a view has one horizontal scrollbar for all its messages */
         "code { background-color: " + codebg + "; }"
         "h1, h2, h3 { margin-top: 4px; margin-bottom: 2px; }"
         "ul, ol { margin-top: 2px; margin-bottom: 2px; }"

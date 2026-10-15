@@ -59,6 +59,7 @@ signals:
     void textRequested(const QString &eventId);       /* "Open file" under a text file: show its contents */
     void forwardRequested(const QString &eventId);
     void historyRequested(const QString &eventId);
+    void sourceRequested(const QString &eventId);     /* "View source...": the event as the server sent it */
     void threadRequested(const QString &rootEventId);
     void pinRequested(const QString &eventId, bool pin);
     void bookmarkRequested(const QString &eventId);

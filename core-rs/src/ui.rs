@@ -905,6 +905,21 @@ pub async fn read_text_file(client: &Client, timeline: &Timeline, event_id: &str
     Ok(UiTextFile { event_id: event_id.to_string(), name: m.file_name, size: n, text, truncated })
 }
 
+/// The event of a message as the server sent it (decrypted), pretty-printed: what "View source" shows. An edited message shows the edit after it. For a gallery item
+/// (`event#n`) it is the message's.
+pub async fn event_source(timeline: &Timeline, event_id: &str) -> Result<String, String> {
+    let id = event_id.split('#').next().unwrap_or(event_id);
+    let items = timeline.items().await;
+    let ev = items.iter().filter_map(|i| i.as_event()).find(|e| e.event_id().map(|x| x.as_str()) == Some(id)).ok_or("that message is not in the timeline")?;
+    let pretty = |raw: &matrix_sdk::ruma::serde::Raw<matrix_sdk::ruma::events::AnySyncTimelineEvent>| -> Result<String, String> {
+        let v: serde_json::Value = serde_json::from_str(raw.json().get()).map_err(|e| e.to_string())?;
+        serde_json::to_string_pretty(&v).map_err(|e| e.to_string())
+    };
+    let mut text = pretty(ev.original_json().ok_or("the server has not sent this message back yet")?)?;
+    if let Some(edit) = ev.latest_edit_json() { text.push_str("\n\n--- the latest edit ---\n\n"); text.push_str(&pretty(edit)?); }
+    Ok(text)
+}
+
 /// Download (and decrypt) the file, picture, video or audio of the message `event_id` and write it to `dest`; returns the size.
 pub async fn save_attachment(client: &Client, timeline: &Timeline, event_id: &str, dest: &Path) -> Result<u64, String> {
     let (event_id, item) = match event_id.split_once('#') { Some((e, n)) => (e, Some(n.parse::<usize>().map_err(|_| "bad gallery item number")?)), None => (event_id, None) };
@@ -2188,6 +2203,31 @@ mod tests {
         assert_eq!(main.section, "Rust club", "{rooms:#?}");
         assert_eq!(rooms.iter().find(|r| r.id == ROOM).unwrap().section, "Direct Messages", "direct chats stay where they are");
         assert!(rooms.iter().all(|r| r.title != "Rust club"), "the space is a section, not a room: {rooms:#?}");
+    }
+
+    #[tokio::test]
+    async fn a_messages_source_is_its_event_as_the_server_sent_it() {
+        let f = fixture().await;
+        let flags = "\u{1F1EE}\u{1F1F1}".repeat(5);
+        f.hs.say_text("bob", &flags);
+        let id = wait_for(&f, |m| m.len() == 1).await[0].id.clone();
+        let src = event_source(&f.timeline, &id).await.unwrap();
+        let v: serde_json::Value = serde_json::from_str(&src).expect("it is JSON");
+        assert_eq!(v["type"], "m.room.message");
+        assert_eq!(v["content"]["body"], flags.as_str(), "the text, code point for code point, as it was sent");
+        assert_eq!(v["event_id"], id.as_str());
+        assert!(event_source(&f.timeline, "$nothing:hs").await.is_err());
+        assert!(event_source(&f.timeline, &format!("{id}#2")).await.is_ok(), "a gallery item shows its message");
+        /* an encrypted message shows what it says, not the ciphertext */
+        send_text(&f.timeline, "secret hello", None).await.unwrap();
+        let mut src = Err(String::new());
+        for _ in 0..60 {
+            let msgs = wait_for(&f, |m| m.len() == 2 && m[1].body == "secret hello").await; /* the id of a message that is still being sent is not its event's */
+            if !msgs[1].pending { src = event_source(&f.timeline, &msgs[1].id).await; if src.is_ok() { break; } }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let v: serde_json::Value = serde_json::from_str(&src.unwrap()).unwrap();
+        assert_eq!(v["content"]["body"], "secret hello", "{v}");
     }
 
     #[tokio::test]

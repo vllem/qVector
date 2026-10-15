@@ -199,6 +199,7 @@ impl App {
                 let infos: Vec<Option<ui::PictureInfo>> = args.get("pictures").and_then(|v| v.as_array()).map(|a| a.iter().map(picture_info_of).collect()).unwrap_or_default();
                 let cap = s(args, "caption");
                 self.on_timeline(move |i, tl| async move { if let Err(e) = ui::send_gallery_with(&tl, &ps, Some(&cap), &infos).await { i.notice(format!("Cannot send the files: {e}")); } }); Value::Null }
+            "event_source" => { let e = s(args, "event_id"); self.on_timeline(move |i, tl| async move { match ui::event_source(&tl, &e).await { Ok(t) => i.emit_json("source", &json!({"event_id": e, "text": t})), Err(m) => i.notice(format!("Cannot show the source: {m}")) } }); Value::Null }
             "react" => { let (e, k) = (s(args, "event_id"), s(args, "key")); self.on_timeline(move |_, tl| async move { let _ = ui::toggle_reaction(&tl, &e, &k).await; }); Value::Null }
             "edit" => { let (e, t) = (s(args, "event_id"), s(args, "text"));
                 let mentions: Vec<(String, String)> = args.get("mentions").and_then(|v| v.as_array()).map(|a| a.iter().map(|m| (s(m, "id"), s(m, "label"))).collect()).unwrap_or_default();

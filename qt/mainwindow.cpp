@@ -655,6 +655,7 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     connect(timeline_, &TimelineView::threadRequested, this, &MainWindow::openThread);
     connect(timeline_, &TimelineView::forwardRequested, this, [this](const QString &id) { auto *d = new ForwardDialog(core_, rooms_, id, this); d->setAttribute(Qt::WA_DeleteOnClose); d->show(); });
     connect(timeline_, &TimelineView::historyRequested, this, [this](const QString &id) { core_->call("edit_history", {{"event_id", id}}); });
+    connect(timeline_, &TimelineView::sourceRequested, this, [this](const QString &id) { core_->call("event_source", {{"event_id", id}}); });
     connect(timeline_, &TimelineView::playRequested, this, [this](const QString &id) { core_->call("fetch_media", {{"event_id", id}}); });
     connect(timeline_, &TimelineView::openRequested, this, &MainWindow::openPicture);
     composer_->candidates = [this](const QString &prefix) {
@@ -966,6 +967,21 @@ void MainWindow::onEvent(const QString &name, const QJsonValue &p)
         if (S(row, "kind") == "audio") (new AudioPlayer(S(p.toObject(), "path"), S(row, "file_name").isEmpty() ? S(row, "body") : S(row, "file_name"), this))->show(); /* a window with the waveform */
         else if (S(row, "kind") == "image") showPicture(id, S(p.toObject(), "path")); /* the picture itself, fetched because the timeline shows a thumbnail */
         else timeline_->playFile(id, S(p.toObject(), "path"));
+    } else if (name == "source") { /* View source: the event as the server sent it, and how the timeline was given its text (a text that starts with half of a pair of UTF-16 units shows as "?") */
+        const QJsonObject o = p.toObject();
+        const QString body = S(timeline_->row(S(o, "event_id")), "body");
+        QStringList units;
+        for (int i = 0; i < qMin(16, int(body.size())); i++) units << QString::number(body[i].unicode(), 16).toUpper().rightJustified(4, '0');
+        const QString text = QString("// the text the timeline was given: %1 UTF-16 units, the first ones are %2\n").arg(body.size()).arg(units.join(' ')) + S(o, "text");
+        auto *v = new TextViewer("Message source", text, text.toUtf8().size(), false, this);
+        v->setAttribute(Qt::WA_DeleteOnClose);
+        connect(v, &TextViewer::saveRequested, this, [this, text] {
+            const QString dest = QFileDialog::getSaveFileName(this, "Save as", QDir::homePath() + "/message-source.json");
+            if (dest.isEmpty()) return;
+            QFile f(dest);
+            if (f.open(QIODevice::WriteOnly)) f.write(text.toUtf8());
+        });
+        v->show();
     } else if (name == "media_failed") {
         statusBar()->clearMessage();
         timeline_->setLoading(QString());
@@ -1657,6 +1673,11 @@ void MainWindow::dialogForDemo(const QString &which)
         composer_->setText("a caption");
     }
     else if (which.startsWith("audio:")) (new AudioPlayer(which.mid(6), QFileInfo(which.mid(6)).fileName(), this))->show(); /* dev aid: --dialog audio:FILE */
+    else if (which == "source") { /* dev aid: "View source..." of the newest text message */
+        const QJsonArray rows = timeline_->rows();
+        for (int i = int(rows.size()) - 1; i >= 0; i--) if (S(rows[i].toObject(), "kind") == "text") { core_->call("event_source", {{"event_id", S(rows[i].toObject(), "id")}}); return; }
+        QTimer::singleShot(1000, this, [this] { dialogForDemo("source"); }); /* the messages may not have arrived yet */
+    }
     else if (which == "thumbs") QTimer::singleShot(1000, this, showFirstPicture); /* dev aid: scroll to the first picture of the room (the demo's shows which picture it is) */
     else if (which == "nothumbs") { actThumbs_->setChecked(false); QTimer::singleShot(5000, this, showFirstPicture); } /* dev aid: what the Preferences checkbox "Thumbnails of pictures in the timeline" does when it is cleared: the timeline then shows the whole picture */
     else if (which == "picture") { /* dev aid: open the first picture of the room as a click on it does (a thumbnail is replaced by the whole picture) */

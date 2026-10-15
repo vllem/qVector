@@ -159,6 +159,13 @@ the alice/bob direct chat (`m.direct`).
 * `QTextBrowser` rendering: messages are HTML built in `TimelineView::render()` (one small table per message, rows mapped to events in `rowEvents_` for the context menu).
   Pictures/avatars/shields are `QTextDocument` resources. Performance: only a window of at most 300 messages is laid out (the newest 100 while following; `windowStart_`/`windowEnd_`), redraws are skipped when html and
   pictures are unchanged, bursts are merged (150 ms), and a change at the end of the room replaces only the tables from the first changed one (partial update).
+* A view has ONE horizontal scrollbar for all its messages, so anything that cannot wrap makes the whole room scroll sideways (a user's room had one tens of thousands of pixels long):
+  `<pre>` lines (`applyStyle()` gives `pre` `white-space: pre-wrap`), an `<img width="100000">` in somebody's formatted body (every `<img>` that is not our own `emo:` picture is replaced by its
+  alt text), and long unbreakable text wraps by itself. The horizontal scrollbar is switched off as well. The stress step "no kind of message widens the view" lists 31 kinds, flags and
+  code blocks among them. Emoji cost about a millisecond each to lay out (Qt asks the colour font for the bitmap of every glyph; letters are microseconds): 500 flags were 0.4 s on every redraw of
+  the room, so a message is laid out up to `kMaxShownEmoji` (400) emoji and then cut with the usual note. A flag is two regional indicators: when the first one of a run is lost or corrupt
+  (a lone UTF-16 half shows as "?"), every flag after it pairs with the wrong neighbour (Israel's I, L become Liechtenstein's L, I). "View source..." in a message's menu shows the event as the
+  server sent it and the first UTF-16 units of the text the timeline was given (`event_source` call, `source` event, `--dialog source`).
 * The default font family is the alias "Sans Serif"; `main.cpp` resolves the real family before adding the colour emoji font (`ensureEmojiFont`). Symbols that exist as
   emoji (◀ ▶ ☺) are written with U+FE0E. The user dislikes coloured-emoji look-alikes for plain symbols and layout glitches: look at a screenshot before reporting done.
 * `QLayout::takeAt()` on a nested layout returns the layout itself: delete it once, not "the item" too. Popups must be clamped to the screen (`EmojiPicker::popupAt`).

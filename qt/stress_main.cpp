@@ -9,6 +9,8 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QFontDatabase>
+#include <QFontInfo>
 #include <QGuiApplication>
 #include <QImage>
 #include <QJsonArray>
@@ -405,6 +407,88 @@ int main(int argc, char **argv)
         a.append(QJsonValue());
         a.append(QJsonObject{{"id", "$x"}, {"kind", "poll"}, {"poll", QJsonObject()}, {"gallery", QJsonArray{QJsonObject()}}});
         tl.setRows(a);
+    });
+
+    /* Laying out an emoji takes about a millisecond (Qt asks the colour font for the bitmap of every glyph it places), so a message of thousands of them froze the window for
+       seconds on every redraw of the room: only the first 400 are laid out, and the message says it was cut. */
+    step("timeline: a message of 5 000 flags is cut at 400 emoji and lays out fast", 1200, [&] {
+        TimelineView e;
+        e.resize(900, 600);
+        e.show();
+        const QString il = QString::fromUtf8("\xF0\x9F\x87\xAE\xF0\x9F\x87\xB1");
+        QString many; for (int i = 0; i < 5000; i++) many += il;
+        e.setRows(QJsonArray{message(1, many)});
+        settle();
+        const QString shown = e.findChild<QTextBrowser *>()->toPlainText();
+        const bool cut = shown.contains("message cut, 20000 characters in all") && shown.count(QString::fromUtf8("\xF0\x9F\x87\xAE")) == 200; /* 400 emoji: 200 flags, none of them half */
+        std::printf("    the note is there and %d flags are shown: %s\n", int(shown.count(QString::fromUtf8("\xF0\x9F\x87\xAE"))), cut ? "ok" : "WRONG");
+        if (!cut) failures++;
+        QString few; for (int i = 0; i < 150; i++) few += il; /* 300 emoji: shown whole */
+        e.reset();
+        e.setRows(QJsonArray{message(2, few)});
+        settle();
+        const QString whole = e.findChild<QTextBrowser *>()->toPlainText();
+        if (whole.contains("message cut") || whole.count(QString::fromUtf8("\xF0\x9F\x87\xAE")) != 150) { std::printf("    WRONG: 150 flags are not shown whole\n"); failures++; }
+    });
+
+    /* No message makes the view wider than the window. A view has one horizontal scrollbar for all its messages, and one line that cannot wrap (a code block, a picture
+       that says it is 100 000 pixels wide) gave a whole room a scrollbar tens of thousands of pixels long. Runs of emoji must wrap too, and must not be split inside a flag
+       (a pair of regional indicators): a split one shows as a lone letter and every flag after it as the neighbouring country's. */
+    step("timeline: no kind of message widens the view", 3000, [&] {
+        TimelineView wide;
+        wide.resize(900, 600);
+        { /* the font as the app sets it (main.cpp ensureEmojiFont): the normal font first, a colour emoji font behind it */
+            QFont f = QApplication::font();
+            const QStringList have = QFontDatabase::families();
+            for (const char *want : {"Noto Color Emoji", "Twemoji Mozilla", "Twitter Color Emoji", "Apple Color Emoji", "Segoe UI Emoji"}) if (have.contains(want)) { f.setFamilies({QFontInfo(f).family(), want}); break; }
+            wide.setFont(f);
+        }
+        wide.show();
+        auto *bar = wide.findChild<QTextBrowser *>()->horizontalScrollBar();
+        auto run = [](int n, const QString &unit) { QString t; while (t.size() < n) t += unit; return t.left(n); };
+        const QString il = QString::fromUtf8("\xF0\x9F\x87\xAE\xF0\x9F\x87\xB1"), ri = QString::fromUtf8("\xF0\x9F\x87\xAE"); /* the Israeli flag and its first regional indicator */
+        struct Case { QString name; QJsonObject row; bool flags = false; };
+        QList<Case> cases;
+        auto plain = [&](const QString &n, const QString &t, bool flags = false) { cases.append({n, message(1, t), flags}); };
+        auto html = [&](const QString &n, const QString &h) { cases.append({n, message(1, "x", h), false}); };
+        auto field = [&](const QString &n, const QString &k, const QJsonValue &v) { QJsonObject r = message(1, "hi"); r[k] = v; cases.append({n, r, false}); };
+        plain("20000 letters", run(20000, "a")); plain("20000 binary digits", run(20000, "01101110")); plain("base64", run(5000, "QUJDREVGR0hJSktMTU5PUA+/=="));
+        plain("3000 grinning faces", run(6000, QString::fromUtf8("\xF0\x9F\x98\x80"))); plain("CJK", run(3000, QString::fromUtf8("\xE6\xBC\xA2\xE5\xAD\x97")));
+        plain("long address", "https://example.org/path?" + run(3000, "a=1&b=2&")); plain("run of equals signs", run(3000, "="));
+        plain("497 Israeli flags", run(497 * 4, il), true); plain("8000 Israeli flags", run(8000 * 4, il), true); plain("flags and a half one", run(200 * 4, il) + ri, true);
+        html("code block with one 3000-character line", "<pre><code>" + run(3000, "abcdefghij") + "</code></pre>");
+        html("code block of 100 lines of 300 characters", "<pre><code>" + run(30000, run(300, "z") + "\n") + "</code></pre>");
+        html("code block of flags", "<pre><code>" + run(300 * 4, il) + "</code></pre>");
+        html("long link text", "<a href=\"https://example.org/\">" + run(3000, "a") + "</a>"); html("inline code", "see <code>" + run(3000, "a") + "</code> here");
+        { QString t = "<table>"; for (int r = 0; r < 3; r++) { t += "<tr>"; for (int c = 0; c < 40; c++) t += "<td>cell number " + QString::number(c) + "</td>"; t += "</tr>"; } html("table of 40 columns", t + "</table>"); }
+        { QString t = "<table><tr>"; for (int c = 0; c < 3; c++) t += "<td>" + run(400, "tok") + "</td>"; html("table of cells with 400-character words", t + "</tr></table>"); }
+        html("quotation", "<blockquote>" + run(3000, "a") + "</blockquote>"); html("list item", "<ul><li>" + run(3000, "a") + "</li></ul>"); html("heading", "<h2>" + run(3000, "a") + "</h2>");
+        html("emphasis", "<strong><em>" + run(3000, "a") + "</em></strong>"); html("coloured text", "<font data-mx-color=\"#ff0000\">" + run(3000, "a") + "</font>");
+        html("spoiler", "<span data-mx-spoiler>" + run(3000, "a") + "</span>"); html("paragraphs", "<p>" + run(5000, "a b") + "</p><p>" + run(5000, "a") + "</p>");
+        html("picture that says it is 100 000 pixels wide", "<img src=\"mxc://hs/e\" width=\"100000\" height=\"32\">");
+        html("picture of somebody else with an enormous height", "<img src=\"https://example.org/x.png\" width=\"50\" height=\"900000\">");
+        field("sender with a 500-character name", "sender", run(500, "N")); field("file with a 3000-character name", "file_name", run(3000, "f"));
+        field("reply to a 3000-character message", "reply", QJsonObject{{"event_id", "$x"}, {"sender", "zach"}, {"preview", run(3000, "p")}});
+        field("reaction with a 3000-character key", "reactions", QJsonArray{QJsonObject{{"key", run(3000, "r")}, {"count", 1}, {"mine", false}}});
+        { QJsonObject r = message(1, run(3000, "c")); r["kind"] = "image"; r["file_name"] = run(3000, "i") + ".jpg"; cases.append({"picture with a 3000-character caption", r, false}); }
+        int wideCases = 0, splitFlags = 0;
+        for (const Case &c : cases) {
+            QElapsedTimer one; one.start();
+            wide.reset();
+            wide.setRows(QJsonArray{message(0, "before"), c.row, message(2, "after")});
+            QElapsedTimer pause; pause.start(); while (pause.elapsed() < 170) QApplication::processEvents(QEventLoop::AllEvents, 10); /* the view merges redraws within 150 ms */
+            excludedMs += pause.elapsed();
+            if (one.elapsed() - pause.elapsed() > 400) std::printf("    (%lld ms: %s)\n", (long long)(one.elapsed() - pause.elapsed()), qPrintable(c.name));
+            if (bar->maximum() > 0) { std::printf("    WIDER THAN THE WINDOW by %d px: %s\n", bar->maximum(), qPrintable(c.name)); wideCases++; }
+            if (c.flags) { /* red is the neighbours' flags (Liechtenstein: L, I); the Israeli one has none (only the sender's name is dark red, at the top) */
+                const QImage img = wide.grab().toImage();
+                int red = 0;
+                for (int y = 100; y < img.height() - 100; y++) for (int x = 40; x < img.width() - 20; x++) { const QRgb px = img.pixel(x, y); if (qRed(px) > 170 && qGreen(px) < 90 && qBlue(px) < 90) red++; }
+                if (red > 40) { std::printf("    FLAGS SPLIT (%d red pixels): %s\n", red, qPrintable(c.name)); splitFlags++; }
+            }
+        }
+        std::printf("    %lld kinds of message, %d wider than the window, %d with a split flag\n", (long long)cases.size(), wideCases, splitFlags);
+        if (wideCases || splitFlags) failures++;
     });
 
     Sidebar sb;
