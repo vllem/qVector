@@ -1,0 +1,4 @@
+# rustc 1.99 crashed (SIGSEGV in LLVM's inliner) on matrix-sdk-sqlite with codegen-units = 1 and the default stack;
+# a bigger stack for the compiler's threads fixes it (CMakeLists.txt sets the same for cmake builds).
+[env]
+RUST_MIN_STACK = "67108864"

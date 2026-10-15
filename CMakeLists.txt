@@ -47,7 +47,8 @@ endif()
 set(VC_RUST_LIB ${VC_RUST_OUT}/libvector_core.a)
 file(GLOB_RECURSE VC_RUST_SOURCES CONFIGURE_DEPENDS core-rs/src/*.rs core-rs/Cargo.toml Cargo.toml Cargo.lock)
 add_custom_command(OUTPUT ${VC_RUST_LIB}
-  COMMAND ${CMAKE_COMMAND} -E env ${VC_RUST_ENV} ${VC_CARGO} build --profile ${VC_RUST_PROFILE} --lib --locked -p vector-core ${VC_RUST_FEATURES} --manifest-path ${CMAKE_SOURCE_DIR}/Cargo.toml
+  # RUST_MIN_STACK: rustc 1.99 crashed (SIGSEGV in LLVM's inliner) on matrix-sdk-sqlite with codegen-units=1 and the default 8 MB stack
+  COMMAND ${CMAKE_COMMAND} -E env ${VC_RUST_ENV} RUST_MIN_STACK=67108864 ${VC_CARGO} build --profile ${VC_RUST_PROFILE} --lib --locked -p vector-core ${VC_RUST_FEATURES} --manifest-path ${CMAKE_SOURCE_DIR}/Cargo.toml
   DEPENDS ${VC_RUST_SOURCES} COMMENT "Building the Rust core (cargo)" VERBATIM)
 add_custom_target(vc_rust_build DEPENDS ${VC_RUST_LIB})
 add_library(vc_rust STATIC IMPORTED GLOBAL)
