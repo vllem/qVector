@@ -628,6 +628,7 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     });
     connect(stickerPicker_, &PackPicker::picked, this, [this](const QJsonObject &e) {
         core_->call("send_sticker", {{"mxc", S(e, "mxc")}, {"body", S(e, "shortcode")}, {"width", e["width"].toInt()}, {"height", e["height"].toInt()}, {"mime", S(e, "mime")}});
+        timeline_->stickToBottom(); /* what we send is at the end of the room, also after a jump to an old message */
     });
     connect(picker_, &EmojiPicker::customPicked, this, [this](const QString &code) { composer_->insert(":" + code + ": "); composer_->setFocus(); emit composer_->textEdited(composer_->text()); });
     connect(picker_, &EmojiPicker::emojiPicked, this, [this](const QString &g) { composer_->insert(g); composer_->setFocus(); emit composer_->textEdited(composer_->text()); });
@@ -749,7 +750,7 @@ void MainWindow::buildMenus()
         const QString id = QInputDialog::getText(this, "Invite", "Matrix id of the person (@name:server)", QLineEdit::Normal, QString(), &ok).trimmed();
         if (ok && !id.isEmpty()) core_->call("room_action", {{"kind", "invite"}, {"a", id}, {"b", ""}});
     });
-    ch->addAction("Create poll...", this, [this] { if (!current_.isEmpty()) PollDialog(core_, this).exec(); });
+    ch->addAction("Create poll...", this, [this] { if (!current_.isEmpty() && PollDialog(core_, this).exec() == QDialog::Accepted) timeline_->stickToBottom(); });
     ch->addAction("Close tab", QKeySequence("Ctrl+W"), this, [this] { if (tabs_->currentIndex() >= 0) closeTab(tabs_->currentIndex()); });
     ch->addAction("Leave room", this, [this] { if (!current_.isEmpty() && QMessageBox::question(this, "Leave", "Leave " + roomTitle(current_) + "?") == QMessageBox::Yes) core_->call("leave_room", {{"room_id", current_}}); });
     QMenu *status = tools->addMenu("My status");
@@ -1568,6 +1569,7 @@ void MainWindow::threadForDemo(const QString &text)
 
 void MainWindow::dialogForDemo(const QString &which)
 {
+    auto showFirstPicture = [this] { for (const QJsonValue &v : timeline_->rows()) if (S(v.toObject(), "kind") == "image") { timeline_->revealMessage(S(v.toObject(), "id")); return; } };
     if (which == "poll") PollDialog(core_, this).open();
     else if (which == "saved") showSaved();
     else if (which == "prefs") showPreferences();
@@ -1612,6 +1614,8 @@ void MainWindow::dialogForDemo(const QString &which)
         composer_->setText("a caption");
     }
     else if (which.startsWith("audio:")) (new AudioPlayer(which.mid(6), QFileInfo(which.mid(6)).fileName(), this))->show(); /* dev aid: --dialog audio:FILE */
+    else if (which == "thumbs") QTimer::singleShot(1000, this, showFirstPicture); /* dev aid: scroll to the first picture of the room (the demo's shows which picture it is) */
+    else if (which == "nothumbs") { actThumbs_->setChecked(false); QTimer::singleShot(5000, this, showFirstPicture); } /* dev aid: what the Preferences checkbox "Thumbnails of pictures in the timeline" does when it is cleared: the timeline then shows the whole picture */
     else if (which == "picture") { /* dev aid: open the first picture of the room as a click on it does (a thumbnail is replaced by the whole picture) */
         for (const QJsonValue &v : timeline_->rows()) if (S(v.toObject(), "kind") == "image" && !S(v.toObject(), "image_path").isEmpty()) { openPicture(S(v.toObject(), "id")); return; }
         QTimer::singleShot(1000, this, [this] { dialogForDemo("picture"); }); /* the picture may not have arrived yet */

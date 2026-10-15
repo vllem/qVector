@@ -42,7 +42,7 @@ QT_QPA_PLATFORM=offscreen XDG_CONFIG_HOME=$(mktemp -d) ./build/qvector --demo --
 ```
 
 * **Do not set LD_LIBRARY_PATH to ~/Qt** (a Qt 6.10 install used by the dropped QtBridge experiment): the Widgets app uses the system Qt 6.8.
-* `--demo` starts the in-process fake homeserver (feature `testkit`, CMake option `VC_DEMO`) with alice (you), bob, a space, an invite, 40 history messages and a photo from bob (`--dialog picture` opens it as a click does).
+* `--demo` starts the in-process fake homeserver (feature `testkit`, CMake option `VC_DEMO`) with alice (you), bob, a space, an invite, 40 history messages and a photo from bob (`--dialog picture` opens it as a click does, `--dialog nothumbs` clears the Preferences checkbox).
   Dev aids: `--room NAME --members --search T --thread T --dialog poll|saved|prefs|verify|recovery|settings --delay MS --data DIR --server URL --user U --password P
   --verify --confirm`. Screenshots grab the main window (or the dialog being demonstrated); popups/menus are not captured.
 * A real run signs in a *new device* on the account and needs re-verification: ask the user before pointing it at their real account. Use `core-rs/examples/fakehs.rs`
@@ -106,7 +106,7 @@ heap that reuses freed memory, so they read lower (a regression of 10 MB in the 
   HTTP/2 buffers), its thumbnail about 50 KB. `ui::fetch_images` asks the server for `thumbnail/..?width=960&height=640&method=scale` (what the timeline draws at twice the pixels), then
   the sender's `info.thumbnail_source`, then the file itself; an encrypted picture has only the sender's thumbnail (the server cannot scale it), and a picture the message
   declares under 256 KB is fetched whole. `Inner.images` maps event id to `ui::Pic {path, thumb}`; a row with `image_thumb` has the smaller one, and `MainWindow::openPicture` then
-  asks for `fetch_media` and `media_file` opens the viewer (a gallery item or "Save as" always fetches the original). Files are named `<id>.<ext>` (the picture) and `<id>-t.img`
+  asks for `fetch_media` and `media_file` opens the viewer (a gallery item or "Save as" always fetches the original; `media_copy` keeps the opened file in `media/open/` and uses it the next time). Files are named `<id>.<ext>` (the picture) and `<id>-t.img`
   (a thumbnail), written through `.part` and renamed, and found again after a restart without asking the server (the picture wins over a thumbnail). A call fetches at most 8 pictures,
   the newest first. Not covered: the pictures qVector sends itself carry no thumbnail (so in an encrypted room others download them whole), GIFs are still frames in the timeline anyway.
 * The sync filter (`crate::sync_settings`, used by `network_loop` and `sync_once`): `lazy_load_members` and no presence. A first sign-in used to download every member of every

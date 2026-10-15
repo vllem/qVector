@@ -342,6 +342,21 @@ int main(int argc, char **argv)
         settle();
         if (tl.shownEnd() != 1020 || br->toPlainText().contains("Show newer messages")) { std::printf("    did not follow the end again: [%d, %d)\n", tl.shownFirst(), tl.shownEnd()); failures++; }
     });
+    step("timeline: the link and sending bring a window that stops short of the end back to the newest", 4000, [&] {
+        for (int how = 0; how < 2; how++) {
+            tl.reset();
+            tl.setRows(messages(1000));
+            settle();
+            auto *br = tl.findChild<QTextBrowser *>();
+            for (int i = 0; i < 3; i++) { readerInput(br); br->verticalScrollBar()->setValue(0); QApplication::processEvents(); }
+            const bool detached = tl.shownEnd() < 1000 && br->toPlainText().contains("Show newer messages");
+            if (how == 0) emit br->anchorClicked(QUrl("vc:newer")); else tl.stickToBottom();
+            settle();
+            const bool back = tl.shownEnd() == 1000 && !br->toPlainText().contains("Show newer messages");
+            std::printf("    %s: the window stopped short of the end: %s, the newest messages again: %s\n", how == 0 ? "the link" : "sending", detached ? "yes" : "NO", back ? "yes" : "NO");
+            if (!detached || !back) failures++;
+        }
+    });
     step("timeline: reveal the first message of 20 000 rows and then the last", 3000, [&] {
         tl.reset();
         tl.setRows(messages(20000));

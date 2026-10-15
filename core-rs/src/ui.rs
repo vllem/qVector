@@ -953,7 +953,12 @@ pub async fn media_copy(client: &Client, timeline: &Timeline, event_id: &str, di
     let id: String = event_id.chars().filter(|c| c.is_ascii_alphanumeric()).take(12).collect::<String>() + item.map(|n| format!("n{n}")).unwrap_or_default().as_str();
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let dest = dir.join(format!("{id}-{stem}"));
-    save_attachment(client, timeline, event_id, &dest).await?;
+    if has_content(&dest) { return Ok(dest); } /* opened before (the timeline shows thumbnails, so every look at a picture comes here): a message's picture, video or sound does not change */
+    let part = dir.join(format!("{id}-{stem}.part"));
+    let saved = save_attachment(client, timeline, event_id, &part).await;
+    if saved.is_err() { let _ = std::fs::remove_file(&part); }
+    saved?;
+    std::fs::rename(&part, &dest).map_err(|e| e.to_string())?;
     Ok(dest)
 }
 
@@ -2100,6 +2105,11 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"not really a video");
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         assert!(name.ends_with("my_clip_.mp4") && !name.contains(' ') && !name.contains('?'), "{name}");
+        /* opened again: the copy that is there is used, nothing is downloaded, and no half-written file is left */
+        let downloads = f.hs.log().iter().filter(|l| l.starts_with("download ")).count();
+        assert_eq!(media_copy(&f.client, &f.timeline, &video.id, &out).await.unwrap(), path);
+        assert_eq!(f.hs.log().iter().filter(|l| l.starts_with("download ")).count(), downloads, "the second look did not download the file again");
+        assert!(std::fs::read_dir(&out).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".part")));
         let file = m.iter().find(|x| x.kind == "file").unwrap();
         assert!(media_copy(&f.client, &f.timeline, &file.id, &out).await.is_err(), "plain files are never opened by the app");
     }
