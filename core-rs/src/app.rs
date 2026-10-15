@@ -987,6 +987,10 @@ mod tests {
         }
     }
 
+    /// How many times alice's own session asked for the whole member list of a room. Only hers: the demo's simulated bob (`testkit::bob_says`) signs in a few
+    /// seconds later and asks for it too before his first encrypted message.
+    fn member_list_requests(hs: &crate::testkit::FakeHs) -> usize { hs.log().iter().filter(|l| l.starts_with("GET ") && l.ends_with("/members (alice_DEV_alice)")).count() }
+
     fn app() -> (App, Probe, tempfile::TempDir) {
         let (tx, rx) = mpsc::channel();
         let tx = Mutex::new(tx);
@@ -1094,12 +1098,13 @@ mod tests {
         assert_eq!(d["members_complete"], false, "{}", d["members"].as_array().map_or(0, |a| a.len()));
         assert_eq!(d["member_count"], 1102, "the count is the room's, not the list's");
         assert!(d["members"].as_array().unwrap().len() < 20, "only the people the sync brought: {}", d["members"].as_array().unwrap().len());
-        assert!(!hs.log().iter().any(|l| l.starts_with("GET ") && l.contains("/members (")), "opening the room did not ask for the member list");
+        probe.wait("timeline", |v| v["rows"].as_array().map(|a| !a.is_empty()).unwrap_or(false)); /* the open timeline has decided not to fetch the members itself */
+        assert_eq!(member_list_requests(&hs), 0, "opening the room did not ask for the member list");
         app.call("load_members", &json!({"room_id": crate::testkit::ROOM}));
         let d = probe.wait("details", |v| v["members_complete"] == true);
         assert_eq!(d["members"].as_array().unwrap().len(), 1102);
         assert_eq!(d["member_count"], 1102);
-        assert_eq!(hs.log().iter().filter(|l| l.starts_with("GET ") && l.contains("/members (")).count(), 1);
+        assert_eq!(member_list_requests(&hs), 1);
     }
 
     #[test]
@@ -1116,7 +1121,7 @@ mod tests {
         assert_eq!((d["member_count"].as_u64(), d["members"].as_array().map(|a| a.len())), (Some(5), Some(5)), "{d}");
         probe.wait("timeline", |v| v["rows"].as_array().map(|a| !a.is_empty()).unwrap_or(false));
         std::thread::sleep(Duration::from_secs(2)); /* the timeline's own fetch of the members has long finished */
-        assert_eq!(hs.log().iter().filter(|l| l.starts_with("GET ") && l.contains("/members (")).count(), 1, "the room details and the timeline share one request");
+        assert_eq!(member_list_requests(&hs), 1, "the room details and the timeline share one request");
     }
 
     #[test]

@@ -1160,7 +1160,22 @@ pub async fn send_gallery_with(timeline: &Timeline, paths: &[PathBuf], caption: 
 
 /// Add or remove our reaction `key` on the message (an event id).
 pub async fn toggle_reaction(timeline: &Timeline, event_id: &str, key: &str) -> Result<bool, String> {
+    use matrix_sdk_ui::timeline::EventSendState;
     let id: OwnedEventId = event_id.try_into().map_err(|e| format!("bad event id: {e}"))?;
+    /* The SDK cannot take a reaction back from a message that is still its local echo (sent, but the sync has not brought the server's copy back yet): it
+       says "removed" and sends nothing ("remote reaction to remote event, but the associated item isn't remote"). Our reaction has its event id by then, so
+       it is redacted here, and the sync takes it off the message. */
+    if let Some(item) = timeline.item_by_event_id(&id).await.filter(|i| i.is_local_echo()) {
+        let me = timeline.room().own_user_id();
+        let ours = item.content().reactions().and_then(|r| r.get(key)).and_then(|by| by.get(me)).and_then(|r| match &r.send_state {
+            Some(EventSendState::Sent { event_id }) => Some(event_id.clone()),
+            _ => None,
+        });
+        if let Some(reaction) = ours {
+            timeline.room().redact(&reaction, None, None).await.map_err(|e| e.to_string())?;
+            return Ok(false);
+        }
+    }
     timeline.toggle_reaction(&TimelineEventItemId::EventId(id), key).await.map_err(|e| e.to_string())
 }
 
@@ -1275,17 +1290,33 @@ mod tests {
     }
 
     /// Sync and look at the timeline until `done` is satisfied.
-    async fn wait_for(f: &Fixture, done: impl Fn(&[UiMessage]) -> bool) -> Vec<UiMessage> {
+    async fn wait_for(f: &Fixture, done: impl Fn(&[UiMessage]) -> bool) -> Vec<UiMessage> { wait_until(f, |_, m| done(m)).await }
+
+    /// `wait_for`, with the timeline items as well as the rows.
+    async fn wait_until(f: &Fixture, done: impl Fn(&[Arc<TimelineItem>], &[UiMessage]) -> bool) -> Vec<UiMessage> {
         let mut last = Vec::new();
         for _ in 0..400 { /* generous: the whole suite runs in parallel and bob's login can be slow */
             crate::sync_once(&f.client).await.unwrap();
             let items: Vec<_> = f.timeline.items().await.iter().cloned().collect();
             last = ui_messages(&items, "@alice:hs");
             if last.iter().any(|m| m.kind == "undecryptable") { retry_undecryptable(&f.timeline).await; }
-            if done(&last) { return last; }
+            if done(&items, &last) { return last; }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         panic!("the timeline never looked as expected: {last:#?}");
+    }
+
+    /// No message of the timeline is a local echo any more: the sync has brought the server's copy of each and the timeline has applied it. A row is no longer
+    /// `pending` as soon as the server answered the send, which is earlier; taking a reaction back or a read receipt needs the server's copy. (A sync returning
+    /// is not enough either: the timeline applies its events on its own task a moment later.)
+    fn echoed(items: &[Arc<TimelineItem>]) -> bool { items.iter().filter_map(|i| i.as_event()).all(|e| !e.is_local_echo()) }
+
+    /// Our own reaction `key` on the message `id` as the timeline holds it: None when there is none, Some(None) when it is the server's copy, Some(Some(state))
+    /// while it is our local echo.
+    fn our_reaction(items: &[Arc<TimelineItem>], id: &str, key: &str) -> Option<Option<matrix_sdk_ui::timeline::EventSendState>> {
+        let item = items.iter().filter_map(|i| i.as_event()).find(|e| e.event_id().map_or(false, |e| e.as_str() == id))?;
+        let r = item.content().reactions()?.get(key)?.get(<&matrix_sdk::ruma::UserId>::try_from("@alice:hs").unwrap())?;
+        Some(r.send_state.clone())
     }
 
     #[test]
@@ -1448,7 +1479,7 @@ mod tests {
     async fn spec_reading_also_moves_the_fully_read_marker() {
         let f = fixture().await;
         send_text(&f.timeline, "hello", None).await.unwrap();
-        let id = wait_for(&f, |m| m.len() == 1 && !m[0].pending).await[0].id.clone();
+        let id = wait_until(&f, |items, m| m.len() == 1 && echoed(items)).await[0].id.clone(); /* a receipt is for the server's copy of the message */
         for _ in 0..20 { if mark_read(&f.timeline).await.unwrap_or(false) { break; } tokio::time::sleep(std::time::Duration::from_millis(100)).await; }
         let log = f.hs.log();
         assert!(log.iter().any(|l| l.starts_with("read_markers") && l.contains("m.fully_read") && l.contains(&id)), "m.fully_read is what other devices use for \"unread since here\": {log:#?}");
@@ -1518,13 +1549,44 @@ mod tests {
     async fn reactions_are_counted_toggled_and_marked_as_ours() {
         let f = fixture().await;
         send_text(&f.timeline, "react to me", None).await.unwrap();
-        let id = wait_for(&f, |m| m.len() == 1 && !m[0].pending).await[0].id.clone();
+        let id = wait_until(&f, |items, m| m.len() == 1 && echoed(items)).await[0].id.clone();
         let added = toggle_reaction(&f.timeline, &id, "👍").await;
         assert!(added.clone().unwrap_or(false), "added: {added:?}; unhandled requests: {:#?}", f.hs.log().iter().filter(|l| l.contains("UNHANDLED")).collect::<Vec<_>>());
-        let msgs = wait_for(&f, |m| m[0].reactions.len() == 1).await;
+        /* the server's copy of the reaction (taking one back while it is still being sent is the next test's) */
+        let msgs = wait_until(&f, |items, m| m[0].reactions.len() == 1 && matches!(our_reaction(items, &id, "👍"), Some(None))).await;
         assert_eq!(msgs[0].reactions, vec![UiReaction { key: "👍".into(), count: 1, mine: true }]);
         assert!(!toggle_reaction(&f.timeline, &id, "👍").await.unwrap(), "removed again");
         wait_for(&f, |m| m[0].reactions.is_empty()).await;
+    }
+
+    /// Look at the timeline without syncing until `done` holds (what happens before the sync brings anything back).
+    async fn wait_local(f: &Fixture, done: impl Fn(&[Arc<TimelineItem>]) -> bool) -> Vec<Arc<TimelineItem>> {
+        for _ in 0..600 {
+            let items: Vec<_> = f.timeline.items().await.iter().cloned().collect();
+            if done(&items) { return items; }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("the timeline never looked as expected: {:#?}", ui_messages(&f.timeline.items().await.iter().cloned().collect::<Vec<_>>(), "@alice:hs"));
+    }
+
+    /// A quick second click on a message just sent: the message is still our local echo (the server answered the send, the sync has not brought it back),
+    /// the reaction has been sent. The SDK alone answers "removed" and sends nothing there, and the reaction stayed for everybody.
+    #[tokio::test]
+    async fn a_reaction_is_taken_back_from_a_message_the_sync_has_not_brought_back_yet() {
+        use matrix_sdk_ui::timeline::EventSendState;
+        let f = fixture().await;
+        send_text(&f.timeline, "just sent", None).await.unwrap();
+        let items = wait_local(&f, |items| items.iter().filter_map(|i| i.as_event()).any(|e| e.is_local_echo() && e.event_id().is_some())).await;
+        let id = items.iter().filter_map(|i| i.as_event()).find_map(|e| e.event_id().map(|i| i.to_string())).unwrap();
+        assert!(toggle_reaction(&f.timeline, &id, "👍").await.unwrap(), "added");
+        let items = wait_local(&f, |items| matches!(our_reaction(items, &id, "👍"), Some(Some(EventSendState::Sent { .. })))).await;
+        let Some(Some(EventSendState::Sent { event_id: reaction })) = our_reaction(&items, &id, "👍") else { unreachable!() };
+        assert!(items.iter().filter_map(|i| i.as_event()).all(|e| e.is_local_echo()), "no sync has brought the message back");
+        assert!(!toggle_reaction(&f.timeline, &id, "👍").await.unwrap(), "taken back");
+        let redacted = |l: &String| l.starts_with("PUT ") && l.contains("/redact/") && (l.contains(reaction.as_str()) || l.contains(&reaction.as_str().replace('$', "%24")));
+        assert!(f.hs.log().iter().any(redacted), "the reaction {reaction} was redacted: {:#?}", f.hs.log());
+        let msgs = wait_until(&f, |items, m| m.len() == 1 && echoed(items) && m[0].reactions.is_empty()).await;
+        assert_eq!(msgs[0].body, "just sent");
     }
 
     /// A tiny valid PNG (1x1, red).
@@ -1837,8 +1899,8 @@ mod tests {
         assert_eq!(names, vec![("alice", "Admin"), ("bob", "")], "{names:?}");
     }
 
-    /// How many times the whole member list has been asked for.
-    fn member_list_requests(f: &Fixture) -> usize { f.hs.log().iter().filter(|l| l.starts_with("GET ") && l.contains("/members (")).count() }
+    /// How many times alice's session has asked for the whole member list (the fake's other clients ask for it themselves before they send encrypted).
+    fn member_list_requests(f: &Fixture) -> usize { f.hs.log().iter().filter(|l| l.starts_with("GET ") && l.ends_with("/members (alice_DEV_alice)")).count() }
 
     fn localparts(members: &[matrix_sdk::room::RoomMember]) -> Vec<String> { let mut v: Vec<String> = members.iter().map(|m| m.user_id().localpart().to_string()).collect(); v.sort(); v }
 

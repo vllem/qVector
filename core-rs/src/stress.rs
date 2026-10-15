@@ -241,7 +241,7 @@ async fn crawling_three_thousand_messages_of_history_is_linear() {
     for _ in 0..80 { crate::sync_once(&client).await.unwrap(); if live.items().await.iter().any(|i| i.as_event().map(|e| e.event_id().is_some()).unwrap_or(false)) { break; } tokio::time::sleep(Duration::from_millis(50)).await; }
     let index = Mutex::new(MessageIndex::open(&dir.path().join("index"), "secret").unwrap());
     let t = Instant::now();
-    let mut last = Duration::ZERO;
+    let mut last;
     let mut slowest = Duration::ZERO;
     let mut pages = 0;
     loop {
