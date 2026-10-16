@@ -21,4 +21,7 @@ done
 printf 'a message sent through the composer' > "$out/msg.txt"
 if VC_SEND_LOG=1 timeout 120 "$bin" --demo --data "$out/data" --room bob --delay 20000 --send-text "$out/msg.txt" --screenshot "$out/shot.png" >"$out/log" 2>&1 \
    && grep -q "sendbar: shown 'Sending...'" "$out/log" && grep -q "sendbar: hidden after" "$out/log"; then echo "ok: sending bar"; else echo "FAILED (sending bar)"; grep sendbar "$out/log"; fail=1; fi
+# the zoom's message must be alone in the status bar: a Qt status bar shows its own widgets again, over the message, when its height changes while one is showing
+if VC_ZOOM_LOG=1 timeout 120 "$bin" --demo --data "$out/data" --room bob --delay 20000 --zoom-later 150 --screenshot "$out/shot.png" >"$out/log" 2>&1 \
+   && grep -q 'zoom: message "Zoom 150%", own status widgets shown: 0' "$out/log"; then echo "ok: zoom message"; else echo "FAILED (zoom message)"; grep "zoom:" "$out/log"; fail=1; fi
 exit $fail

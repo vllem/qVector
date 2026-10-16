@@ -596,7 +596,10 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     zoomApplied_ = uiPercent();
     /* The panes keep their widths in the zoom's own units: the room list and the side panels grow and shrink with it, the messages take what is left. The widths
        are taken before the change: the panes' minimum widths change with it, and a pane that is made wider by that must not be scaled again. */
-    connect(uiScaleNotifier(), &UiScaleNotifier::aboutToChange, this, [this] { paneWidths_ = split_->sizes(); });
+    connect(uiScaleNotifier(), &UiScaleNotifier::aboutToChange, this, [this] {
+        paneWidths_ = split_->sizes();
+        statusBar()->clearMessage(); /* see the "Zoom" message below: a message must not be showing when the status bar changes its height */
+    });
     connect(uiScaleNotifier(), &UiScaleNotifier::changed, this, [this](int percent) {
         applyChrome(); /* the composer's style sheet and the icons inside it */
         const int before = zoomApplied_; /* (the same percentage again: the desktop's font changed, and what is made from the font is made again) */
@@ -609,7 +612,15 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
         sz[1] = qMax(px(240), total - others);
         split_->setSizes(sz);
         paneWidths_.clear();
-        if (percent != before) QTimer::singleShot(0, this, [this, percent] { statusBar()->showMessage(QString("Zoom %1%").arg(percent), 2000); }); /* once the status bar has settled */
+        /* The message comes once the status bar has laid itself out again. A message replaces the status bar's own widgets by hiding them, and a status bar that is
+           formatted anew while one is showing (its height changes with the font) shows them again, on top of the message: "Zoom 175%" over the account name. */
+        if (percent != before) QTimer::singleShot(100, this, [this, percent] {
+            if (uiPercent() != percent) return;
+            statusBar()->showMessage(QString("Zoom %1%").arg(percent), 2000);
+            if (qEnvironmentVariableIsSet("VC_ZOOM_LOG")) QTimer::singleShot(50, this, [this] { /* for scripts/ui_smoke.sh: the message must be alone in the status bar */
+                qInfo("zoom: message \"%s\", own status widgets shown: %d", qUtf8Printable(statusBar()->currentMessage()), int(statusLeft_->isVisible()) + int(statusRight_->isVisible()));
+            });
+        });
     });
 
     connect(core_, &Core::event, this, &MainWindow::onEvent);

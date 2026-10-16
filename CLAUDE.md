@@ -155,6 +155,10 @@ It is Qt-only (no engine call): Qt 6 has no public way to change `QT_SCALE_FACTO
     their own again: the menu bar and the status bar stayed at 100 % and every dialog made afterwards had the unscaled font. `FontWatcher` (uiscale.cpp) sees `ApplicationFontChange` and `ThemeChange`
     on the application, waits for the event to be handled (and checks again 400 ms later, for a slower theme), puts the zoomed font back (`QApplication::setFont` without a class name also drops the per-class fonts) and, when the desktop's font really
     changed (not just lost the emoji font behind it), takes it as the new 100 %. At 100 % it touches nothing. Try with `QT_QPA_PLATFORMTHEME=qt5ct` (this machine) or KDE's.
+  * **A status bar that is formatted anew while a message is showing shows its own widgets again, on top of the message.** A message hides the normal items and clears their
+    "explicitly hidden" flag; `QStatusBar` re-formats when its height changes (every zoom changes the font), and `QLayout::addChildWidget` then queues `_q_showIfNotHidden` for every
+    item that is not explicitly hidden: "Zoom 175%" was drawn over the account name 3 ms after it appeared (seen in the user's real session, not in the first offscreen screenshots,
+    where it passed for the message timing out). The main window therefore clears the message in `aboutToChange` and shows "Zoom N%" 100 ms after `changed`, only if that zoom is still current.
   * A QTextBrowser zooms its own text on Ctrl+wheel (a font of its own that no zoom of the interface reaches): `TimelineView::eventFilter` turns it into the interface's zoom.
   * A long label without word wrap sets the window's minimum width, and the zoom made that worse (the bar above the message line grew the window to 1686 pixels for "Ready to send ..."): such labels wrap.
   * Ctrl++ is Ctrl+Shift+= on a US keyboard: the actions (`makeZoomActions`) have Qt's standard keys plus Ctrl+= and Ctrl+Shift++; they are added to the window as well as the View menu, because the menu
