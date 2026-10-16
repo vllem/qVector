@@ -14,7 +14,8 @@ onto the Rust engine. The history of the port lives in the old repository's `rus
 ## Layers
 
 ```
-qt/                  Widgets UI. Core (core.h) wraps the engine; MainWindow dispatches engine events; TimelineView draws rich text from JSON rows
+qt/                  Widgets UI. Core (core.h) wraps the engine; MainWindow dispatches engine events; TimelineView draws rich text from JSON rows;
+                     uiscale.h/.cpp is the zoom (Ctrl++ / Ctrl+- / Ctrl+0): every size written as pixels goes through px()
 core-rs/src/capi.rs  C ABI: vcr_app_new / vcr_app_call(method, json) / vcr_string_free / vcr_app_free + one event callback (header: core-rs/vector_app.h)
 core-rs/src/app.rs   the engine: App owns a tokio runtime; call() starts work, results come back as events (name, json) on any thread
 core-rs/src/ui.rs    UI-facing functions on top of matrix-sdk (rooms, messages, actions) with their tests; crypto.rs verification/recovery/sessions;
@@ -44,7 +45,7 @@ QT_QPA_PLATFORM=offscreen XDG_CONFIG_HOME=$(mktemp -d) ./build/qvector --demo --
 * **Do not set LD_LIBRARY_PATH to ~/Qt** (a Qt 6.10 install used by the dropped QtBridge experiment): the Widgets app uses the system Qt 6.8.
 * `--demo` starts the in-process fake homeserver (feature `testkit`, CMake option `VC_DEMO`) with alice (you), bob, a space, an invite, 40 history messages and a photo from bob (`--dialog picture` opens it as a click does, `--dialog nothumbs` clears the Preferences checkbox).
   Dev aids: `--room NAME --members --search T --thread T --dialog poll|saved|prefs|verify|recovery|settings --delay MS --data DIR --server URL --user U --password P
-  --verify --confirm --send-text FILE[,FILE...]` (one message per file, sent through the composer). `VC_DEMO_FONT=Family[,pixel size]` sets the font a desktop theme would give: an offscreen run only has
+  --verify --confirm --send-text FILE[,FILE...]` (one message per file, sent through the composer), `--zoom PERCENT` (start at that zoom; not remembered) and `--zoom-later PERCENT` (change it at 3/4 of `--delay`: what Ctrl++ does to what is open). `VC_DEMO_FONT=Family[,pixel size]` sets the font a desktop theme would give: an offscreen run only has
   Qt's default, and the user's session was "Ubuntu" 32 px (12 pt at 192 dpi, `Xft.dpi`). Screenshots grab the main window (or the dialog being demonstrated); popups/menus are not captured.
 * A real run signs in a *new device* on the account and needs re-verification: ask the user before pointing it at their real account. Use `core-rs/examples/fakehs.rs`
   (`cargo run -p vector-core --features testkit --example fakehs`) for a standalone fake server with alice's other session (it prints a recovery key).
@@ -126,6 +127,44 @@ heap that reuses freed memory, so they read lower (a regression of 10 MB in the 
   `/members` has everybody); `VC_DEMO_MEMBERS=N` makes the demo room a big one with N more people.
 * Not done, with what it would give: a non-PIE link (another 4 MB resident, but no ASLR for our code); `max_blocking_threads`. Qt loads all 11 image plugins (1.6 MB) at the first
   `QLineEdit::setClearButtonEnabled`, whatever the app asks of `QImageReader`.
+
+## Zoom (the size of the whole interface)
+
+View > Zoom in / Zoom out / Actual size, Ctrl++ (also Ctrl+= and the keypad's), Ctrl+-, Ctrl+0, Ctrl+wheel over the messages; 50 to 300 % in the steps of `kSteps` (uiscale.cpp); remembered in
+QSettings `ui_scale`. 100 is the desktop's own font and the numbers written in the code: **at 100 % the program draws what it drew before the zoom existed** (checked pixel for pixel
+on every window and dialog; the two changes there are on purpose: a photo is no wider than the view has room for, where the thread panel cut it off, and the bar above the message line wraps its text
+instead of making the window wider; to check a change that should leave 100 % alone: `git archive HEAD | tar -x -C DIR`, `ln -s $PWD/target DIR/target`, `cmake -S DIR -B DIR/build -DVC_CARGO=/usr/bin/true`
+(it reuses the built engine, no cargo), build, take the same `--screenshot` with both programs and `compare -metric AE`; the unread badge, the caret and the clock differ by themselves).
+It is Qt-only (no engine call): Qt 6 has no public way to change `QT_SCALE_FACTOR` while the program runs, so the zoom is **the application font times the zoom plus `px()` for every size in the code**.
+
+* **Rules for UI code.** A size in pixels (a fixed size, a margin, an icon, a picture, `width=` in the timeline's HTML, `padding:` in a style sheet) is written `px(n)`; a size in points in a style sheet or a
+  font (`setPointSizeF(16 * uiScale())`) follows `uiScale()`; a font made from the application font's size (a title 1.5 times larger: `scaledFont(QApplication::font(), 1.5)`) is **not** made once: a font
+  with a size of its own does not follow the application font (a bold or italic copy of `font()` does). Such code goes into `onUiScale(this, [..] { ... })`, which runs it now and again at every change
+  (a dialog that is made later has its sizes at once). Not scaled: lines of one pixel, what the style draws itself (scroll bars, check boxes), the tray icon. A local variable called `px` hides the function.
+* **What is made at a zoom has the zoom in its cache key** (`TimelineView::render`'s `look`): the same photo is drawn at another size. A photo is at most 480 (at the zoom) wide but never wider than
+  the view has room for next to the avatar (`pictureWidth()`: a narrow window, the thread panel and a zoom of 200 % would cut it off); a resize that changes that width draws the pictures again.
+* `UiScaleNotifier::aboutToChange` (nothing has changed yet) and `changed` (every widget has its new font). `TimelineView` notes the message at the top in `aboutToChange` (`notePlace`: the font change
+  lays the document out and moves the scroll bar by itself) and draws everything again in `changed`; it also forgets the reader's last input then (`userInput_.invalidate()`), because a document that
+  gets shorter pulls the scroll bar to its new end and `onScroll` would take that for the reader going to the end of the room and follow it from then on. The main window scales the panes' widths
+  by the ratio (taken in `aboutToChange`: a pane's new minimum width would otherwise be scaled again). Sidebar and member list make their rows again (pictures at the new size).
+* **Measured in Qt 6.4.2 (what cost time):**
+  * `QApplication::setFont()` does not give the widgets their new font before it returns (nor, in the real window, before a call queued right after it runs): `apply()` in uiscale.cpp sends
+    `ApplicationFontChange` to **every** widget itself (the windows alone are not enough: widgets below a style sheet do not take their font from their parent), and then every layout is
+    invalidated, nested ones too (a hidden widget does not tell its parent's layout that its size changed, so the sign-in page and closed panels kept the old sizes, and the window's minimum size with them).
+  * **The desktop's theme undoes it.** qt6ct sets the application font again (`QGuiApplication::setFont`) in the first iteration of the event loop and gives menus, the status bar and others fonts of
+    their own again: the menu bar and the status bar stayed at 100 % and every dialog made afterwards had the unscaled font. `FontWatcher` (uiscale.cpp) sees `ApplicationFontChange` and `ThemeChange`
+    on the application, waits for the event to be handled (and checks again 400 ms later, for a slower theme), puts the zoomed font back (`QApplication::setFont` without a class name also drops the per-class fonts) and, when the desktop's font really
+    changed (not just lost the emoji font behind it), takes it as the new 100 %. At 100 % it touches nothing. Try with `QT_QPA_PLATFORMTHEME=qt5ct` (this machine) or KDE's.
+  * A QTextBrowser zooms its own text on Ctrl+wheel (a font of its own that no zoom of the interface reaches): `TimelineView::eventFilter` turns it into the interface's zoom.
+  * A long label without word wrap sets the window's minimum width, and the zoom made that worse (the bar above the message line grew the window to 1686 pixels for "Ready to send ..."): such labels wrap.
+  * Ctrl++ is Ctrl+Shift+= on a US keyboard: the actions (`makeZoomActions`) have Qt's standard keys plus Ctrl+= and Ctrl+Shift++; they are added to the window as well as the View menu, because the menu
+    bar is hidden on the sign-in page and a shortcut needs a visible widget. The `qvector_stress` step "zoom: Ctrl++, Ctrl+=, ..." sends real key events with QTest (built when Qt's Test is installed).
+* Tests: `qvector_stress zoom` (every zoom step on a loaded room, the reader's place, Ctrl+wheel, a photo in a narrow view, sidebar / pickers / member list sizes, memory over zoom cycles, the keys).
+  The stress program now points QSettings at a temporary folder (the zoom steps change the remembered zoom). `scripts/ui_smoke.sh` runs windows and dialogs zoomed (`--zoom`, `--zoom-later`).
+* A window's first size is `pxFit(w, h)`: larger with the zoom but never beyond nine tenths of the screen, never smaller than at 100 %. Preferences, which is taller than a 1080p screen at 150 %,
+  puts its contents in a scroll area when (and only when) the zoom is above 100 % and it would not fit.
+* Not done: the style's own sizes do not scale (scroll bars, check boxes; a theme decides), dialogs that are open when the zoom changes keep their pixel sizes (fonts follow), the picture viewer keeps
+  its own zoom (+, -, 0, Ctrl+wheel there; the window's Ctrl++ is not an application-wide shortcut on purpose).
 
 ## The fake homeserver (`core-rs/src/testkit.rs`)
 

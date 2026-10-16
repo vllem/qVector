@@ -1,6 +1,7 @@
 #include "qt/emojipicker.h"
 #include "qt/imageload.h"
 #include "qt/theme.h"
+#include "qt/uiscale.h"
 #include <QFontDatabase>
 #include <QPixmap>
 #include <QGuiApplication>
@@ -14,9 +15,7 @@ namespace vc {
 EmojiPicker::EmojiPicker(QWidget *parent) : QFrame(parent, Qt::Popup)
 {
     setFrameShape(QFrame::StyledPanel);
-    setFixedSize(400, 340);
     auto *v = new QVBoxLayout(this);
-    v->setContentsMargins(4, 4, 4, 4);
     search_ = new QLineEdit;
     search_->setPlaceholderText("Search emoji");
     search_->setClearButtonEnabled(true);
@@ -30,18 +29,12 @@ EmojiPicker::EmojiPicker(QWidget *parent) : QFrame(parent, Qt::Popup)
         QStringList labels{QStringLiteral("\u2605"), QString(), QString(), QString(), QString(), QString(), QString(), QString(), QString(), QString()};
         QStringList tips{"Recently used"};
         for (int i = 0; i < groups.size() && i < 9; i++) { labels[i + 1] = QString::fromUtf8(i < 9 ? ICONS[i] : "?"); tips << groups[i]; }
-        QFont bf = font();
-        bf.setPointSize(13);
-        if (!emojiFamily().isEmpty()) bf.setFamilies({emojiFamily(), bf.family()});
         for (int i = 0; i < labels.size(); i++) {
             auto *b = new QToolButton;
             b->setText(labels[i]);
             b->setToolTip(tips[i]);
             b->setCheckable(true);
             b->setAutoRaise(true);
-            b->setFont(i == 0 ? font() : bf);
-            b->setFixedHeight(32);
-            b->setMinimumWidth(30);
             b->setToolButtonStyle(Qt::ToolButtonTextOnly);
             cats_ << b;
             row->addWidget(b);
@@ -51,9 +44,6 @@ EmojiPicker::EmojiPicker(QWidget *parent) : QFrame(parent, Qt::Popup)
         customBtn_->setToolTip("Custom emoji");
         customBtn_->setCheckable(true);
         customBtn_->setAutoRaise(true);
-        customBtn_->setFixedHeight(32);
-        customBtn_->setMinimumWidth(30);
-        customBtn_->setIconSize(QSize(22, 22));
         customBtn_->hide();
         cats_ << customBtn_;
         row->addWidget(customBtn_);
@@ -67,10 +57,10 @@ EmojiPicker::EmojiPicker(QWidget *parent) : QFrame(parent, Qt::Popup)
     grid_->setResizeMode(QListView::Adjust);
     grid_->setMovement(QListView::Static);
     grid_->setUniformItemSizes(true);
-    grid_->setSpacing(2);
     grid_->setFrameShape(QFrame::NoFrame);
     grid_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     v->addWidget(grid_, 1);
+    onUiScale(this, [this] { applyScale(); });
     connect(search_, &QLineEdit::textChanged, this, [this] { fill(); });
     connect(grid_, &QListWidget::itemClicked, this, [this](QListWidgetItem *it) {
         const QString g = it->data(Qt::UserRole).toString();
@@ -79,6 +69,24 @@ EmojiPicker::EmojiPicker(QWidget *parent) : QFrame(parent, Qt::Popup)
         emit emojiPicked(g);
         if (closeOnPick_) hide();
     });
+}
+
+void EmojiPicker::applyScale()
+{
+    setFixedSize(px(400, 340));
+    layout()->setContentsMargins(px(4), px(4), px(4), px(4));
+    grid_->setSpacing(px(2));
+    QFont bf = font(); /* the category buttons show an emoji each: 13 points, in the emoji font */
+    bf.setPointSizeF(13 * uiScale());
+    if (!emojiFamily().isEmpty()) bf.setFamilies({emojiFamily(), bf.family()});
+    for (int i = 0; i < cats_.size(); i++) {
+        QToolButton *b = cats_[i];
+        if (i > 0 && b != customBtn_) b->setFont(bf);
+        b->setFixedHeight(px(32));
+        b->setMinimumWidth(px(30));
+    }
+    customBtn_->setIconSize(px(22, 22));
+    if (isVisible()) fill();
 }
 
 /* anchor: the top-right corner of whatever opened us. The popup sits above it, right-aligned, and is kept on the screen. */
@@ -106,7 +114,7 @@ void EmojiPicker::setCustom(const QJsonArray &packs)
     customBtn_->setVisible(!custom_.isEmpty());
     QIcon icon;
     for (const QJsonObject &e : custom_) { /* the button's picture is 22 points: the file is read at that size, not kept whole */
-        const QSize box = QSize(22, 22) * devicePixelRatioF();
+        const QSize box = px(22, 22) * devicePixelRatioF();
         const QImage img = loadFitted(e["path"].toString(), box);
         if (img.isNull()) continue;
         QPixmap pm = QPixmap::fromImage(img.scaled(box, Qt::KeepAspectRatio, Qt::SmoothTransformation));
@@ -132,15 +140,15 @@ void EmojiPicker::fill()
 {
     grid_->clear();
     QFont f = grid_->font();
-    f.setPointSize(16);
+    f.setPointSizeF(16 * uiScale());
     if (!emojiFamily().isEmpty()) f.setFamilies({emojiFamily(), f.family()}); /* an emoji font first, so every glyph comes out in colour */
     grid_->setFont(f);
     grid_->setTextElideMode(Qt::ElideNone);
-    grid_->setGridSize(QSize(42, 42));
+    grid_->setGridSize(px(42, 42));
     QList<Emoji> shown;
     const QString q = search_->text().trimmed();
     auto addCustom = [&](const QJsonObject &e) {
-        const QSize box = QSize(28, 28) * devicePixelRatioF();
+        const QSize box = px(28, 28) * devicePixelRatioF();
         const QImage img = loadFitted(e["path"].toString(), box);
         if (img.isNull()) return;
         QPixmap pm = QPixmap::fromImage(img.scaled(box, Qt::KeepAspectRatio, Qt::SmoothTransformation));
@@ -151,7 +159,7 @@ void EmojiPicker::fill()
         it->setData(Qt::UserRole + 1, true);
         grid_->addItem(it);
     };
-    if (cat_ == 10 && q.isEmpty()) { grid_->setIconSize(QSize(28, 28)); for (const QJsonObject &e : custom_) addCustom(e); return; }
+    if (cat_ == 10 && q.isEmpty()) { grid_->setIconSize(px(28, 28)); for (const QJsonObject &e : custom_) addCustom(e); return; }
     grid_->setIconSize(QSize()); /* glyphs are drawn as text, nothing is reserved for an icon */
     if (!q.isEmpty()) shown = searchEmoji(q, 200);
     else if (cat_ == 0) {

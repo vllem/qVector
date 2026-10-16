@@ -29,7 +29,7 @@ private:
     bool dragging_ = false;
 };
 
-/* Qt Multimedia video with play/pause, seek bar, time and volume. The control row has a fixed height (kControlsHeight): the timeline reserves exactly
+/* Qt Multimedia video with play/pause, seek bar, time and volume. The control row has a fixed height (kControlsHeight at 100 % zoom): the timeline reserves exactly
    that much below the picture, so the controls sit inside the card. Click the picture or press Space to play/pause, Left/Right to skip 5 s, M to mute. */
 class VideoPlayer : public QWidget {
     Q_OBJECT

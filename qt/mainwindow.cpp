@@ -7,6 +7,7 @@
 #include "qt/avatar.h"
 #include "qt/imageload.h"
 #include "qt/theme.h"
+#include "qt/uiscale.h"
 #include <QApplication>
 #include <QProgressBar>
 #include <QClipboard>
@@ -19,6 +20,10 @@
 #include <QUrl>
 #include <QDir>
 #include <QFileDialog>
+#include <QGuiApplication>
+#include <QScreen>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QFrame>
 #include <QInputDialog>
 #include <QComboBox>
@@ -59,7 +64,7 @@ public:
             const QPalette &pal = tab->palette;
             p->fillRect(tab->rect, sel ? pal.color(QPalette::Highlight) : hover ? pal.color(QPalette::Midlight) : pal.color(QPalette::Window));
             if (!sel && tab->selectedPosition != QStyleOptionTab::NextIsSelected) { /* inset separator between tabs */
-                p->fillRect(QRect(tab->rect.right(), tab->rect.top() + 6, 1, tab->rect.height() - 12), line_); /* same grey as the splitter */
+                p->fillRect(QRect(tab->rect.right(), tab->rect.top() + px(6), 1, tab->rect.height() - px(12)), line_); /* same grey as the splitter */
             }
             return;
         }
@@ -97,20 +102,25 @@ void Composer::setButtons(QToolButton *left, QToolButton *right, QToolButton *be
     left_ = left;
     right_ = right;
     mid_ = beforeRight;
-    for (QToolButton *b : {left, right}) b->setIconSize(QSize(20, 20));
-    if (mid_) mid_->setIconSize(QSize(20, 20));
-    setTextMargins(28, 0, mid_ ? 58 : 28, 0);
+    onUiScale(this, [this] { placeButtons(); });
+}
+
+/* the buttons sit inside the box, the text starts after the left one and ends before the right ones */
+void Composer::placeButtons()
+{
+    if (!left_) return;
+    const int b = px(28), pad = px(5), gap = px(2), y = (height() - b) / 2;
+    for (QToolButton *t : {left_, right_, mid_}) if (t) { t->setIconSize(px(20, 20)); t->setFixedSize(b, b); }
+    setTextMargins(b, 0, mid_ ? 2 * b + gap : b, 0);
+    left_->move(pad, y);
+    right_->move(width() - pad - b, y);
+    if (mid_) mid_->move(width() - pad - b - gap - b, y);
 }
 
 void Composer::resizeEvent(QResizeEvent *e)
 {
     QLineEdit::resizeEvent(e);
-    if (!left_) return;
-    left_->setFixedSize(28, 28);
-    right_->setFixedSize(28, 28);
-    left_->move(5, (height() - 28) / 2);
-    right_->move(width() - 33, (height() - 28) / 2);
-    if (mid_) { mid_->setFixedSize(28, 28); mid_->move(width() - 63, (height() - 28) / 2); }
+    placeButtons();
 }
 
 void Composer::focusOutEvent(QFocusEvent *e)
@@ -141,7 +151,7 @@ void Composer::updatePopup()
     for (const Candidate &c : shown_) popup_->addItem(c.id.isEmpty() ? c.label : c.label + "  (" + c.id + ")");
     popup_->setCurrentRow(0);
     const int rows = qMin(int(shown_.size()), 8);
-    popup_->resize(qMax(260, width() / 2), rows * popup_->sizeHintForRow(0) + 8);
+    popup_->resize(qMax(px(260), width() / 2), rows * popup_->sizeHintForRow(0) + px(8));
     popup_->move(mapToGlobal(QPoint(0, -popup_->height() - 2)));
     popup_->show();
 }
@@ -220,7 +230,7 @@ static QString plainName(const QJsonObject &m)
 MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
 {
     setWindowTitle("qVector");
-    resize(1100, 740);
+    resize(pxFit(1100, 740)); /* larger with the zoom, not beyond the screen */
     notify_ = QSettings().value("notifications", true).toBool();
     notifier_ = new Notifier(this);
     connect(notifier_, &Notifier::activated, this, [this](const QString &id) { showNormal(); raise(); activateWindow(); openRoom(id); });
@@ -270,7 +280,7 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     tabs_->setExpanding(false);
     tabs_->setUsesScrollButtons(true);
     tabs_->setElideMode(Qt::ElideRight);
-    tabs_->setIconSize(QSize(16, 16));
+    onUiScale(this, [this] { tabs_->setIconSize(px(16, 16)); });
     tabs_->setDrawBase(false);
     plus_ = new QToolButton;
     plus_->setText("+");
@@ -283,7 +293,7 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     rv->addWidget(tabLine_);
 
     auto *bar = new QHBoxLayout;
-    bar->setContentsMargins(6, 3, 8, 3);
+    onUiScale(this, [bar] { bar->setContentsMargins(px(6), px(3), px(8), px(3)); });
     topic_ = new QLabel;
     topic_->setTextFormat(Qt::PlainText);
     topic_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
@@ -334,15 +344,18 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     pinBar_ = new QWidget;
     {
         auto *pl = new QHBoxLayout(pinBar_);
-        pl->setContentsMargins(8, 2, 8, 2);
         pinText_ = new QPushButton;
         pinText_->setFlat(true);
-        pinText_->setStyleSheet("text-align:left;padding:2px 4px");
         pinText_->setToolTip("Show the pinned message");
         pinPrev_ = new QPushButton("\u2039");
         pinNext_ = new QPushButton("\u203A");
         pinOff_ = new QPushButton("Unpin");
-        for (QPushButton *b : {pinPrev_, pinNext_}) { b->setFlat(true); b->setFixedWidth(26); }
+        for (QPushButton *b : {pinPrev_, pinNext_}) b->setFlat(true);
+        onUiScale(this, [this, pl] {
+            pl->setContentsMargins(px(8), px(2), px(8), px(2));
+            pinText_->setStyleSheet(QString("text-align:left;padding:%1px %2px").arg(px(2)).arg(px(4)));
+            for (QPushButton *b : {pinPrev_, pinNext_}) b->setFixedWidth(px(26));
+        });
         pl->addWidget(pinText_, 1);
         pl->addWidget(pinPrev_);
         pl->addWidget(pinNext_);
@@ -362,7 +375,7 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     inviteBar_ = new QWidget;
     {
         auto *ib = new QHBoxLayout(inviteBar_);
-        ib->setContentsMargins(10, 6, 10, 6);
+        onUiScale(this, [ib] { ib->setContentsMargins(px(10), px(6), px(10), px(6)); });
         auto *il = new QLabel("You have been invited to this room");
         auto *acc = new QPushButton("Accept");
         auto *dec = new QPushButton("Decline");
@@ -385,7 +398,6 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     rv->addWidget(timelines_, 1);
 
     typingLabel_ = new QLabel;
-    typingLabel_->setContentsMargins(8, 1, 8, 1);
     {
         QFont tf = typingLabel_->font();
         tf.setItalic(true);
@@ -394,14 +406,19 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
         tp.setColor(QPalette::WindowText, tp.color(QPalette::PlaceholderText));
         typingLabel_->setPalette(tp);
     }
-    typingLabel_->setFixedHeight(typingLabel_->fontMetrics().height() + 4);
+    onUiScale(this, [this] {
+        typingLabel_->setContentsMargins(px(8), px(1), px(8), px(1));
+        typingLabel_->setFixedHeight(typingLabel_->fontMetrics().height() + px(4));
+    });
     rv->addWidget(typingLabel_);
     auto *compRow = new QHBoxLayout;
-    compRow->setContentsMargins(8, 6, 8, 8);
-    compRow->setSpacing(4);
     composer_ = new Composer;
     composer_->setPlaceholderText("Send a message");
-    composer_->setMinimumHeight(48);
+    onUiScale(this, [this, compRow] {
+        compRow->setContentsMargins(px(8), px(6), px(8), px(8));
+        compRow->setSpacing(px(4));
+        composer_->setMinimumHeight(px(48));
+    });
 
     /* Attach on the left and emoji on the right, both inside the box; the icons are drawn in applyChrome in the palette's text colour. */
     attach_ = new QToolButton(composer_); /* real tool buttons: the style draws hover and pressed feedback */
@@ -430,8 +447,9 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     contextBar_ = new QWidget;
     {
         auto *cl = new QHBoxLayout(contextBar_);
-        cl->setContentsMargins(8, 3, 6, 3);
+        onUiScale(this, [cl] { cl->setContentsMargins(px(8), px(3), px(6), px(3)); });
         contextLabel_ = new QLabel;
+        contextLabel_->setWordWrap(true); /* a long line would set the window's least width (the larger the zoom, the wider it is) */
         auto *cx = new QToolButton;
         cx->setText(QStringLiteral("\u2715"));
         cx->setAutoRaise(true);
@@ -446,9 +464,10 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     attachBar_ = new QWidget;
     {
         auto *al = new QHBoxLayout(attachBar_);
-        al->setContentsMargins(8, 3, 6, 3);
+        onUiScale(this, [al] { al->setContentsMargins(px(8), px(3), px(6), px(3)); });
         attachThumb_ = new QLabel;
         attachLabel_ = new QLabel;
+        attachLabel_->setWordWrap(true);
         auto *ax = new QToolButton;
         ax->setText(QStringLiteral("\u2715"));
         ax->setAutoRaise(true);
@@ -476,7 +495,7 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
         tl->setContentsMargins(0, 0, 0, 0);
         tl->setSpacing(0);
         auto *head = new QHBoxLayout;
-        head->setContentsMargins(8, 4, 4, 4);
+        onUiScale(this, [head] { head->setContentsMargins(px(8), px(4), px(4), px(4)); });
         threadTitle_ = new QLabel("Thread");
         QFont tf = threadTitle_->font();
         tf.setBold(true);
@@ -493,9 +512,8 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
         threadInput_ = new QLineEdit;
         threadInput_->setPlaceholderText("Reply in thread");
         threadInput_->setFrame(false);
-        threadInput_->setContentsMargins(6, 4, 6, 4);
+        onUiScale(this, [this] { threadInput_->setContentsMargins(px(6), px(4), px(6), px(4)); threadPanel_->setMinimumWidth(px(260)); });
         tl->addWidget(threadInput_);
-        threadPanel_->setMinimumWidth(260);
         threadPanel_->hide();
         connect(close, &QToolButton::clicked, this, [this] { closeThread(); });
         connect(threadInput_, &QLineEdit::returnPressed, this, [this] { sendThreadReply(); });
@@ -509,7 +527,7 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     split_->setStretchFactor(2, 0);
     split_->setStretchFactor(3, 0);
     split_->setStretchFactor(4, 0);
-    split_->setSizes({210, 890, 0, 0, 0});
+    split_->setSizes({px(210), px(890), 0, 0, 0});
     connect(searchPanel_, &SearchPanel::closeRequested, this, [this] { searchPanel_->hide(); layoutPanes(); composer_->setFocus(); });
     connect(searchPanel_, &SearchPanel::jumpRequested, this, &MainWindow::jumpTo);
     connect(searchPanel_, &SearchPanel::searchRequested, this, [this](const QString &term, bool all) { core_->call(all ? "search_all" : "search_messages", {{"query", term}}); });
@@ -538,9 +556,7 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     statusBar()->setSizeGripEnabled(false);
     statusSep1_ = new QFrame;
     statusSep2_ = new QFrame;
-    for (QFrame *f : {statusSep1_, statusSep2_}) { f->setFrameShape(QFrame::NoFrame); f->setFixedSize(1, 16); }
-    statusLeft_->setContentsMargins(6, 0, 6, 0);
-    statusRight_->setContentsMargins(6, 0, 6, 0);
+    for (QFrame *f : {statusSep1_, statusSep2_}) f->setFrameShape(QFrame::NoFrame);
     statusBar()->addWidget(statusLeft_);
     statusBar()->addWidget(statusSep1_);
     statusBar()->addWidget(statusRight_);
@@ -550,14 +566,11 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     statusBar()->addWidget(new QWidget, 1);
     statusSep3_ = new QFrame;
     statusSep3_->setFrameShape(QFrame::NoFrame);
-    statusSep3_->setFixedSize(1, 16);
     statusClock_ = new QLabel;
-    statusClock_->setContentsMargins(0, 0, 8, 0);
     sendLabel_ = new QLabel("Sending...");
     sendBar_ = new QProgressBar;
     sendBar_->setRange(0, 0); /* moving, no percentage: the size of a send is not known */
     sendBar_->setTextVisible(false);
-    sendBar_->setFixedSize(110, 10);
     sendTimeout_ = new QTimer(this);
     sendTimeout_->setSingleShot(true);
     connect(sendTimeout_, &QTimer::timeout, this, &MainWindow::stopSending);
@@ -567,12 +580,37 @@ MainWindow::MainWindow(Core *core, bool demo) : core_(core), demo_(demo)
     statusBar()->addPermanentWidget(sendBar_);
     statusBar()->addPermanentWidget(statusSep3_);
     statusBar()->addPermanentWidget(statusClock_);
+    onUiScale(this, [this] {
+        for (QFrame *f : {statusSep1_, statusSep2_, statusSep3_}) f->setFixedSize(1, px(16));
+        statusLeft_->setContentsMargins(px(6), 0, px(6), 0);
+        statusRight_->setContentsMargins(px(6), 0, px(6), 0);
+        statusClock_->setContentsMargins(0, 0, px(8), 0);
+        sendBar_->setFixedSize(px(110), px(10));
+    });
     clockTimer_ = new QTimer(this);
     clockTimer_->setSingleShot(true);
     connect(clockTimer_, &QTimer::timeout, this, &MainWindow::updateClock);
     updateClock();
     applyChrome();
     buildMenus();
+    zoomApplied_ = uiPercent();
+    /* The panes keep their widths in the zoom's own units: the room list and the side panels grow and shrink with it, the messages take what is left. The widths
+       are taken before the change: the panes' minimum widths change with it, and a pane that is made wider by that must not be scaled again. */
+    connect(uiScaleNotifier(), &UiScaleNotifier::aboutToChange, this, [this] { paneWidths_ = split_->sizes(); });
+    connect(uiScaleNotifier(), &UiScaleNotifier::changed, this, [this](int percent) {
+        applyChrome(); /* the composer's style sheet and the icons inside it */
+        const int before = zoomApplied_; /* (the same percentage again: the desktop's font changed, and what is made from the font is made again) */
+        const double r = double(percent) / qMax(1, before);
+        zoomApplied_ = percent;
+        QList<int> sz = paneWidths_.size() == split_->count() ? paneWidths_ : split_->sizes();
+        int total = 0, others = 0;
+        for (int v : sz) total += v;
+        for (int i : {0, 2, 3, 4}) { sz[i] = qRound(sz[i] * r); others += sz[i]; }
+        sz[1] = qMax(px(240), total - others);
+        split_->setSizes(sz);
+        paneWidths_.clear();
+        if (percent != before) QTimer::singleShot(0, this, [this, percent] { statusBar()->showMessage(QString("Zoom %1%").arg(percent), 2000); }); /* once the status bar has settled */
+    });
 
     connect(core_, &Core::event, this, &MainWindow::onEvent);
     connect(sidebar_, &Sidebar::roomActivated, this, [this](const QString &id) { openRoom(id); });
@@ -698,6 +736,12 @@ void MainWindow::buildMenus()
     view->addAction("Member list", QKeySequence("Ctrl+M"), this, [this] { toggleMembers(); });
     view->addAction("Next tab", QKeySequence("Ctrl+Tab"), this, [this] { if (tabs_->count()) tabs_->setCurrentIndex((tabs_->currentIndex() + 1) % tabs_->count()); });
     view->addSeparator();
+    {   /* Ctrl++, Ctrl+-, Ctrl+0: the size of the whole interface (uiscale.h). Also on the window itself: the menu bar is hidden on the sign-in page, and a shortcut needs a visible widget. */
+        const ZoomActions zoom = makeZoomActions(this);
+        view->addActions({zoom.in, zoom.out, zoom.reset});
+        addActions({zoom.in, zoom.out, zoom.reset});
+    }
+    view->addSeparator();
     actNotify_ = view->addAction("Desktop notifications");
     actNotify_->setCheckable(true);
     actNotify_->setChecked(notify_);
@@ -787,17 +831,19 @@ void MainWindow::applyChrome()
     statusLine_->setStyleSheet(QString("background: %1;").arg(line.name()));
     for (QFrame *f : {statusSep1_, statusSep2_, statusSep3_}) f->setStyleSheet(QString("background: %1;").arg(line.name()));
     for (QFrame *f : {tabLine_, topicLine_, pinLine_}) f->setStyleSheet(QString("background: %1;").arg(line.name()));
-    composer_->setStyleSheet(QString("QLineEdit { border: 1px solid %1; border-radius: 4px; padding: 6px 10px; background: palette(base); color: palette(text); font-size: 11pt; }"
-                                     "QLineEdit:focus { border-color: palette(highlight); }").arg(line.name()));
-    banner_->setStyleSheet(QString("background:%1;color:%2;padding:3px 8px").arg(pal.color(QPalette::ToolTipBase).name(), pal.color(QPalette::ToolTipText).name()));
+    composer_->setStyleSheet(QString("QLineEdit { border: 1px solid %1; border-radius: %2px; padding: %3px %4px; background: palette(base); color: palette(text); font-size: %5pt; }"
+                                     "QLineEdit:focus { border-color: palette(highlight); }").arg(line.name()).arg(px(4)).arg(px(6)).arg(px(10)).arg(11 * uiScale(), 0, 'f', 1)); /* the zoom: a font with a size of its own is not scaled with the application font */
+    banner_->setStyleSheet(QString("background:%1;color:%2;padding:%3px %4px").arg(pal.color(QPalette::ToolTipBase).name(), pal.color(QPalette::ToolTipText).name()).arg(px(3)).arg(px(8)));
     {
+        /* drawn in a square of 24 units, at the zoom's size and the screen's resolution (twice at least: the icon is shown a little smaller than that) */
+        const qreal dpr = qMax(2.0, devicePixelRatioF());
+        const int dev = qRound(px(24) * dpr);
         auto draw = [&](bool smiley) {
-            const int px = 48;
-            QPixmap pm(px, px);
+            QPixmap pm(dev, dev);
             pm.fill(Qt::transparent);
             QPainter p(&pm);
             p.setRenderHint(QPainter::Antialiasing);
-            p.scale(px / 24.0, px / 24.0);
+            p.scale(dev / 24.0, dev / 24.0);
             p.setPen(Qt::NoPen);
             p.setBrush(pal.color(QPalette::WindowText));
             QPainterPath ring;
@@ -818,17 +864,17 @@ void MainWindow::applyChrome()
                 p.drawRect(QRectF(11, 7, 2, 10));
                 p.drawRect(QRectF(7, 11, 10, 2));
             }
-            pm.setDevicePixelRatio(2.0);
+            pm.setDevicePixelRatio(dpr);
             return QIcon(pm);
         };
         attach_->setIcon(draw(false));
         emojiBtn_->setIcon(draw(true));
         {   /* a square with a folded corner: stickers */
-            QPixmap pm(48, 48);
+            QPixmap pm(dev, dev);
             pm.fill(Qt::transparent);
             QPainter p(&pm);
             p.setRenderHint(QPainter::Antialiasing);
-            p.scale(2.0, 2.0);
+            p.scale(dev / 24.0, dev / 24.0);
             p.setPen(QPen(pal.color(QPalette::WindowText), 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
             p.setBrush(Qt::NoBrush);
             QPainterPath sq;
@@ -838,7 +884,7 @@ void MainWindow::applyChrome()
             QPainterPath fold;
             fold.moveTo(13, 20); fold.lineTo(13, 14.5); fold.quadTo(13, 13, 14.5, 13); fold.lineTo(20, 13);
             p.drawPath(fold);
-            pm.setDevicePixelRatio(2.0);
+            pm.setDevicePixelRatio(dpr);
             stickerBtn_->setIcon(QIcon(pm));
         }
     }
@@ -1267,8 +1313,9 @@ void MainWindow::stageFiles(const QStringList &paths)
     if (pending_.size() == 1) {
         const QFileInfo fi(pending_[0]);
         what = fi.fileName() + " (" + QLocale().formattedDataSize(fi.size()) + ")";
-        const QImage img = loadFitted(pending_[0], QSize(48, 48)); /* only a 48 pixel thumbnail is wanted: a 50-megapixel photo is not decoded for it */
-        if (!img.isNull()) attachThumb_->setPixmap(QPixmap::fromImage(img.scaled(48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+        const QSize box = px(48, 48);
+        const QImage img = loadFitted(pending_[0], box); /* only a 48 pixel thumbnail is wanted: a 50-megapixel photo is not decoded for it */
+        if (!img.isNull()) attachThumb_->setPixmap(QPixmap::fromImage(img.scaled(box, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
         else attachThumb_->clear();
     } else {
         what = QString::number(pending_.size()) + " files as one message";
@@ -1378,9 +1425,9 @@ void MainWindow::layoutPanes()
     const bool m = memberList_->isVisible(), t = threadPanel_->isVisible(), f = searchPanel_->isVisible();
     int total = 0;
     for (int v : sz) total += v;
-    const int side = sidebar_->isVisible() ? qMax(180, sz.value(0)) : 0;
-    const int mem = m ? 190 : 0, thr = t ? 320 : 0, srch = f ? 320 : 0;
-    split_->setSizes({side, qMax(240, total - side - mem - thr - srch), mem, thr, srch});
+    const int side = sidebar_->isVisible() ? qMax(px(180), sz.value(0)) : 0;
+    const int mem = m ? px(190) : 0, thr = t ? px(320) : 0, srch = f ? px(320) : 0;
+    split_->setSizes({side, qMax(px(240), total - side - mem - thr - srch), mem, thr, srch});
 }
 
 void MainWindow::openThread(const QString &rootId)
@@ -1598,6 +1645,26 @@ void MainWindow::showPreferences()
     close->setDefault(true);
     connect(close, &QPushButton::clicked, dlg, &QDialog::accept);
     v->addWidget(close, 0, Qt::AlignRight);
+    /* With a zoom above 100 % the dialog can be taller than the screen, and its bottom could not be reached: then everything in it scrolls. (At 100 % it is as it was.) */
+    const QScreen *screen = QGuiApplication::primaryScreen();
+    const int room = screen ? int(screen->availableGeometry().height() * 0.9) : 0;
+    if (uiPercent() > 100 && room > 0 && dlg->sizeHint().height() > room) {
+        auto *page = new QWidget;
+        auto *inner = new QVBoxLayout(page);
+        while (QLayoutItem *item = v->takeAt(0)) { /* the group boxes and the button: addWidget makes them children of the page (addItem would not) */
+            if (QWidget *w = item->widget()) { inner->addWidget(w, 0, item->alignment()); delete item; }
+            else inner->addItem(item);
+        }
+        delete v;
+        auto *outer = new QVBoxLayout(dlg);
+        outer->setContentsMargins(0, 0, 0, 0);
+        auto *scroll = new QScrollArea;
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setWidget(page);
+        outer->addWidget(scroll);
+        dlg->resize(page->sizeHint().width() + scroll->verticalScrollBar()->sizeHint().width(), room);
+    }
     dlg->show();
 }
 

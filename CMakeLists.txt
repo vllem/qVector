@@ -72,7 +72,7 @@ endif()
 find_package(Qt6 REQUIRED COMPONENTS ${VC_QT_COMPONENTS})
 
 set(VC_QT_SOURCES
-  qt/main.cpp qt/core.cpp qt/theme.cpp qt/avatar.cpp qt/imageload.cpp qt/videoplayer.cpp qt/audioplayer.cpp qt/loginpage.cpp qt/sidebar.cpp qt/emoji.cpp qt/emojipicker.cpp qt/packpicker.cpp
+  qt/main.cpp qt/core.cpp qt/theme.cpp qt/uiscale.cpp qt/avatar.cpp qt/imageload.cpp qt/videoplayer.cpp qt/audioplayer.cpp qt/loginpage.cpp qt/sidebar.cpp qt/emoji.cpp qt/emojipicker.cpp qt/packpicker.cpp
   qt/timelineview.cpp qt/notifier.cpp qt/memberlist.cpp qt/searchpanel.cpp qt/dialogs.cpp qt/conversations.cpp qt/mainwindow.cpp)
 add_executable(qvector ${VC_QT_SOURCES})
 target_include_directories(qvector PRIVATE ${CMAKE_SOURCE_DIR})
@@ -95,10 +95,16 @@ if(UNIX AND NOT APPLE)
 endif()
 
 # Torture test for the widgets (not built by default): cmake --build build --target qvector_stress
-add_executable(qvector_stress EXCLUDE_FROM_ALL qt/stress_main.cpp qt/core.cpp qt/theme.cpp qt/avatar.cpp qt/imageload.cpp qt/videoplayer.cpp qt/audioplayer.cpp qt/sidebar.cpp qt/emoji.cpp
+add_executable(qvector_stress EXCLUDE_FROM_ALL qt/stress_main.cpp qt/core.cpp qt/theme.cpp qt/uiscale.cpp qt/avatar.cpp qt/imageload.cpp qt/videoplayer.cpp qt/audioplayer.cpp qt/sidebar.cpp qt/emoji.cpp
   qt/emojipicker.cpp qt/packpicker.cpp qt/timelineview.cpp qt/memberlist.cpp qt/notifier.cpp)
 target_include_directories(qvector_stress PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(qvector_stress PRIVATE vc_rust Qt6::Widgets Qt6::Multimedia Qt6::MultimediaWidgets)
+# the zoom's key presses are sent with QTest (part of Qt's development files; a build without it only skips that step)
+find_package(Qt6 QUIET OPTIONAL_COMPONENTS Test)
+if(TARGET Qt6::Test)
+  target_link_libraries(qvector_stress PRIVATE Qt6::Test)
+  target_compile_definitions(qvector_stress PRIVATE VC_HAVE_QTEST)
+endif()
 if(UNIX AND NOT APPLE)
   target_link_libraries(qvector_stress PRIVATE Qt6::DBus)
   target_link_options(qvector_stress PRIVATE -Wl,--gc-sections)

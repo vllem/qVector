@@ -44,7 +44,7 @@ static QString S(const QJsonObject &o, const char *k) { return o.value(QLatin1St
 SavedDialog::SavedDialog(Core *core, QWidget *parent) : QDialog(parent), core_(core)
 {
     setWindowTitle("Saved messages");
-    resize(620, 440);
+    resize(pxFit(620, 440));
     auto *v = new QVBoxLayout(this);
     list_ = new QListWidget;
     list_->setWordWrap(true);
@@ -95,14 +95,14 @@ void SavedDialog::setBookmarks(const QJsonArray &list)
 PollDialog::PollDialog(Core *core, QWidget *parent) : QDialog(parent)
 {
     setWindowTitle("Create poll");
-    setMinimumWidth(460);
+    setMinimumWidth(px(460));
     auto *v = new QVBoxLayout(this);
     auto *question = new QLineEdit;
     question->setPlaceholderText("Question");
     v->addWidget(question);
     auto *answers = new QPlainTextEdit;
     answers->setPlaceholderText("One answer per line (2 to 20)");
-    answers->setMinimumHeight(110);
+    answers->setMinimumHeight(px(110));
     v->addWidget(answers);
     auto *several = new QCheckBox("Allow choosing several answers");
     v->addWidget(several);
@@ -134,7 +134,7 @@ PollDialog::PollDialog(Core *core, QWidget *parent) : QDialog(parent)
 RecoveryDialog::RecoveryDialog(Core *core, bool create, QWidget *parent) : QDialog(parent), core_(core), create_(create)
 {
     setWindowTitle(create ? "Set up recovery" : "Enter recovery key");
-    setMinimumWidth(540);
+    setMinimumWidth(px(540));
     auto *v = new QVBoxLayout(this);
     info_ = new QLabel(create ? "Creates a recovery key for this account (and a backup of your message keys). With it, any new session can read your old encrypted messages. "
                                 "Your server may ask for your account password."
@@ -203,10 +203,8 @@ void RecoveryDialog::setState(const QJsonObject &s)
 VerifyDialog::VerifyDialog(Core *core, QWidget *parent) : QDialog(parent), core_(core)
 {
     setWindowTitle("Verification");
-    setMinimumWidth(600);
     lay_ = new QVBoxLayout(this);
-    lay_->setContentsMargins(20, 18, 20, 18);
-    lay_->setSpacing(12);
+    onUiScale(this, [this] { setMinimumWidth(px(600)); lay_->setContentsMargins(px(20), px(18), px(20), px(18)); lay_->setSpacing(px(12)); });
     me_ = core->call("account_info").toObject()["user_id"].toString();
 }
 
@@ -264,7 +262,7 @@ void CallDialog::ring(const QString &state, bool incoming)
 
 GroupTiles::GroupTiles(QWidget *parent) : QWidget(parent)
 {
-    setMinimumSize(420, 280);
+    onUiScale(this, [this] { setMinimumSize(px(420, 280)); update(); });
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 }
 
@@ -283,7 +281,7 @@ void GroupTiles::paintEvent(QPaintEvent *)
     p.fillRect(rect(), QColor(24, 24, 28));
     const int count = people_.size() + 1; /* and ourselves */
     const int cols = qCeil(qSqrt(double(count))), rows = qCeil(double(count) / cols);
-    const int gap = 6, tw = (width() - gap * (cols + 1)) / cols, th = (height() - gap * (rows + 1)) / rows;
+    const int gap = px(6), tw = (width() - gap * (cols + 1)) / cols, th = (height() - gap * (rows + 1)) / rows;
     p.setRenderHint(QPainter::SmoothPixmapTransform);
     auto tile = [&](int i, const QString &name, const QImage &img, const QString &note) {
         const QRect r(gap + (i % cols) * (tw + gap), gap + (i / cols) * (th + gap), tw, th);
@@ -293,10 +291,11 @@ void GroupTiles::paintEvent(QPaintEvent *)
             p.drawImage(QRect(r.center() - QPoint(s.width() / 2, s.height() / 2), s), img);
         }
         if (!note.isEmpty()) { p.setPen(QColor(200, 200, 205)); p.drawText(r, Qt::AlignCenter, note); }
-        const QRect bar(r.left(), r.bottom() - 22, r.width(), 22);
+        const int barH = px(22), inset = px(8);
+        const QRect bar(r.left(), r.bottom() - barH, r.width(), barH);
         p.fillRect(bar, QColor(0, 0, 0, 140));
         p.setPen(Qt::white);
-        p.drawText(bar.adjusted(8, 0, -8, 0), Qt::AlignVCenter | Qt::AlignLeft, p.fontMetrics().elidedText(name, Qt::ElideRight, bar.width() - 16));
+        p.drawText(bar.adjusted(inset, 0, -inset, 0), Qt::AlignVCenter | Qt::AlignLeft, p.fontMetrics().elidedText(name, Qt::ElideRight, bar.width() - 2 * inset));
     };
     int i = 0;
     for (const QJsonValue &v : people_) {
@@ -313,13 +312,14 @@ GroupCallDialog::GroupCallDialog(Core *core, QWidget *parent) : QDialog(parent),
 {
     setWindowTitle("Group call");
     auto *lay = new QVBoxLayout(this);
-    lay->setContentsMargins(20, 18, 20, 16);
-    lay->setSpacing(10);
     title_ = new QLabel;
-    QFont f = title_->font();
-    f.setPointSizeF(f.pointSizeF() * 1.3);
-    f.setBold(true);
-    title_->setFont(f);
+    onUiScale(this, [this, lay] {
+        lay->setContentsMargins(px(20), px(18), px(20), px(16));
+        lay->setSpacing(px(10));
+        QFont f = scaledFont(QApplication::font(), 1.3); /* a size of its own: made again when the zoom changes */
+        f.setBold(true);
+        title_->setFont(f);
+    });
     title_->setAlignment(Qt::AlignCenter);
     lay->addWidget(title_);
     tiles_ = new GroupTiles;
@@ -428,7 +428,7 @@ void GroupCallDialog::closeEvent(QCloseEvent *ev)
 
 CallVideo::CallVideo(QWidget *parent) : QWidget(parent)
 {
-    setMinimumSize(360, 240);
+    onUiScale(this, [this] { setMinimumSize(px(360, 240)); update(); });
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 }
 
@@ -446,9 +446,9 @@ void CallVideo::paintEvent(QPaintEvent *)
         p.drawText(rect(), Qt::AlignCenter, note_);
     }
     if (!local_.isNull()) {
-        const int w = qMin(180, width() / 3);
+        const int w = qMin(px(180), width() / 3), edge = px(10);
         const QSize s = local_.size().scaled(w, w, Qt::KeepAspectRatio);
-        const QRect r(QPoint(width() - s.width() - 10, height() - s.height() - 10), s);
+        const QRect r(QPoint(width() - s.width() - edge, height() - s.height() - edge), s);
         p.drawImage(r, local_);
         p.setPen(QPen(QColor(255, 255, 255, 160), 1));
         p.drawRect(r.adjusted(0, 0, -1, -1));
@@ -458,15 +458,16 @@ void CallVideo::paintEvent(QPaintEvent *)
 CallDialog::CallDialog(Core *core, QWidget *parent) : QDialog(parent), core_(core)
 {
     setWindowTitle("Voice call");
-    setMinimumWidth(340);
     auto *lay = new QVBoxLayout(this);
-    lay->setContentsMargins(24, 22, 24, 20);
-    lay->setSpacing(10);
     name_ = new QLabel;
-    QFont f = name_->font();
-    f.setPointSizeF(f.pointSizeF() * 1.5);
-    f.setBold(true);
-    name_->setFont(f);
+    onUiScale(this, [this, lay] {
+        setMinimumWidth(px(hasVideo_ ? 560 : 340));
+        lay->setContentsMargins(px(24), px(22), px(24), px(20));
+        lay->setSpacing(px(10));
+        QFont f = scaledFont(QApplication::font(), 1.5); /* a size of its own: made again when the zoom changes */
+        f.setBold(true);
+        name_->setFont(f);
+    });
     name_->setAlignment(Qt::AlignCenter);
     status_ = new QLabel;
     status_->setAlignment(Qt::AlignCenter);
@@ -641,7 +642,7 @@ void CallDialog::setState(const QJsonObject &s)
     addVideo_->setVisible(!hasVideo_ && st == "connected");
     if (st == "incoming" || st == "outgoing") { gotRemote_ = false; video_->setRemote(QImage()); camera_->setChecked(false); share_->setChecked(false); }
     if (hasVideo_) {
-        setMinimumWidth(560);
+        setMinimumWidth(px(560));
         video_->setNote(!live ? QString() : !remoteShows_ ? name_->text() + "'s camera is off" : gotRemote_ ? QString() : "Waiting for the picture...");
     }
     hangup_->setText(st == "incoming" ? "Decline" : "Hang up");
@@ -706,8 +707,7 @@ void VerifyDialog::setState(const QJsonObject &s)
         lay_->addLayout(row);
     };
     auto *title = new QLabel(own ? "Verify this session" : "Verify " + user);
-    QFont tf = title->font();
-    tf.setPointSizeF(tf.pointSizeF() * 1.4);
+    QFont tf = scaledFont(QApplication::font(), 1.4); /* the window is built again for every step, so the zoom is picked up there */
     tf.setBold(true);
     title->setFont(tf);
     lay_->addWidget(title);
@@ -755,7 +755,7 @@ void VerifyDialog::setState(const QJsonObject &s)
             auto *col = new QVBoxLayout;
             auto *el = new QLabel(e.at(0).toString());
             QFont f = el->font();
-            f.setPointSize(30);
+            f.setPointSizeF(30 * uiScale());
             if (!emojiFamily().isEmpty()) f.setFamilies({emojiFamily(), f.family()});
             el->setFont(f);
             el->setAlignment(Qt::AlignCenter);
@@ -792,7 +792,7 @@ ImageViewer::ImageViewer(const QString &path, const QString &name, QWidget *pare
     QImageReader rd(path);
     rd.setAutoTransform(true);
     image_ = rd.read();
-    resize(900, 640);
+    resize(pxFit(900, 640));
     auto *v = new QVBoxLayout(this);
     v->setContentsMargins(0, 0, 0, 0);
     v->setSpacing(0);
@@ -810,7 +810,7 @@ ImageViewer::ImageViewer(const QString &path, const QString &name, QWidget *pare
     spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     bar->addWidget(spacer);
     info_ = new QLabel;
-    info_->setContentsMargins(0, 0, 8, 0);
+    onUiScale(this, [this] { info_->setContentsMargins(0, 0, px(8), 0); });
     bar->addWidget(info_);
     v->addWidget(bar);
     label_ = new QLabel("Loading...");
@@ -882,7 +882,7 @@ void ImageViewer::render()
 TextViewer::TextViewer(const QString &name, const QString &text, qint64 size, bool truncated, QWidget *parent) : QDialog(parent)
 {
     setWindowTitle(name.isEmpty() ? QString("Text file") : QFileInfo(name).fileName());
-    resize(820, 620);
+    resize(pxFit(820, 620));
     auto *v = new QVBoxLayout(this);
     v->setContentsMargins(0, 0, 0, 0);
     v->setSpacing(0);
@@ -892,7 +892,7 @@ TextViewer::TextViewer(const QString &name, const QString &text, qint64 size, bo
     bar->addAction("Save as...", this, [this] { emit saveRequested(); })->setToolTip("Save the file");
     auto *edit = new QPlainTextEdit;
     edit->setReadOnly(true);
-    edit->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    onUiScale(edit, [edit] { edit->setFont(scaledFont(QFontDatabase::systemFont(QFontDatabase::FixedFont), uiScale())); });
     edit->setLineWrapMode(QPlainTextEdit::NoWrap);
     edit->setPlainText(text);
     edit->setFrameShape(QFrame::NoFrame);
@@ -905,7 +905,7 @@ TextViewer::TextViewer(const QString &name, const QString &text, qint64 size, bo
     auto *find = new QLineEdit;
     find->setPlaceholderText("Find");
     find->setClearButtonEnabled(true);
-    find->setMaximumWidth(220);
+    onUiScale(find, [find] { find->setMaximumWidth(px(220)); });
     bar->addWidget(find);
     connect(find, &QLineEdit::returnPressed, edit, [edit, find] { if (!edit->find(find->text())) { edit->moveCursor(QTextCursor::Start); edit->find(find->text()); } }); /* Enter: next hit, wrapping around */
     auto *spacer = new QWidget;
@@ -913,7 +913,7 @@ TextViewer::TextViewer(const QString &name, const QString &text, qint64 size, bo
     bar->addWidget(spacer);
     const int lines = text.count('\n') + (text.isEmpty() || text.endsWith('\n') ? 0 : 1);
     auto *info = new QLabel(QString("%1 lines   %2%3").arg(lines).arg(size < 1024 ? QString::number(size) + " B" : size < 1024 * 1024 ? QString::number((size + 1023) / 1024) + " KB" : QString::number(double(size) / (1024 * 1024), 'f', 1) + " MB", truncated ? "   (only the start is shown)" : QString()));
-    info->setContentsMargins(0, 0, 8, 0);
+    onUiScale(info, [info] { info->setContentsMargins(0, 0, px(8), 0); });
     bar->addWidget(info);
     v->addWidget(bar);
     v->addWidget(edit, 1);
@@ -925,7 +925,7 @@ TextViewer::TextViewer(const QString &name, const QString &text, qint64 size, bo
 RoomSettingsDialog::RoomSettingsDialog(Core *core, const QJsonObject &d, QWidget *parent) : QDialog(parent)
 {
     setWindowTitle("Room settings");
-    setMinimumWidth(440);
+    setMinimumWidth(px(440));
     auto *v = new QVBoxLayout(this);
     auto *form = new QFormLayout;
     auto *name = new QLineEdit(S(d, "name")), *topic = new QLineEdit(S(d, "topic"));

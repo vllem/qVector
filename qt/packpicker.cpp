@@ -1,6 +1,7 @@
 #include "qt/packpicker.h"
 #include "qt/avatar.h"
 #include "qt/imageload.h"
+#include "qt/uiscale.h"
 #include <QGuiApplication>
 #include <QPixmap>
 #include <QScreen>
@@ -13,20 +14,15 @@ static QString S(const QJsonObject &o, const char *k) { return o.value(QLatin1St
 PackPicker::PackPicker(QWidget *parent) : QFrame(parent, Qt::Popup)
 {
     setFrameShape(QFrame::StyledPanel);
-    setFixedSize(380, 320);
     auto *v = new QVBoxLayout(this);
-    v->setContentsMargins(4, 4, 4, 4);
     pack_ = new QComboBox;
     grid_ = new QListWidget;
     grid_->setViewMode(QListView::IconMode);
     grid_->setResizeMode(QListView::Adjust);
     grid_->setMovement(QListView::Static);
     grid_->setUniformItemSizes(true);
-    grid_->setSpacing(2);
     grid_->setFrameShape(QFrame::NoFrame);
     grid_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    grid_->setIconSize(QSize(80, 80));
-    grid_->setGridSize(QSize(92, 92));
     empty_ = new QLabel("No stickers here. Rooms and accounts can have sticker packs (MSC2545).");
     empty_->setWordWrap(true);
     empty_->setAlignment(Qt::AlignCenter);
@@ -34,6 +30,15 @@ PackPicker::PackPicker(QWidget *parent) : QFrame(parent, Qt::Popup)
     v->addWidget(pack_);
     v->addWidget(grid_, 1);
     v->addWidget(empty_, 1);
+    onUiScale(this, [this, v] {
+        setFixedSize(px(380, 320));
+        v->setContentsMargins(px(4), px(4), px(4), px(4));
+        grid_->setSpacing(px(2));
+        grid_->setIconSize(px(80, 80));
+        grid_->setGridSize(px(92, 92));
+        stale_ = true; /* the pictures are drawn again at the new size, when the popup opens */
+        if (isVisible()) fill();
+    });
     connect(pack_, &QComboBox::currentIndexChanged, this, [this] { stale_ = true; if (isVisible()) fill(); });
     connect(grid_, &QListWidget::itemClicked, this, [this](QListWidgetItem *it) {
         emit picked(it->data(Qt::UserRole).toJsonValue().toObject());
@@ -70,7 +75,7 @@ void PackPicker::fill()
     grid_->clear();
     const QJsonObject pack = pack_->currentData().toJsonValue().toObject();
     const QPalette pal = palette();
-    const int size = 80;
+    const int size = px(80);
     for (const QJsonValue &v : pack["emotes"].toArray()) {
         const QJsonObject e = v.toObject();
         if (!e["sticker"].toBool()) continue;

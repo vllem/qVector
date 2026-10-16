@@ -1,5 +1,6 @@
 #include "qt/searchpanel.h"
 #include "qt/theme.h"
+#include "qt/uiscale.h"
 #include <QDateTime>
 #include <QJsonObject>
 #include <QHBoxLayout>
@@ -15,7 +16,7 @@ SearchPanel::SearchPanel(QWidget *parent) : QWidget(parent)
     v->setContentsMargins(0, 0, 0, 0);
     v->setSpacing(0);
     auto *head = new QHBoxLayout;
-    head->setContentsMargins(8, 4, 4, 4);
+    onUiScale(this, [head] { head->setContentsMargins(px(8), px(4), px(4), px(4)); });
     auto *title = new QLabel("Search");
     QFont f = title->font();
     f.setBold(true);
@@ -34,7 +35,7 @@ SearchPanel::SearchPanel(QWidget *parent) : QWidget(parent)
     input_ = new QLineEdit;
     input_->setPlaceholderText("Search messages");
     input_->setClearButtonEnabled(true);
-    input_->setContentsMargins(4, 2, 4, 2);
+    onUiScale(this, [this] { input_->setContentsMargins(px(4), px(2), px(4), px(2)); });
     v->addWidget(input_);
     list_ = new QListWidget;
     list_->setFrameShape(QFrame::NoFrame);
@@ -42,10 +43,9 @@ SearchPanel::SearchPanel(QWidget *parent) : QWidget(parent)
     list_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     v->addWidget(list_, 1);
     status_ = new QLabel;
-    status_->setContentsMargins(8, 3, 8, 3);
+    onUiScale(this, [this] { status_->setContentsMargins(px(8), px(3), px(8), px(3)); setMinimumWidth(px(280)); });
     status_->setWordWrap(true);
     v->addWidget(status_);
-    setMinimumWidth(280);
     (void)new QShortcut(Qt::Key_Escape, this, [this] { emit closeRequested(); }, Qt::WidgetWithChildrenShortcut);
     debounce_.setSingleShot(true);
     connect(&debounce_, &QTimer::timeout, this, [this] { search(); });

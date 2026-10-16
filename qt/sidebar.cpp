@@ -3,6 +3,7 @@
 #include "qt/avatar.h"
 #include <QJsonObject>
 #include "qt/theme.h"
+#include "qt/uiscale.h"
 #include <QApplication>
 #include <QElapsedTimer>
 #include <QHeaderView>
@@ -23,7 +24,7 @@ public:
     QSize sizeHint(const QStyleOptionViewItem &o, const QModelIndex &i) const override
     {
         QSize s = QStyledItemDelegate::sizeHint(o, i);
-        s.setHeight(i.data(RoleSection).isValid() || i.data(RoleRoom).isValid() ? 24 : 28);
+        s.setHeight(px(i.data(RoleSection).isValid() || i.data(RoleRoom).isValid() ? 24 : 28));
         return s;
     }
     void paint(QPainter *p, const QStyleOptionViewItem &o, const QModelIndex &i) const override
@@ -35,12 +36,11 @@ public:
         bool invite = i.data(RoleInvite).toBool();
         if (n <= 0 && !invite) return;
         QString t = invite ? QStringLiteral("invite") : n > 99 ? QStringLiteral("99+") : QString::number(n);
-        QFont f = o.font;
-        f.setPointSizeF(f.pointSizeF() * 0.85);
+        QFont f = scaledFont(o.font, 0.85);
         f.setBold(true);
         QFontMetrics fm(f);
-        int w = qMax(fm.horizontalAdvance(t) + 12, 20), h = fm.height() + 2;
-        QRect r(o.rect.right() - w - 6, o.rect.center().y() - h / 2, w, h);
+        int w = qMax(fm.horizontalAdvance(t) + px(12), px(20)), h = fm.height() + px(2);
+        QRect r(o.rect.right() - w - px(6), o.rect.center().y() - h / 2, w, h);
         p->save();
         p->setRenderHint(QPainter::Antialiasing);
         p->setBrush(i.data(RoleHighlight).toBool() ? QColor(0xc0, 0x4a, 0x4a) : QColor(0x4f, 0x74, 0x9c));
@@ -65,8 +65,11 @@ Sidebar::Sidebar(QWidget *parent) : QTreeWidget(parent)
     setItemDelegate(new Delegate(this));
     setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     setTextElideMode(Qt::ElideRight);
-    setMinimumWidth(170);
-    setIconSize(QSize(18, 18));
+    onUiScale(this, [this] { setMinimumWidth(px(170)); setIconSize(px(18, 18)); });
+    connect(uiScaleNotifier(), &UiScaleNotifier::changed, this, [this] { /* the rows and their pictures are made at the new size */
+        sig_.clear(); shape_.clear();
+        refresh(rooms_, current_, workspace_);
+    });
     setContextMenuPolicy(Qt::CustomContextMenu);
     connect(this, &QWidget::customContextMenuRequested, this, [this](const QPoint &pos) {
         QTreeWidgetItem *it = itemAt(pos);
@@ -222,7 +225,7 @@ void Sidebar::refresh(const QJsonArray &rooms, const QString &current, const QSt
         it->setData(0, RoleUnread, unread);
         it->setData(0, RoleHighlight, r["highlight"].toBool());
         it->setData(0, RoleInvite, invite);
-        it->setIcon(0, QIcon(profilePixmap(r["avatar_path"].toString(), id, title, 18, dpr, pal))); /* every room has a picture: its own avatar, or its initial on a colour */
+        it->setIcon(0, QIcon(profilePixmap(r["avatar_path"].toString(), id, title, px(18), dpr, pal))); /* every room has a picture: its own avatar, or its initial on a colour */
         if (unread == 0 && !invite) it->setForeground(0, pal.color(QPalette::PlaceholderText));
         if (id == current) it->setSelected(true);
     }

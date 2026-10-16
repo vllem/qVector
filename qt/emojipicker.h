@@ -24,6 +24,7 @@ signals:
     void customPicked(const QString &shortcode); /* a custom emoji: insert :shortcode: */
 private:
     void fill();
+    void applyScale(); /* sizes and fonts that are written in points and pixels: made when the picker is, and again when the zoom changes */
     QLineEdit *search_;
     QList<QToolButton *> cats_;   /* category buttons, all always visible: recent and the nine groups */
     int cat_ = 0;

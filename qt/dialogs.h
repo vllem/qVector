@@ -2,6 +2,7 @@
 #define VC_QT_DIALOGS_H
 
 #include "qt/core.h"
+#include "qt/uiscale.h"
 #include <QDialog>
 #include <QElapsedTimer>
 #include <QTimer>
@@ -84,7 +85,7 @@ public:
     void setRemote(const QImage &img) { remote_ = img; update(); }
     void setLocal(const QImage &img) { local_ = img; update(); }
     void setNote(const QString &note) { note_ = note; update(); }
-    QSize sizeHint() const override { return QSize(560, 360); }
+    QSize sizeHint() const override { return px(560, 360); }
 protected:
     void paintEvent(QPaintEvent *) override;
 private:
@@ -100,7 +101,7 @@ public:
     void setPeople(const QJsonArray &people);   /* [{user_id, name, connected, remote_video}] */
     void setFrame(const QString &who, const QImage &img) { frames_[who] = img; update(); }
     void setLocal(const QImage &img) { local_ = img; update(); }
-    QSize sizeHint() const override { return QSize(640, 400); }
+    QSize sizeHint() const override { return px(640, 400); }
 protected:
     void paintEvent(QPaintEvent *) override;
 private:

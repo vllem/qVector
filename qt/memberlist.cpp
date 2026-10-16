@@ -1,5 +1,6 @@
 #include "qt/memberlist.h"
 #include "qt/avatar.h"
+#include "qt/uiscale.h"
 #include <QApplication>
 #include <QClipboard>
 #include <QHideEvent>
@@ -14,9 +15,12 @@ namespace vc {
 MemberList::MemberList(QWidget *parent) : QListWidget(parent)
 {
     setFrameShape(QFrame::NoFrame);
-    setIconSize(QSize(22, 22));
     setSelectionMode(QAbstractItemView::NoSelection);
-    setMinimumWidth(150);
+    onUiScale(this, [this] { setIconSize(px(22, 22)); setMinimumWidth(px(150)); });
+    connect(uiScaleNotifier(), &UiScaleNotifier::changed, this, [this] { /* the pictures are made at the new size (a list that is not shown holds no people: it fills when it is) */
+        sig_.clear();
+        if (isVisible() && !last_.isEmpty()) refresh(last_);
+    });
     setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     setContextMenuPolicy(Qt::CustomContextMenu);
     connect(this, &QWidget::customContextMenuRequested, this, [this](const QPoint &pos) {
@@ -93,20 +97,22 @@ void MemberList::decorate(QListWidgetItem *it, const QJsonObject &m, bool banned
 {
     const QPalette pal = palette();
     const QString id = m["user_id"].toString(), name = m["name"].toString();
-    QPixmap pic = profilePixmap(m["avatar_path"].toString(), id, name, 22, devicePixelRatioF(), pal);
+    const int side = px(22);
+    const qreal k = side / 22.0; /* the dot below is drawn for a picture of 22 */
+    QPixmap pic = profilePixmap(m["avatar_path"].toString(), id, name, side, devicePixelRatioF(), pal);
     const bool verified = m["verified"].toBool();
     if (verified) { /* a small shield in the corner of the picture */
         QPainter pp(&pic);
-        pp.drawPixmap(QPointF(0, 0), shieldPixmap(0, 11, devicePixelRatioF()));
+        pp.drawPixmap(QPointF(0, 0), shieldPixmap(0, px(11), devicePixelRatioF()));
     }
     const QString state = presence_[id].toString();
     if (!banned && (state == "online" || state == "unavailable")) { /* a coloured dot in the lower right corner of the picture */
         QPainter pp(&pic);
         pp.setRenderHint(QPainter::Antialiasing);
-        const qreal r = 4.5, c = 22 - r - 0.5;
-        pp.setPen(QPen(pal.color(QPalette::Base), 1.6));
+        const qreal r = 4.5 * k, c = side - r - 0.5 * k;
+        pp.setPen(QPen(pal.color(QPalette::Base), 1.6 * k));
         pp.setBrush(state == "online" ? QColor("#2e9e4f") : QColor("#d89a1c"));
-        pp.drawEllipse(QPointF(c, c), r - 0.8, r - 0.8);
+        pp.drawEllipse(QPointF(c, c), r - 0.8 * k, r - 0.8 * k);
     }
     it->setIcon(QIcon(pic));
     it->setText(name);

@@ -26,6 +26,9 @@ bool isDark(const QPalette &pal);
 /* the colour emoji font the app found or loaded (empty if none): used wherever emoji are drawn */
 QString emojiFamily();
 void setEmojiFamily(const QString &family);
+/* `f` with the colour emoji font behind its own family (named by its real name: the default "Sans Serif" is only an alias, which would be skipped and let the
+   emoji font draw digits and spaces); `f` itself when there is no emoji font */
+QFont withEmojiFallback(const QFont &f);
 
 /* How dates and times of messages are written (Preferences > Timestamps). Qt format strings, e.g. "dd/MM/yyyy" and "HH:mm". */
 QString dateFormat();

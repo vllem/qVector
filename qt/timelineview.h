@@ -72,6 +72,8 @@ private:
     void showEarlier(); /* the reader reached the top of the document: 100 more messages above it (past kWindowMax the newest go) */
     void showLater();   /* ... the bottom of a document that stops short of the newest message: 100 more below it (the oldest go) */
     void applyStyle();
+    void notePlace();       /* before the scale changes: the message at the top of the view, to put it back there afterwards */
+    int pictureWidth() const; /* how wide a photo may be drawn: 480 (at the zoom) or, in a narrow view, what fits next to the avatar */
     void contextMenu(const QPoint &pos);
     void render();
     void stopInline();
@@ -106,6 +108,9 @@ private:
     QStringList lastChunks_, rowEvents_;
     QVector<int> chunkRowStart_;
     QString lastStyle_;
+    QString keptTop_;                    /* notePlace(): the message at the top of the view ... */
+    int keptDelta_ = 0, keptPercent_ = 100; /* ... how far into it the view was, and the zoom that was measured at */
+    int lastPictureW_ = 0;               /* pictureWidth() at the last redraw: a resize that changes it draws the pictures again */
     QElapsedTimer lastRender_, userInput_;
     bool renderQueued_ = false;
     int hiddenLocal_ = 0, shownEnd_ = 0, fitFetches_ = 0;

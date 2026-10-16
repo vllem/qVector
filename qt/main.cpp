@@ -2,6 +2,7 @@
 #include "qt/emoji.h"
 #include "qt/mainwindow.h"
 #include "qt/theme.h"
+#include "qt/uiscale.h"
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QCoreApplication>
@@ -34,11 +35,8 @@ static void ensureEmojiFont()
     vc::setEmojiFamily(family);
     /* The normal font first (by its real name: the default "Sans Serif" is only an alias and would be skipped, letting the emoji font
        draw digits and spaces), the emoji font behind it, so emoji codepoints come out in colour everywhere. */
-    QFont f = QApplication::font();
-    const QString base = QFontInfo(f).family();
-    f.setFamilies({base, family});
-    QApplication::setFont(f);
-    qInfo("font: application font is \"%s\" with \"%s\" for emoji", qUtf8Printable(base), qUtf8Printable(family));
+    QApplication::setFont(vc::withEmojiFallback(QApplication::font()));
+    qInfo("font: application font is \"%s\" with \"%s\" for emoji", qUtf8Printable(QFontInfo(QApplication::font()).family()), qUtf8Printable(family));
 }
 
 
@@ -90,9 +88,11 @@ int main(int argc, char **argv)
         confirmOpt("confirm", "Confirm a verification by itself."),
         threadOpt("thread", "Open the thread of the message with this text.", "text"),
         searchOpt("search", "Search the room for this text.", "text"),
+        zoomOpt("zoom", "Start at this zoom in percent (50 to 300) instead of the remembered one; it is remembered once it is changed.", "percent"),
+        zoomLaterOpt("zoom-later", "Change the zoom to this percentage at three quarters of --delay, as pressing Ctrl++ does (to see what a change does to what is open).", "percent"),
         iconsOpt("write-icons", "Write the application icon as icon-<size>.png into a directory and quit (packaging).", "dir");
     cli.addOptions({demoOpt, shotOpt, delayOpt, roomOpt, dataOpt, dialogOpt, membersOpt, serverOpt, userOpt, passwordOpt, sendFileOpt, sendTextOpt, verifyOpt,
-                    confirmOpt, threadOpt, searchOpt, iconsOpt});
+                    confirmOpt, threadOpt, searchOpt, zoomOpt, zoomLaterOpt, iconsOpt});
     if (!cli.parse(app.arguments())) qWarning("%s", qUtf8Printable(cli.errorText()));
     if (cli.isSet(helpOpt)) cli.showHelp();
     if (cli.isSet(iconsOpt)) {
@@ -112,6 +112,7 @@ int main(int argc, char **argv)
         QApplication::setFont(f);
     }
     ensureEmojiFont();
+    vc::initUiScale(cli.value(zoomOpt).toInt()); /* after the font is chosen: the zoom (View menu, Ctrl++ / Ctrl+-) scales that one */
     app.setWindowIcon(vc::appIcon());
     app.setQuitOnLastWindowClosed(false); /* the tray icon may keep us running; closeEvent decides */
     if (dataDir.isEmpty()) dataDir = qEnvironmentVariable("VECTOR_DATA", QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/account");
@@ -139,6 +140,7 @@ int main(int argc, char **argv)
             sentAt += 1200;
         }
         if (members) QTimer::singleShot(delay / 2 + 500, &w, [&] { w.membersForDemo(); });
+        if (cli.value(zoomLaterOpt).toInt() > 0) QTimer::singleShot(delay * 3 / 4, &w, [&] { vc::setUiPercent(cli.value(zoomLaterOpt).toInt()); });
         if (!search.isEmpty()) QTimer::singleShot(delay / 2 + 500, &w, [&] { w.searchForDemo(search); });
         if (!dialog.isEmpty()) QTimer::singleShot(delay / 2 + 500, &w, [&] { w.dialogForDemo(dialog); });
         if (!shot.isEmpty()) QTimer::singleShot(delay, &app, [&] {

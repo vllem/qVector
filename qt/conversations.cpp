@@ -1,5 +1,6 @@
 #include "qt/conversations.h"
 #include "qt/avatar.h"
+#include "qt/uiscale.h"
 #include <QDateTime>
 #include <QFormLayout>
 #include <QHBoxLayout>
@@ -24,13 +25,13 @@ static bool looksLikeUserId(const QString &s)
 StartDmDialog::StartDmDialog(Core *core, QWidget *parent) : QDialog(parent), core_(core)
 {
     setWindowTitle("Start a direct message");
-    setMinimumWidth(440);
+    setMinimumWidth(px(440));
     auto *v = new QVBoxLayout(this);
     who_ = new QLineEdit;
     who_->setPlaceholderText("Name, or a full Matrix id such as @alice:example.org");
     hits_ = new QListWidget;
-    hits_->setIconSize(QSize(28, 28));
-    hits_->setMinimumHeight(180);
+    hits_->setIconSize(px(28, 28));
+    hits_->setMinimumHeight(px(180));
     go_ = new QPushButton("Start chat");
     go_->setDefault(true);
     go_->setEnabled(false);
@@ -69,7 +70,7 @@ void StartDmDialog::rebuild()
     hits_->clear();
     const QPalette pal = palette();
     if (looksLikeUserId(typed)) { /* an id typed in full can always be used, found or not */
-        auto *it = new QListWidgetItem(QIcon(profilePixmap(QString(), typed, typed, 28, devicePixelRatioF(), pal)), typed);
+        auto *it = new QListWidgetItem(QIcon(profilePixmap(QString(), typed, typed, px(28), devicePixelRatioF(), pal)), typed);
         it->setData(Qt::UserRole, typed);
         hits_->addItem(it);
     }
@@ -77,7 +78,7 @@ void StartDmDialog::rebuild()
         const QJsonObject h = v.toObject();
         const QString id = S(h, "user_id"), name = S(h, "name");
         if (id == typed) continue;
-        auto *it = new QListWidgetItem(QIcon(profilePixmap(S(h, "avatar_path"), id, name.isEmpty() ? id : name, 28, devicePixelRatioF(), pal)), name.isEmpty() ? id : name + "  (" + id + ")");
+        auto *it = new QListWidgetItem(QIcon(profilePixmap(S(h, "avatar_path"), id, name.isEmpty() ? id : name, px(28), devicePixelRatioF(), pal)), name.isEmpty() ? id : name + "  (" + id + ")");
         it->setData(Qt::UserRole, id);
         hits_->addItem(it);
     }
@@ -91,7 +92,7 @@ void StartDmDialog::rebuild()
 CreateRoomDialog::CreateRoomDialog(Core *core, QWidget *parent) : QDialog(parent)
 {
     setWindowTitle("Create a room");
-    setMinimumWidth(440);
+    setMinimumWidth(px(440));
     auto *form = new QFormLayout;
     auto *name = new QLineEdit, *topic = new QLineEdit, *invites = new QLineEdit;
     auto *pub = new QCheckBox("Public room (listed in the room directory, anyone can join)");
@@ -126,20 +127,20 @@ CreateRoomDialog::CreateRoomDialog(Core *core, QWidget *parent) : QDialog(parent
 BrowseRoomsDialog::BrowseRoomsDialog(Core *core, QWidget *parent, const QString &spaceId) : QDialog(parent), core_(core), spaceId_(spaceId)
 {
     setWindowTitle(spaceId.isEmpty() ? "Browse public rooms" : "Rooms in this space");
-    resize(560, 460);
+    resize(pxFit(560, 460));
     auto *v = new QVBoxLayout(this);
     auto *row = new QHBoxLayout;
     term_ = new QLineEdit;
     term_->setPlaceholderText("Search rooms");
     server_ = new QLineEdit;
     server_->setPlaceholderText("server (default: yours)");
-    server_->setMaximumWidth(190);
+    server_->setMaximumWidth(px(190));
     auto *find = new QPushButton("Search");
     row->addWidget(term_, 1);
     row->addWidget(server_);
     row->addWidget(find);
     list_ = new QListWidget;
-    list_->setIconSize(QSize(32, 32));
+    list_->setIconSize(px(32, 32));
     status_ = new QLabel;
     join_ = new QPushButton("Join");
     join_->setEnabled(false);
@@ -149,7 +150,7 @@ BrowseRoomsDialog::BrowseRoomsDialog(Core *core, QWidget *parent, const QString 
     bottom->addWidget(status_, 1);
     bottom->addWidget(join_);
     v->addLayout(bottom);
-    if (!spaceId.isEmpty()) { term_->hide(); server_->hide(); find->setText("Refresh"); find->setMaximumWidth(110); row->insertStretch(0, 1); }
+    if (!spaceId.isEmpty()) { term_->hide(); server_->hide(); find->setText("Refresh"); find->setMaximumWidth(px(110)); row->insertStretch(0, 1); }
     connect(find, &QPushButton::clicked, this, [this] { search(); });
     connect(term_, &QLineEdit::returnPressed, this, [this] { search(); });
     connect(server_, &QLineEdit::returnPressed, this, [this] { search(); });
@@ -185,7 +186,7 @@ void BrowseRoomsDialog::setRooms(const QJsonArray &rooms)
     for (const QJsonValue &v : rooms) {
         const QJsonObject d = v.toObject();
         const QString title = !S(d, "name").isEmpty() ? S(d, "name") : !S(d, "alias").isEmpty() ? S(d, "alias") : S(d, "room_id");
-        auto *it = new QListWidgetItem(QIcon(profilePixmap(QString(), S(d, "room_id"), title, 32, devicePixelRatioF(), pal)),
+        auto *it = new QListWidgetItem(QIcon(profilePixmap(QString(), S(d, "room_id"), title, px(32), devicePixelRatioF(), pal)),
                                        QString("%1  -  %2 members%3\n%4").arg(title).arg(d["members"].toInt()).arg(d["joined"].toBool() ? "  -  joined" : QString()).arg(S(d, "topic").simplified().left(120)));
         it->setData(Qt::UserRole + 2, d["joined"].toBool());
         if (d["joined"].toBool()) it->setForeground(pal.color(QPalette::PlaceholderText));
@@ -201,7 +202,7 @@ void BrowseRoomsDialog::setRooms(const QJsonArray &rooms)
 ForwardDialog::ForwardDialog(Core *core, const QJsonArray &rooms, const QString &eventId, QWidget *parent) : QDialog(parent)
 {
     setWindowTitle("Forward message");
-    setMinimumSize(380, 420);
+    setMinimumSize(px(380, 420));
     auto *v = new QVBoxLayout(this);
     auto *filter = new QLineEdit;
     filter->setPlaceholderText("Search rooms and people");
@@ -240,7 +241,7 @@ void showEditHistory(QWidget *parent, const QJsonArray &revisions)
     auto *dlg = new QDialog(parent);
     dlg->setAttribute(Qt::WA_DeleteOnClose);
     dlg->setWindowTitle("Edit history");
-    dlg->resize(480, 340);
+    dlg->resize(pxFit(480, 340));
     auto *v = new QVBoxLayout(dlg);
     auto *tb = new QTextBrowser;
     QString html;

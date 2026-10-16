@@ -1,6 +1,7 @@
 #include "qt/theme.h"
 #include <QDir>
 #include <QFile>
+#include <QFontInfo>
 #include <QPainter>
 #include <QPainterPath>
 #include <QStyle>
@@ -45,6 +46,14 @@ QColor onHighlight(const QPalette &pal)
 static QString g_emojiFamily;
 QString emojiFamily() { return g_emojiFamily; }
 void setEmojiFamily(const QString &f) { g_emojiFamily = f; }
+
+QFont withEmojiFallback(const QFont &f)
+{
+    if (g_emojiFamily.isEmpty()) return f;
+    QFont out(f);
+    out.setFamilies({QFontInfo(f).family(), g_emojiFamily});
+    return out;
+}
 
 
 /* a rounded blue square with a white V; with unread messages a red badge with the count */

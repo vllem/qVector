@@ -63,6 +63,7 @@ private:
     QToolButton *left_ = nullptr, *right_ = nullptr, *mid_ = nullptr;
     void updatePopup();
     void acceptCandidate();
+    void placeButtons();
     QListWidget *popup_;
     QList<Candidate> shown_;
     int tokenStart_ = -1;
@@ -218,6 +219,8 @@ private:
     QString current_, replyTo_, editing_, reactEvent_;
     QList<QPair<QString, QString>> mentioned_; /* (user id, "@name") picked from the composer popup since the last send */
     QString user_, workspace_;
+    int zoomApplied_ = 100; /* the zoom the panes' widths are in (they are scaled by the ratio when it changes) */
+    QList<int> paneWidths_; /* the splitter's sizes just before a zoom change */
     QJsonArray rooms_;
     QJsonObject details_, session_;
     QString membersAsked_; /* the room whose whole member list was last asked for */

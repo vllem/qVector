@@ -8,7 +8,9 @@ trap 'rm -rf "$out"' EXIT
 mkdir -p "$out/cfg"
 export QT_QPA_PLATFORM=offscreen XDG_CONFIG_HOME="$out/cfg" XDG_CACHE_HOME="$out/cache" XDG_DATA_HOME="$out/data"
 fail=0
-for args in "" "--members" "--search message" "--thread Hello" "--dialog poll" "--dialog saved" "--dialog prefs" "--dialog verify" "--dialog recovery" "--dialog settings" "--dialog explore" "--dialog verifyqr" "--dialog call" "--dialog callon" "--dialog videocall" "--dialog videooff" "--dialog group" "--dialog picture" "--dialog nothumbs" "--dialog paste" "--dialog source"; do
+# the last ones are zoomed (--zoom: from the start; --zoom-later: changed while the window or dialog is open, as Ctrl++ does)
+for args in "" "--members" "--search message" "--thread Hello" "--dialog poll" "--dialog saved" "--dialog prefs" "--dialog verify" "--dialog recovery" "--dialog settings" "--dialog explore" "--dialog verifyqr" "--dialog call" "--dialog callon" "--dialog videocall" "--dialog videooff" "--dialog group" "--dialog picture" "--dialog nothumbs" "--dialog paste" "--dialog source" \
+            "--zoom 150" "--zoom 75 --members" "--zoom 200 --thread Hello" "--zoom 150 --search message" "--zoom 125 --dialog prefs" "--zoom 150 --dialog call" "--zoom 150 --dialog group" "--zoom 125 --dialog picture" "--zoom-later 150 --dialog saved" "--zoom-later 67 --members"; do
     log="$out/log"
     # shellcheck disable=SC2086
     if ! timeout 120 "$bin" --demo --data "$out/data" --room bob --delay 20000 $args --screenshot "$out/shot.png" >"$log" 2>&1; then echo "FAILED ($args): exit status"; tail -5 "$log"; fail=1; continue; fi

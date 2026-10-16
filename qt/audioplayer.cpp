@@ -1,6 +1,7 @@
 #include "audioplayer.h"
 
 #include "qt/theme.h"
+#include "qt/uiscale.h"
 #include <QAudioBuffer>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -26,7 +27,7 @@ static QString clock(qint64 ms)
 
 WaveformView::WaveformView(QWidget *parent) : QWidget(parent)
 {
-    setMinimumHeight(90);
+    onUiScale(this, [this] { setMinimumHeight(px(90)); update(); });
     setCursor(Qt::PointingHandCursor);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 }
@@ -47,11 +48,11 @@ void WaveformView::paintEvent(QPaintEvent *)
     const QPalette &pal = palette();
     const QColor playedTop = pal.color(QPalette::Highlight), playedLow = blend(playedTop, pal.color(QPalette::Window), 0.45);
     const QColor restTop = blend(pal.color(QPalette::WindowText), pal.color(QPalette::Window), 0.2), restLow = blend(pal.color(QPalette::WindowText), pal.color(QPalette::Window), 0.65);
-    const int barW = 2, gap = 1, step = barW + gap;
+    const int barW = qMax(1, px(2)), gap = qMax(1, px(1)), step = barW + gap;
     const int n = qMax(1, width() / step);
     const double base = height() * 0.70; /* the baseline */
     const double up = base - 2, down = (height() - base) - 1;
-    const int px = int(progress_ * width());
+    const int playedX = int(progress_ * width());
     for (int i = 0; i < n; i++) {
         float v = 0.03f; /* a thin line while the file is still being read */
         if (!peaks_.isEmpty()) {
@@ -61,7 +62,7 @@ void WaveformView::paintEvent(QPaintEvent *)
             v = qMax(0.03f, cnt ? float(sum / cnt) : 0.0f);
         }
         const int x = i * step;
-        const bool done = x + barW <= px;
+        const bool done = x + barW <= playedX;
         const double hu = qMax(1.0, v * up), hl = qMax(1.0, v * down * 0.75);
         p.fillRect(QRectF(x, base - hu, barW, hu), done ? playedTop : restTop);
         p.fillRect(QRectF(x, base + 1, barW, hl), done ? playedLow : restLow);
@@ -80,12 +81,10 @@ AudioPlayer::AudioPlayer(const QString &path, const QString &title, QWidget *par
     auto *name = new QLabel(title, this);
     QFont f = name->font(); f.setBold(true); name->setFont(f);
     wave_ = new WaveformView(this);
-    wave_->setMinimumHeight(110);
     status_ = new QLabel(this);
     status_->setEnabled(false);
     v->addWidget(name);
     art_ = new QLabel(this); /* cover art from the file's tags, left of the waveform; hidden when there is none */
-    art_->setFixedSize(110, 110);
     art_->setAlignment(Qt::AlignCenter);
     art_->hide();
     auto *top = new QHBoxLayout;
@@ -94,11 +93,9 @@ AudioPlayer::AudioPlayer(const QString &path, const QString &title, QWidget *par
     v->addLayout(top, 1);
     auto *row = new QHBoxLayout;
     btn_ = new QToolButton(this);
-    btn_->setIconSize(QSize(24, 24));
     time_ = new QLabel("0:00 / 0:00", this);
     volume_ = new QSlider(Qt::Horizontal, this);
     volume_->setRange(0, 100);
-    volume_->setFixedWidth(90);
     volume_->setToolTip("Volume");
     row->addWidget(btn_);
     row->addWidget(time_);
@@ -125,7 +122,7 @@ AudioPlayer::AudioPlayer(const QString &path, const QString &title, QWidget *par
         QImage img = md.value(QMediaMetaData::ThumbnailImage).value<QImage>();
         if (img.isNull()) img = md.value(QMediaMetaData::CoverArtImage).value<QImage>();
         if (img.isNull()) return;
-        QPixmap pm = QPixmap::fromImage(img.scaled(QSize(110, 110) * devicePixelRatioF(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        QPixmap pm = QPixmap::fromImage(img.scaled(px(110, 110) * devicePixelRatioF(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
         pm.setDevicePixelRatio(devicePixelRatioF());
         art_->setPixmap(pm);
         art_->show();
@@ -147,8 +144,17 @@ AudioPlayer::AudioPlayer(const QString &path, const QString &title, QWidget *par
     connect(decoder_, qOverload<QAudioDecoder::Error>(&QAudioDecoder::error), this, [this](QAudioDecoder::Error) { wave_->setPeaks(peaks_, true); });
     decoder_->setSource(QUrl::fromLocalFile(path));
     decoder_->start();
-    resize(560, minimumSizeHint().height());
-    setFixedHeight(minimumSizeHint().height()); /* as short as the layout allows, and only the width can be changed (the cover art is no taller than the waveform, so showing it later does not change this) */
+    onUiScale(this, [this] {
+        wave_->setMinimumHeight(px(110));
+        art_->setFixedSize(px(110, 110));
+        btn_->setIconSize(px(24, 24));
+        volume_->setFixedWidth(px(90));
+        setMinimumHeight(0); /* the height is worked out again, whatever it was fixed to */
+        setMaximumHeight(QWIDGETSIZE_MAX);
+        layout()->activate();
+        setFixedHeight(minimumSizeHint().height()); /* as short as the layout allows, and only the width can be changed (the cover art is no taller than the waveform, so showing it later does not change this) */
+    });
+    resize(pxFit(560, 0).width(), minimumSizeHint().height());
     refresh();
     player_->play(); /* clicked to be heard */
 }

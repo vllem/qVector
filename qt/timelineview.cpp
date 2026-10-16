@@ -3,6 +3,7 @@
 #include "qt/emoji.h"
 #include "qt/imageload.h"
 #include "qt/theme.h"
+#include "qt/uiscale.h"
 #include <QAbstractTextDocumentLayout>
 #include <QApplication>
 #include <QBuffer>
@@ -101,9 +102,9 @@ static void frameImage(QImage &img, const QColor &bg, qreal dpr)
     const int sx = qMax(1, img.width() / 16), sy = qMax(1, img.height() / 16);
     for (int y = 0; y < img.height(); y += sy)
         for (int x = 0; x < img.width(); x += sx) {
-            const QColor px = img.pixelColor(x, y);
-            if (px.alpha() < 128) continue;
-            r += px.red(); g += px.green(); b += px.blue(); n++;
+            const QColor c = img.pixelColor(x, y);
+            if (c.alpha() < 128) continue;
+            r += c.red(); g += c.green(); b += c.blue(); n++;
         }
     const QColor avg = n ? QColor(int(r / n), int(g / n), int(b / n)) : bg;
     QColor c(255 - avg.red(), 255 - avg.green(), 255 - avg.blue());
@@ -145,7 +146,6 @@ TimelineView::TimelineView(bool thread, QWidget *parent) : QWidget(parent), thre
     view_->setOpenLinks(false);
     view_->setFrameShape(QFrame::NoFrame);
     view_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff); /* messages wrap; a scrollbar for the whole room because of one wide message is never what is wanted */
-    view_->document()->setDocumentMargin(6);
     applyStyle();
     v->addWidget(view_, 1);
     connect(view_, &QTextBrowser::anchorClicked, this, &TimelineView::onAnchor);
@@ -164,6 +164,13 @@ TimelineView::TimelineView(bool thread, QWidget *parent) : QWidget(parent), thre
     view_->viewport()->installEventFilter(this);
     view_->verticalScrollBar()->installEventFilter(this);
     view_->installEventFilter(this);
+    /* The zoom changes the sizes of everything in the HTML (avatars, pictures, spacing) and of the text: the room is drawn again from the top, and the
+       reader keeps their place (the message at the top of the view is noted before the font changes: the layout moves the scroll bar by itself). */
+    connect(uiScaleNotifier(), &UiScaleNotifier::aboutToChange, this, [this] { notePlace(); });
+    connect(uiScaleNotifier(), &UiScaleNotifier::changed, this, [this] {
+        lastState_.clear(); lastChunks_.clear();
+        refresh();
+    });
 }
 
 static const int kMaxShownChars = 20000;
@@ -247,6 +254,8 @@ QJsonObject TimelineView::row(const QString &eventId) const
    "the reader went to the top" is what made the view load more, redraw and jump while a chat was being opened. */
 bool TimelineView::eventFilter(QObject *obj, QEvent *ev)
 {
+    /* Ctrl+wheel zooms the whole interface (as in a browser). QTextBrowser would zoom its own text, with a font of its own that no later zoom of the interface reaches. */
+    if (ev->type() == QEvent::Wheel && obj == view_->viewport() && uiZoomByWheel(static_cast<QWheelEvent *>(ev))) return true;
     switch (ev->type()) {
     case QEvent::Wheel: case QEvent::MouseButtonPress: case QEvent::KeyPress: case QEvent::TouchBegin: case QEvent::TouchUpdate:
         userInput_.start();
@@ -374,19 +383,30 @@ void TimelineView::render()
     QString topEvent;
     int delta = 0;
     if (!stick_) {
-        for (int y : {2, 14, 30, 60, 100}) { topEvent = eventAt(QPoint(24, y)); if (!topEvent.isEmpty()) break; }
-        if (!topEvent.isEmpty()) delta = view_->verticalScrollBar()->value() - anchorY(topEvent);
+        if (!keptTop_.isEmpty()) { /* the zoom changed it (notePlace): that message, and how far into it the view was, in the new size */
+            topEvent = keptTop_;
+            delta = keptDelta_ * uiPercent() / qMax(1, keptPercent_);
+        } else {
+            for (int y : {2, 14, 30, 60, 100}) { topEvent = eventAt(QPoint(24, y)); if (!topEvent.isEmpty()) break; }
+            if (!topEvent.isEmpty()) delta = view_->verticalScrollBar()->value() - anchorY(topEvent);
+        }
     }
+    keptTop_.clear();
     const QPalette pal = palette();
     const QString muted = hex(pal.color(QPalette::PlaceholderText)), link = hex(pal.color(QPalette::Link));
     QTextDocument *doc = view_->document();
     const qreal dpr = devicePixelRatioF();
-    /* A picture is drawn small: a photo at most 480 x 320, a sticker 160, a link's picture 96, a custom emoji as high as text. The file is decoded
-       straight to that size, the finished picture (scaled, framed) is kept for the next redraw (every new message redraws the pictures in view)
-       and nothing else of it: it used to be a 1200 pixel copy of every file ever shown, and a redraw scaled them all again. The cache only has to
-       hold what is in view now plus some pictures of rooms visited lately: its limit follows what this redraw used. */
+    /* A picture is drawn small: a photo at most 480 x 320, a sticker 160, a link's picture 96, a custom emoji as high as text (at 100 % zoom; a photo is never
+       wider than the view has room for: pictureWidth()). The file is decoded straight to that size, the finished picture (scaled, framed) is kept for the
+       next redraw (every new message redraws the pictures in view) and nothing else of it: it used to be a 1200 pixel copy of every file ever shown, and a
+       redraw scaled them all again. The cache only has to hold what is in view now plus some pictures of rooms visited lately: its limit follows what this
+       redraw used. */
     const QColor base = pal.color(QPalette::Base);
-    const QString look = QString::number(dpr) + QChar(1) + base.name();
+    const QString look = QString::number(dpr) + QChar(1) + base.name() + QChar(1) + QString::number(uiPercent()); /* the same file is drawn at another size when the zoom changes */
+    const qreal ks = dpr * uiScale(); /* device pixels for one unit of the sizes written below */
+    const int photoW = pictureWidth();
+    lastPictureW_ = photoW;
+    const QString pad6 = QString::number(px(6)) + "px";
     qint64 drawnBytes = 0;
     drawn_.setMaxCost(kMaxDrawnBytes); /* never evict what this redraw has just made */
     /* a redraw that decoded files has made (and freed) buffers of megabytes: the heap gives them back when this redraw is over (see giveBackFreedMemory) */
@@ -408,7 +428,7 @@ void TimelineView::render()
     resources_.clear();
     g_resStore = &resources_;
     applyStyle();
-    for (int k = 0; k < 3; k++) addRes(doc, resHash_, QUrl(QString("shield:%1").arg(k)), shieldPixmap(k, 14, dpr).toImage());
+    for (int k = 0; k < 3; k++) addRes(doc, resHash_, QUrl(QString("shield:%1").arg(k)), shieldPixmap(k, px(14), dpr).toImage());
     QString html; /* the rows; the document is a sequence of small tables, one per message, cut at the \x02 marks */
     QVector<int> chunkStart;
     const int n = rows_.size();
@@ -438,13 +458,13 @@ void TimelineView::render()
     shownEnd_ = lastShown;
     if (!thread_ && (firstShown || canLoadMore_)) { /* older messages exist: a link at the top (scrolling there loads them too) */
         rowEvents_ << QString();
-        html += "<tr><td colspan=3 align=center style=\"padding:6px\">" +
+        html += "<tr><td colspan=3 align=center style=\"padding:" + pad6 + "\">" +
                 (firstShown ? QString("<a href=\"vc:more\">Show earlier messages</a>")
                             : loadingHistory_ ? QString("<font color=\"" + muted + "\">Loading older messages...</font>")
                                               : QString("<a href=\"vc:more\">Load older messages</a>")) + "</td></tr>";
     } else if (!thread_ && n > 0) {
         rowEvents_ << QString();
-        html += "<tr><td colspan=3 align=center style=\"padding:6px\"><font color=\"" + muted + "\">This is the start of the conversation</font></td></tr>";
+        html += "<tr><td colspan=3 align=center style=\"padding:" + pad6 + "\"><font color=\"" + muted + "\">This is the start of the conversation</font></td></tr>";
     }
     QSet<QString> haveAvatars;
     QString lastSender;
@@ -490,8 +510,8 @@ void TimelineView::render()
             content += "<span style=\"color:" + muted + "\">" + esc(foot) + "</span>";
             if (!ended && !eid.isEmpty() && B(r, "own")) content += " <a href=\"vc:pollend/" + enc(eid) + "\">End poll</a>";
         } else if (kind == "image") {
-            const QSize box = QSize(480, 320) * dpr;
-            const QImage scaled = drawn("img", S(r, "image_path"), [&](const QString &p) {
+            const QSize box = QSize(photoW, px(320)) * dpr;
+            const QImage scaled = drawn("img" + QString::number(photoW), S(r, "image_path"), [&](const QString &p) {
                 QImage s = scaledInto(loadFitted(p, box), box, Qt::KeepAspectRatio);
                 frameImage(s, base, dpr);
                 s.setDevicePixelRatio(dpr);
@@ -505,7 +525,7 @@ void TimelineView::render()
             const QString fn = S(r, "file_name");
             if (!text.isEmpty() && text != "image" && text != fn) content += "<br>" + esc(text);
         } else if (kind == "sticker") { /* a picture without a frame, smaller than a photo */
-            const QSize box = QSize(160, 160) * dpr;
+            const QSize box = px(160, 160) * dpr;
             const QImage scaled = drawn("stk", S(r, "image_path"), [&](const QString &p) {
                 QImage s = scaledInto(loadFitted(p, box), box, Qt::KeepAspectRatio);
                 s.setDevicePixelRatio(dpr);
@@ -520,7 +540,7 @@ void TimelineView::render()
             const QJsonArray items = r.value("gallery").toArray();
             QVector<QJsonObject> pics, others;
             for (const QJsonValue &v : items) (S(v.toObject(), "kind") == "image" ? pics : others).append(v.toObject());
-            const int n = pics.size(), cols = n <= 1 ? 1 : (n == 2 || n == 4) ? 2 : 3, gap = 4, total = 480;
+            const int n = pics.size(), cols = n <= 1 ? 1 : (n == 2 || n == 4) ? 2 : 3, gap = px(4), total = photoW;
             const int side = n == 1 ? total : (total - gap * (cols - 1)) / cols;
             if (n) {
                 content = "<table cellspacing=" + QString::number(gap) + " cellpadding=0>";
@@ -530,9 +550,9 @@ void TimelineView::render()
                         if (i + c >= n) { content += "<td></td>"; continue; }
                         const QJsonObject it = pics[i + c];
                         const QString href = "vc:img:" + esc(eid) + "%23" + QString::number(it.value("index").toInt());
-                        const QImage t = drawn(n == 1 ? QStringLiteral("gal1") : "gal" + QString::number(side), S(it, "image_path"), [&](const QString &p) {
+                        const QImage t = drawn(n == 1 ? "gal1_" + QString::number(total) : "gal" + QString::number(side), S(it, "image_path"), [&](const QString &p) {
                             QImage s;
-                            if (n == 1) { const QSize box = QSize(total, 320) * dpr; s = scaledInto(loadFitted(p, box), box, Qt::KeepAspectRatio); }
+                            if (n == 1) { const QSize box = QSize(total, px(320)) * dpr; s = scaledInto(loadFitted(p, box), box, Qt::KeepAspectRatio); }
                             else {
                                 const QSize box = QSize(side, side) * dpr;
                                 const QImage big = scaledInto(loadFitted(p, box, Qt::KeepAspectRatioByExpanding), box, Qt::KeepAspectRatioByExpanding);
@@ -555,11 +575,12 @@ void TimelineView::render()
                 content += "<a href=\"vc:save:" + esc(eid) + "%23" + QString::number(it.value("index").toInt()) + "\">&#128206; " + esc(S(it, "name")) + "</a> <span style=\"color:" + muted + "\">" + esc(QLocale().formattedDataSize(it.value("size").toVariant().toLongLong())) + "</span><br>";
             if (!text.isEmpty()) content += (content.isEmpty() ? "" : "<br>") + esc(text);
         } else if (kind == "video") {
-            QImage card(QSize(320, 180) * dpr, QImage::Format_RGB32);
+            const int cardW = qMin(px(320), photoW);
+            QImage card(QSize(cardW, cardW * 180 / 320) * dpr, QImage::Format_RGB32);
             card.fill(QColor(0x20, 0x20, 0x20));
             const bool playingThis = eid == playingId_;
             if (playingThis) { /* the player widget is laid over the card: leave room for its control row */
-                QImage tall(card.width(), card.height() + int(VideoPlayer::kControlsHeight * dpr), QImage::Format_RGB32);
+                QImage tall(card.width(), card.height() + int(px(VideoPlayer::kControlsHeight) * dpr), QImage::Format_RGB32);
                 tall.fill(Qt::black);
                 QPainter tp(&tall);
                 tp.drawImage(0, 0, card);
@@ -569,18 +590,18 @@ void TimelineView::render()
             }
             QPainter p(&card);
             p.setRenderHint(QPainter::Antialiasing);
-            const QPointF c(card.width() / 2.0, (card.height() - (playingThis ? VideoPlayer::kControlsHeight * dpr : 0)) / 2.0);
-            const qreal rad = 26 * dpr;
+            const QPointF c(card.width() / 2.0, (card.height() - (playingThis ? px(VideoPlayer::kControlsHeight) * dpr : 0)) / 2.0);
+            const qreal rad = 26 * ks;
             if (!playingThis && eid == loadingId_) {
                 p.setBrush(QColor(0, 0, 0, 150)); p.setPen(Qt::NoPen);
                 p.drawEllipse(c, rad, rad);
                 p.setBrush(Qt::NoBrush);
-                p.setPen(QPen(Qt::white, 3 * dpr, Qt::SolidLine, Qt::RoundCap));
+                p.setPen(QPen(Qt::white, 3 * ks, Qt::SolidLine, Qt::RoundCap));
                 const QRectF arc(c.x() - rad * 0.6, c.y() - rad * 0.6, rad * 1.2, rad * 1.2);
                 p.drawArc(arc, -spinStep_ * 30 * 16, -270 * 16);
                 p.setPen(Qt::white);
-                QFont f = p.font(); f.setPixelSize(int(12 * dpr)); p.setFont(f);
-                p.drawText(QRectF(0, c.y() + rad + 6 * dpr, card.width(), 18 * dpr), Qt::AlignHCenter, "Loading video…");
+                QFont f = p.font(); f.setPixelSize(int(12 * ks)); p.setFont(f);
+                p.drawText(QRectF(0, c.y() + rad + 6 * ks, card.width(), 18 * ks), Qt::AlignHCenter, "Loading video…");
             } else if (!playingThis) {
                 p.setBrush(QColor(0, 0, 0, 150)); p.setPen(Qt::NoPen);
                 p.drawEllipse(c, rad, rad);
@@ -610,13 +631,13 @@ void TimelineView::render()
             if (kind == "notice" || kind == "emote" || pending) style = "color:" + muted;
             QString shown = linkify(t);
             const QString fb = S(r, "html").size() > 4 * kMaxShownChars || emojiCut(S(r, "html")) >= 0 ? QString() : S(r, "html"); /* too much of either: the plain text, cut, instead */
-            if (kind == "text" && fb.isEmpty() && emojiOnly(text)) shown = "<span style=\"font-size:30pt\">" + esc(text) + "</span>";
+            if (kind == "text" && fb.isEmpty() && emojiOnly(text)) shown = "<span style=\"font-size:" + QString::number(30 * uiScale(), 'f', 1) + "pt\">" + esc(text) + "</span>";
             if (!fb.isEmpty() && kind != "undecryptable") { /* formatted text: sanitized HTML */
                 shown = fb;
                 for (const QJsonValue &ev : r.value("emoji").toArray()) { /* custom emoji: the downloaded picture at text height, else its shortcode */
                     const QJsonObject e = ev.toObject();
                     const QString mxc = S(e, "mxc");
-                    const int line = int(22 * dpr);
+                    const int line = int(px(22) * dpr);
                     const QImage scaled = drawn("emo", S(e, "path"), [&](const QString &p) {
                         const QImage got = loadFitted(p, QSize(1 << 20, line));
                         QImage s = got.isNull() ? got : got.scaledToHeight(line, Qt::SmoothTransformation);
@@ -627,7 +648,7 @@ void TimelineView::render()
                     if (!scaled.isNull()) {
                         const QString key = "emo:" + mxc;
                         addRes(doc, resHash_, QUrl(key), scaled);
-                        repl = "<img src=\"" + key + "\" height=22 style=\"vertical-align:middle\">";
+                        repl = "<img src=\"" + key + "\" height=" + QString::number(px(22)) + " style=\"vertical-align:middle\">";
                     }
                     const QRegularExpression re("<img[^>]*src=\"" + QRegularExpression::escape(mxc) + "\"[^>]*>");
                     int at = 0;
@@ -715,7 +736,7 @@ void TimelineView::render()
         const QJsonObject pv = r.value("preview").toObject(); /* a card for the first link, when previews are on */
         if (!pv.isEmpty()) {
             QString img;
-            const int across = int(96 * dpr);
+            const int across = int(px(96) * dpr);
             const QImage sc = drawn("pv", S(pv, "image_path"), [&](const QString &p) {
                 const QImage got = loadFitted(p, QSize(across, 1 << 20));
                 QImage s = got.isNull() ? got : got.scaledToWidth(across, Qt::SmoothTransformation);
@@ -726,12 +747,12 @@ void TimelineView::render()
             if (!sc.isNull()) {
                 const QString key = "pv:" + eid;
                 addRes(doc, resHash_, QUrl(key), sc);
-                img = "<td valign=top><img src=\"" + key + "\" width=96></td>";
+                img = "<td valign=top><img src=\"" + key + "\" width=" + QString::number(px(96)) + "></td>";
             }
             QString desc = S(pv, "description");
             if (desc.size() > 220) desc = desc.left(220) + "...";
             const QString url = S(pv, "url");
-            content += "<br><table cellspacing=0 cellpadding=5 style=\"background-color:" + hex(pal.color(QPalette::AlternateBase)) + "\"><tr>" + img +
+            content += "<br><table cellspacing=0 cellpadding=" + QString::number(px(5)) + " style=\"background-color:" + hex(pal.color(QPalette::AlternateBase)) + "\"><tr>" + img +
                        "<td valign=top><b><a href=\"" + esc(url) + "\">" + esc(S(pv, "title").isEmpty() ? url : S(pv, "title")) + "</a></b>" +
                        (S(pv, "site").isEmpty() ? QString() : "<br><span style=\"color:" + muted + "\">" + esc(S(pv, "site")) + "</span>") +
                        (desc.isEmpty() ? QString() : "<br>" + esc(desc)) + "</td></tr></table>";
@@ -749,19 +770,19 @@ void TimelineView::render()
             rowEvents_ << eid << eid;
             QString shieldHtml;
             const QJsonObject sh = r.value("shield").toObject();
-            if (!sh.isEmpty()) shieldHtml = " <img src=\"shield:" + QString(S(sh, "level") == "red" ? "2" : "1") + "\" width=14 height=14 title=\"" + esc(S(sh, "text")) + "\">";
+            if (!sh.isEmpty()) shieldHtml = " <img src=\"shield:" + QString(S(sh, "level") == "red" ? "2" : "1") + "\" width=" + QString::number(px(14)) + " height=" + QString::number(px(14)) + " title=\"" + esc(S(sh, "text")) + "\">";
             const QString key = "av:" + sender;
             if (!haveAvatars.contains(key)) {
-                addRes(doc, resHash_, QUrl(key), profilePixmap(S(r, "avatar_path"), sender, name, 32, dpr, pal).toImage());
+                addRes(doc, resHash_, QUrl(key), profilePixmap(S(r, "avatar_path"), sender, name, px(32), dpr, pal).toImage());
                 haveAvatars.insert(key);
             }
-            html += "<tr><td width=40 rowspan=2 valign=top style=\"padding-top:6px\"><img src=\"" + key + "\" width=32 height=32></td>"
-                    "<td " + hl + " style=\"padding-top:6px\"><b><font color=\"" + hex(nameColor(sender, pal)) + "\">" + esc(name) + "</font></b>" + shieldHtml + "</td>"
-                    "<td " + hl + " align=right style=\"padding-top:6px\">" + anchor + "<font color=\"" + muted + "\">" + esc(when) + "</font></td></tr>"
+            html += "<tr><td width=" + QString::number(px(40)) + " rowspan=2 valign=top style=\"padding-top:" + pad6 + "\"><img src=\"" + key + "\" width=" + QString::number(px(32)) + " height=" + QString::number(px(32)) + "></td>"
+                    "<td " + hl + " style=\"padding-top:" + pad6 + "\"><b><font color=\"" + hex(nameColor(sender, pal)) + "\">" + esc(name) + "</font></b>" + shieldHtml + "</td>"
+                    "<td " + hl + " align=right style=\"padding-top:" + pad6 + "\">" + anchor + "<font color=\"" + muted + "\">" + esc(when) + "</font></td></tr>"
                     "<tr><td " + hl + " colspan=2>" + content + "</td></tr>";
         } else {
             rowEvents_ << eid;
-            html += "<tr><td width=40>" + anchor + "</td><td " + hl + " colspan=2" + (gapAbove ? " style=\"padding-top:8px\"" : "") + ">" + content + "</td></tr>";
+            html += "<tr><td width=" + QString::number(px(40)) + ">" + anchor + "</td><td " + hl + " colspan=2" + (gapAbove ? " style=\"padding-top:" + QString::number(px(8)) + "px\"" : "") + ">" + content + "</td></tr>";
         }
         const QJsonArray seen = r.value("seen_by").toArray();
         if (!seen.isEmpty()) {
@@ -774,7 +795,7 @@ void TimelineView::render()
 
     if (!thread_ && lastShown < n) { /* the window stops short of the newest message: a link at the bottom (scrolling there adds messages too) */
         rowEvents_ << QString();
-        html += "<tr><td colspan=3 align=center style=\"padding:6px\"><a href=\"vc:newer\">Show newer messages</a></td></tr>";
+        html += "<tr><td colspan=3 align=center style=\"padding:" + pad6 + "\"><a href=\"vc:newer\">Show newer messages</a></td></tr>";
     }
 
     drawn_.setMaxCost(int(qBound<qint64>(qint64(kMinDrawnBytes), drawnBytes + drawnBytes / 4, qint64(kMaxDrawnBytes)))); /* what the next redraw needs plus a quarter, and at least some pictures of other rooms */
@@ -890,7 +911,34 @@ void TimelineView::render()
 }
 
 void TimelineView::hideEvent(QHideEvent *e) { stopInline(); QWidget::hideEvent(e); }
-void TimelineView::resizeEvent(QResizeEvent *e) { QWidget::resizeEvent(e); QTimer::singleShot(0, this, [this] { placePlayer(); }); }
+void TimelineView::resizeEvent(QResizeEvent *e)
+{
+    QWidget::resizeEvent(e);
+    QTimer::singleShot(0, this, [this] { placePlayer(); });
+    if (lastPictureW_ && pictureWidth() != lastPictureW_) refresh(); /* a narrow view: the pictures are drawn at the width that fits (nothing else is drawn again) */
+}
+
+/* A photo is drawn at most 480 pixels wide (at the zoom), but never wider than the view has room for beside the avatar: with a narrow window, the thread panel
+   or a large zoom the rest would be cut off by the edge. Rounded down to 24 pixels, so a window being resized does not draw every picture again for each pixel. */
+int TimelineView::pictureWidth() const
+{
+    const int room = view_->width() - view_->verticalScrollBar()->sizeHint().width() - 2 * int(view_->document()->documentMargin()) - px(40) - px(8);
+    return qMin(px(480), qMax(48, room / 24 * 24)); /* (48: whatever the view, a picture is not drawn narrower; this one is not scaled, or it could be wider than the room) */
+}
+
+/* The zoom is about to change: remember which message the view starts with, and how far into it, before the new font moves the scroll bar. */
+void TimelineView::notePlace()
+{
+    keptTop_.clear();
+    /* The new font lays the document out again, and a document that has got shorter pulls the scroll bar down to its new end: that is not the reader going to the
+       end of the room (onScroll counts every scroll within 0.7 s of the reader's own input as theirs, and would start following the end). */
+    userInput_.invalidate();
+    if (stick_ || !isVisible()) return; /* following the end of the room stays at the end */
+    for (int y : {2, 14, 30, 60, 100}) { keptTop_ = eventAt(QPoint(24, y)); if (!keptTop_.isEmpty()) break; }
+    if (keptTop_.isEmpty()) return;
+    keptDelta_ = view_->verticalScrollBar()->value() - anchorY(keptTop_);
+    keptPercent_ = uiPercent();
+}
 
 /* A video is being downloaded: its card shows a turning arc until the file arrives (or fails). */
 void TimelineView::setLoading(const QString &eventId)
@@ -946,7 +994,7 @@ void TimelineView::placePlayer()
             QTextCursor cur(doc);
             cur.setPosition(it.fragment().position());
             const QPoint tl = view_->cursorRect(cur).topLeft();
-            const QSize sz = playingSize_.isEmpty() ? QSize(360, 276) : playingSize_;
+            const QSize sz = playingSize_.isEmpty() ? px(360, 276) : playingSize_;
             player_->setGeometry(QRect(tl, sz));
             player_->show();
             player_->raise();
@@ -1014,12 +1062,14 @@ void TimelineView::applyStyle()
 {
     const QPalette pal = view_->palette();
     const QString mutedc = hex(pal.color(QPalette::PlaceholderText)), codebg = hex(pal.color(QPalette::AlternateBase).darker(isDark(pal) ? 115 : 104));
+    auto n = [](int v) { return QString::number(px(v)); }; /* the margins of the quotes and lists follow the zoom */
+    view_->document()->setDocumentMargin(px(6));
     view_->document()->setDefaultStyleSheet(
-        "blockquote { margin-left: 10px; margin-top: 2px; margin-bottom: 2px; color: " + mutedc + "; }"
-        "pre { background-color: " + codebg + "; margin-top: 3px; margin-bottom: 3px; white-space: pre-wrap; }" /* a long line wraps: a view has one horizontal scrollbar for all its messages */
+        "blockquote { margin-left: " + n(10) + "px; margin-top: " + n(2) + "px; margin-bottom: " + n(2) + "px; color: " + mutedc + "; }"
+        "pre { background-color: " + codebg + "; margin-top: " + n(3) + "px; margin-bottom: " + n(3) + "px; white-space: pre-wrap; }" /* a long line wraps: a view has one horizontal scrollbar for all its messages */
         "code { background-color: " + codebg + "; }"
-        "h1, h2, h3 { margin-top: 4px; margin-bottom: 2px; }"
-        "ul, ol { margin-top: 2px; margin-bottom: 2px; }"
+        "h1, h2, h3 { margin-top: " + n(4) + "px; margin-bottom: " + n(2) + "px; }"
+        "ul, ol { margin-top: " + n(2) + "px; margin-bottom: " + n(2) + "px; }"
         "table { border-color: " + mutedc + "; }");
 }
 

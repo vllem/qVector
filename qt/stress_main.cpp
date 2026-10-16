@@ -20,6 +20,7 @@
 #include <QRandomGenerator>
 #include <QScreen>
 #include <QScrollBar>
+#include <QSettings>
 #include <QTemporaryDir>
 #include <QTextBlock>
 #include <QTextBoundaryFinder>
@@ -35,11 +36,18 @@
 #endif
 #include <QImageReader>
 #include "qt/core.h"
+#include "qt/emojipicker.h"
 #include "qt/imageload.h"
 #include "qt/memberlist.h"
 #include "qt/packpicker.h"
 #include "qt/sidebar.h"
 #include "qt/timelineview.h"
+#include "qt/uiscale.h"
+#ifdef VC_HAVE_QTEST
+#include <QMainWindow>
+#include <QMenuBar>
+#include <QTest>
+#endif
 
 using namespace vc;
 
@@ -181,12 +189,178 @@ int main(int argc, char **argv)
     QApplication app(argc, argv);
     QApplication::setApplicationName("vector"); /* as in the app: the widgets read their QSettings under these names */
     QApplication::setOrganizationName("vector");
+    QTemporaryDir settingsHome; /* ... but not the user's: the zoom steps change the remembered zoom, and the players their volume */
+    QSettings::setPath(QSettings::NativeFormat, QSettings::UserScope, settingsHome.path());
     if (argc > 1) only = argv[1];
 
     TimelineView tl;
     tl.resize(900, 600);
     tl.show();
     app.processEvents();
+
+    /* The zoom (qt/uiscale.h): the whole interface at 50 to 300 percent. Run first, while nothing big is loaded: a change of the zoom redraws every view that exists. */
+    {
+        auto bar = [](TimelineView &v) { return v.findChild<QTextBrowser *>()->horizontalScrollBar(); };
+        auto wheel = [](QWidget *w, int dy, Qt::KeyboardModifiers mods) { QWheelEvent e(QPointF(50, 50), QPointF(50, 50), QPoint(), QPoint(0, dy), Qt::NoButton, mods, Qt::NoScrollPhase, false); QApplication::sendEvent(w, &e); };
+        TimelineView zt;
+        zt.resize(900, 600);
+        zt.show();
+        app.processEvents();
+        step("zoom: a room of 100 messages through the zoom steps, up and down", 8000, [&] {
+            zt.setRows(messages(100));
+            settle();
+            int wide = 0;
+            for (int p : {50, 75, 100, 125, 150, 200, 300, 200, 150, 100, 75, 50, 100}) {
+                setUiPercent(p);
+                settle();
+                if (uiPercent() != p || bar(zt)->maximum() > 0) { std::printf("    at %d %%: zoom is %d, the view is %d pixels wider than the window\n", p, uiPercent(), bar(zt)->maximum()); wide++; }
+                const QFont f = zt.findChild<QTextBrowser *>()->font(); /* the text follows: the application font at that zoom */
+                if (qAbs(f.pointSizeF() - QApplication::font().pointSizeF()) > 0.01) { std::printf("    at %d %%: the messages use %.1f pt, the application %.1f pt\n", p, f.pointSizeF(), QApplication::font().pointSizeF()); wide++; }
+            }
+            if (wide) failures++;
+        });
+        step("zoom: the reader keeps their place", 4000, [&] {
+            setUiPercent(100);
+            zt.reset();
+            zt.setRows(messages(100));
+            settle();
+            auto *br = zt.findChild<QTextBrowser *>();
+            QWheelEvent w(QPointF(50, 50), QPointF(50, 50), QPoint(), QPoint(0, 120), Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+            QApplication::sendEvent(br->viewport(), &w); /* the reader's own input, or the view follows the end of the room */
+            br->verticalScrollBar()->setValue(br->verticalScrollBar()->maximum() / 2);
+            QApplication::processEvents();
+            auto top = [&] { for (int y : {2, 14, 30, 60, 100}) { const QString id = zt.eventAt(QPoint(24, y)); if (!id.isEmpty()) return id; } return QString(); };
+            const QString before = top();
+            QStringList moved;
+            for (int p : {125, 200, 100, 67}) {
+                setUiPercent(p);
+                settle();
+                const QString now = top();
+                if (now != before) moved << QString("%1 %% -> %2").arg(p).arg(now);
+            }
+            std::printf("    at the top: %s, after 125, 200, 100 and 67 %%: %s\n", qPrintable(before), moved.isEmpty() ? "the same" : qPrintable(moved.join(", ")));
+            if (before.isEmpty() || !moved.isEmpty()) failures++;
+            setUiPercent(100);
+        });
+        step("zoom: Ctrl+wheel over the messages zooms the interface, a plain wheel does not", 800, [&] {
+            setUiPercent(100);
+            zt.reset();
+            zt.setRows(messages(100));
+            settle();
+            auto *vp = zt.findChild<QTextBrowser *>()->viewport();
+            wheel(vp, 120, Qt::NoModifier);
+            const int plain = uiPercent();
+            wheel(vp, 120, Qt::ControlModifier);
+            const int up = uiPercent();
+            wheel(vp, -120, Qt::ControlModifier);
+            const int down = uiPercent();
+            std::printf("    plain wheel: %d %%, Ctrl+wheel up: %d %%, down: %d %%\n", plain, up, down);
+            if (plain != 100 || up != 110 || down != 100) failures++;
+        });
+        step("zoom: a photo is never wider than the view, at any zoom", 3000, [&] {
+            QTemporaryDir dir;
+            const QString png = dir.filePath("photo.png");
+            photo(1600, 1200, 3).save(png);
+            QJsonObject m = message(1, "photo.png");
+            m["kind"] = "image"; m["file_name"] = "photo.png"; m["image_w"] = 1600; m["image_h"] = 1200; m["image_path"] = png;
+            TimelineView narrow;
+            narrow.resize(420, 500); /* the thread panel is no wider, and a large zoom leaves the messages little room */
+            narrow.show();
+            int wide = 0;
+            for (int p : {100, 200, 300, 50}) {
+                setUiPercent(p);
+                narrow.setRows(QJsonArray{m});
+                settle();
+                if (bar(narrow)->maximum() > 0) { std::printf("    at %d %%: wider than the view by %d pixels\n", p, bar(narrow)->maximum()); wide++; }
+            }
+            if (wide) failures++;
+            setUiPercent(100);
+        });
+        step("zoom: the sidebar, the pickers and the member list follow", 3000, [&] {
+            Sidebar zs;
+            zs.resize(260, 400);
+            zs.show();
+            zs.refresh(QJsonArray{QJsonObject{{"id", "!a:hs"}, {"title", "alpha"}, {"section", "Rooms"}, {"unread", 3}, {"notify", "default"}}}, "", "");
+            EmojiPicker ep;
+            PackPicker pp;
+            MemberList zm;
+            zm.resize(240, 300);
+            zm.show();
+            setUiPercent(100);
+            settle();
+            const int row100 = zs.visualItemRect(zs.topLevelItem(1)).height();
+            const QSize picker100 = ep.size(), stickers100 = pp.size();
+            int wrong = 0;
+            for (int p : {150, 200, 100}) {
+                setUiPercent(p);
+                settle();
+                const QSize row = zs.visualItemRect(zs.topLevelItem(1)).size();
+                const bool ok = row.height() == px(24) && zs.iconSize() == px(18, 18) && zs.minimumWidth() == px(170) && ep.size() == px(400, 340) && pp.size() == px(380, 320)
+                                && zm.iconSize() == px(22, 22) && zm.minimumWidth() == px(150);
+                std::printf("    at %d %%: sidebar row %dx%d (icons %dx%d), emoji picker %dx%d, sticker picker %dx%d, member icons %dx%d: %s\n", p, row.width(), row.height(), zs.iconSize().width(), zs.iconSize().height(),
+                            ep.width(), ep.height(), pp.width(), pp.height(), zm.iconSize().width(), zm.iconSize().height(), ok ? "ok" : "WRONG");
+                if (!ok) wrong++;
+            }
+            if (zs.visualItemRect(zs.topLevelItem(1)).height() != row100 || ep.size() != picker100 || pp.size() != stickers100) { std::printf("    back at 100 %%, the sizes are not the ones they were\n"); wrong++; }
+            if (wrong) failures++;
+        });
+        memstep("memory: a room of 100 messages with pictures through the zoom steps, 3 times", 8000, [&] {
+            QTemporaryDir dir;
+            const QString png = dir.filePath("photo.png");
+            photo(1200, 800, 5).save(png);
+            QJsonArray rows = messages(60);
+            for (int i = 0; i < 100; i += 10) { QJsonObject m = message(1000 + i, "photo.png"); m["kind"] = "image"; m["image_path"] = png; m["file_name"] = "photo.png"; rows.append(m); }
+            zt.reset();
+            zt.setRows(rows);
+            settle();
+            for (int cycle = 0; cycle < 3; cycle++) for (int p : {50, 100, 150, 200, 300, 100}) { setUiPercent(p); settle(); }
+        });
+#ifdef VC_HAVE_QTEST
+        step("zoom: Ctrl++, Ctrl+=, Ctrl+-, Ctrl+0 and the keypad's, in a line edit, with the menu bar hidden", 1500, [&] {
+            QSettings().clear();
+            setUiPercent(100);
+            QMainWindow host; /* like the sign-in page: no menu bar, and the keys must work with a text box in focus */
+            QMenu *view = host.menuBar()->addMenu("View");
+            const ZoomActions z = makeZoomActions(&host);
+            view->addActions({z.in, z.out, z.reset});
+            host.addActions({z.in, z.out, z.reset});
+            auto *edit = new QLineEdit;
+            host.setCentralWidget(edit);
+            host.menuBar()->hide();
+            host.show();
+            QApplication::setActiveWindow(&host);
+            (void)QTest::qWaitForWindowActive(&host);
+            edit->setFocus();
+            struct Key { const char *name; int key; Qt::KeyboardModifiers mods; int want; };
+            const Key keys[] = {
+                {"Ctrl++", Qt::Key_Plus, Qt::ControlModifier, 110},
+                {"Ctrl+Shift++ (a US keyboard's Ctrl++)", Qt::Key_Plus, Qt::ControlModifier | Qt::ShiftModifier, 125},
+                {"Ctrl+=", Qt::Key_Equal, Qt::ControlModifier, 150},
+                {"Ctrl+keypad +", Qt::Key_Plus, Qt::ControlModifier | Qt::KeypadModifier, 175},
+                {"Ctrl+-", Qt::Key_Minus, Qt::ControlModifier, 150},
+                {"Ctrl+keypad -", Qt::Key_Minus, Qt::ControlModifier | Qt::KeypadModifier, 125},
+                {"Ctrl+0", Qt::Key_0, Qt::ControlModifier, 100},
+                {"a plain +", Qt::Key_Plus, Qt::NoModifier, 100},
+            };
+            int wrong = 0;
+            for (const Key &k : keys) {
+                QTest::keyClick(edit, Qt::Key(k.key), k.mods);
+                if (uiPercent() != k.want) { std::printf("    %s: zoom is %d %%, not %d %%\n", k.name, uiPercent(), k.want); wrong++; }
+            }
+            for (int i = 0; i < 20; i++) QTest::keyClick(edit, Qt::Key_Minus, Qt::ControlModifier);
+            if (uiPercent() != kUiScaleMin) { std::printf("    twenty Ctrl+-: %d %%, not %d %%\n", uiPercent(), kUiScaleMin); wrong++; }
+            for (int i = 0; i < 20; i++) QTest::keyClick(edit, Qt::Key_Plus, Qt::ControlModifier);
+            if (uiPercent() != kUiScaleMax) { std::printf("    twenty Ctrl++: %d %%, not %d %%\n", uiPercent(), kUiScaleMax); wrong++; }
+            if (edit->text() != "+") { std::printf("    the line edit holds \"%s\": only the plain + is text\n", qPrintable(edit->text())); wrong++; }
+            if (QSettings().value("ui_scale").toInt() != kUiScaleMax) { std::printf("    the remembered zoom is %d\n", QSettings().value("ui_scale").toInt()); wrong++; }
+            if (wrong) failures++;
+            QTest::keyClick(edit, Qt::Key_0, Qt::ControlModifier);
+        });
+#endif
+        zt.hide();
+        setUiPercent(100);
+        settle();
+    }
 
     step("timeline: open a room of 50 000 messages", 1300, [&] { tl.setRows(messages(50000)); });
     step("timeline: scroll to the top and back 20 times", 800, [&] {

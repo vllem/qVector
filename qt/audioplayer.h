@@ -1,6 +1,7 @@
 #ifndef VC_QT_AUDIOPLAYER_H
 #define VC_QT_AUDIOPLAYER_H
 
+#include "qt/uiscale.h"
 #include <QAudioDecoder>
 #include <QAudioOutput>
 #include <QDialog>
@@ -21,7 +22,7 @@ public:
     explicit WaveformView(QWidget *parent = nullptr);
     void setPeaks(const QVector<float> &peaks, bool final);
     void setProgress(double fraction) { progress_ = fraction; update(); }
-    QSize sizeHint() const override { return QSize(520, 120); }
+    QSize sizeHint() const override { return px(520, 120); }
 signals:
     void seekRequested(double fraction);
 

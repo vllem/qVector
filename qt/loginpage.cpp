@@ -1,4 +1,5 @@
 #include "qt/theme.h"
+#include "qt/uiscale.h"
 #include "qt/loginpage.h"
 #include <QFormLayout>
 #include <QFrame>
@@ -10,15 +11,16 @@ static QFrame *card(const QString &title, QVBoxLayout **inner)
 {
     auto *f = new QFrame;
     f->setFrameShape(QFrame::StyledPanel);
-    f->setFixedWidth(400);
     auto *v = new QVBoxLayout(f);
-    v->setContentsMargins(24, 22, 24, 22);
-    v->setSpacing(10);
     auto *t = new QLabel(title);
-    QFont ft = t->font();
-    ft.setPointSizeF(ft.pointSizeF() * 1.5);
-    ft.setBold(true);
-    t->setFont(ft);
+    onUiScale(f, [f, v, t] {
+        f->setFixedWidth(px(400));
+        v->setContentsMargins(px(24), px(22), px(24), px(22));
+        v->setSpacing(px(10));
+        QFont ft = scaledFont(QApplication::font(), 1.5); /* a size of its own: made again when the zoom changes */
+        ft.setBold(true);
+        t->setFont(ft);
+    });
     v->addWidget(t);
     *inner = v;
     return f;

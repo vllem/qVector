@@ -1,4 +1,5 @@
 #include "qt/theme.h"
+#include "qt/uiscale.h"
 #include "qt/videoplayer.h"
 #include <QPainter>
 #include <QHBoxLayout>
@@ -77,42 +78,45 @@ VideoPlayer::VideoPlayer(QWidget *parent) : QWidget(parent)
     v->setContentsMargins(1, 1, 1, 1); /* room for the frame drawn in paintEvent, like the one around pictures */
     v->setSpacing(0);
     video_ = new QVideoWidget(this);
-    video_->setMinimumSize(40, 30);
+    video_->setMinimumSize(px(40, 30));
     video_->installEventFilter(this);
     setMinimumSize(0, 0);
     v->addWidget(video_, 1);
     errLabel_ = new QLabel(this);
-    errLabel_->setStyleSheet("color:" + errorColor(palette()).name() + ";padding:4px 8px");
+    errLabel_->setStyleSheet("color:" + errorColor(palette()).name() + ";padding:" + QString::number(px(4)) + "px " + QString::number(px(8)) + "px");
     errLabel_->setWordWrap(true);
     errLabel_->hide();
     v->addWidget(errLabel_);
 
     auto *controls = new QWidget(this);
-    controls->setFixedHeight(kControlsHeight);
-    controls->setStyleSheet("QWidget { background: palette(window); color: palette(window-text); } QLabel { background: transparent; }"
-                            "QToolButton { background: transparent; border: none; border-radius: 3px; padding: 2px; }"
-                            "QToolButton:hover { background: palette(midlight); }"
-                            "QSlider::groove:horizontal { height: 4px; background: palette(mid); border-radius: 2px; }"
-                            "QSlider::sub-page:horizontal { background: palette(highlight); border-radius: 2px; }"
-                            "QSlider::handle:horizontal { width: 10px; margin: -5px 0; background: palette(window-text); border-radius: 5px; }");
     auto *row = new QHBoxLayout(controls);
-    row->setContentsMargins(8, 2, 8, 2);
-    row->setSpacing(6);
     btn_ = new QToolButton(controls);
-    btn_->setIconSize(QSize(16, 16));
     slider_ = new SeekSlider(controls);
     slider_->setRange(0, 1000);
     time_ = new QLabel("0:00 / 0:00", controls);
-    time_->setMinimumWidth(time_->fontMetrics().horizontalAdvance("00:00:00 / 00:00:00") * 3 / 4);
     mute_ = new QToolButton(controls);
-    mute_->setIconSize(QSize(16, 16));
     volume_ = new QSlider(Qt::Horizontal, controls);
     volume_->setRange(0, 100);
-    volume_->setFixedWidth(60);
     close_ = new QToolButton(controls);
     close_->setText(QString(QChar(0x00D7))); /* a plain multiplication sign: a symbol font could draw a coloured emoji for the cross */
-    close_->setStyleSheet("QToolButton { font-size: 16pt; padding: 0 6px; }");
     close_->setToolTip("Close the player");
+    onUiScale(this, [this, controls, row] { /* the control row is as high as the timeline reserved for it: px(kControlsHeight) */
+        const QString n3 = QString::number(px(3)), n2 = QString::number(px(2)), n4 = QString::number(px(4)), n10 = QString::number(px(10)), n5 = QString::number(px(5));
+        controls->setFixedHeight(px(kControlsHeight));
+        controls->setStyleSheet("QWidget { background: palette(window); color: palette(window-text); } QLabel { background: transparent; }"
+                                "QToolButton { background: transparent; border: none; border-radius: " + n3 + "px; padding: " + n2 + "px; }"
+                                "QToolButton:hover { background: palette(midlight); }"
+                                "QSlider::groove:horizontal { height: " + n4 + "px; background: palette(mid); border-radius: " + n2 + "px; }"
+                                "QSlider::sub-page:horizontal { background: palette(highlight); border-radius: " + n2 + "px; }"
+                                "QSlider::handle:horizontal { width: " + n10 + "px; margin: -" + n5 + "px 0; background: palette(window-text); border-radius: " + n5 + "px; }");
+        row->setContentsMargins(px(8), px(2), px(8), px(2));
+        row->setSpacing(px(6));
+        btn_->setIconSize(px(16, 16));
+        mute_->setIconSize(px(16, 16));
+        time_->setMinimumWidth(time_->fontMetrics().horizontalAdvance("00:00:00 / 00:00:00") * 3 / 4);
+        volume_->setFixedWidth(px(60));
+        close_->setStyleSheet(QString("QToolButton { font-size: %1pt; padding: 0 %2px; }").arg(16 * uiScale(), 0, 'f', 1).arg(px(6))); /* a size of its own: follows the zoom here */
+    });
     row->addWidget(btn_);
     row->addWidget(slider_, 1);
     row->addWidget(time_);
