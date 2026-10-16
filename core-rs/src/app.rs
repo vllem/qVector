@@ -648,7 +648,8 @@ impl App {
         self.rt().spawn(async move {
             let Some(client) = i.client() else { return };
             let index = i.index.lock().unwrap().clone();
-            let hits = index.map(|x| x.lock().map(|x| x.search(&q, None, 60)).unwrap_or_default()).unwrap_or_default();
+            /* a search of a big index takes a while (and uses threads of its own): not on one of the runtime's two workers */
+            let hits = match index { Some(x) => tokio::task::spawn_blocking(move || x.lock().map(|x| x.search(&q, None, 60)).unwrap_or_default()).await.unwrap_or_default(), None => Vec::new() };
             let mut out = Vec::new();
             for h in hits {
                 let room = <&matrix_sdk::ruma::RoomId>::try_from(h.room_id.as_str()).ok().and_then(|id| client.get_room(id));
