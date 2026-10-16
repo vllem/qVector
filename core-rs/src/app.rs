@@ -912,7 +912,7 @@ async fn network_loop(i: Arc<Inner>, client: Client) {
 
 async fn housekeeping(i: Arc<Inner>, client: Client) {
     let mut last_status = String::new();
-    let mut last_rooms = String::new();
+    let mut last_rooms: Option<Vec<ui::UiRoom>> = None; /* None: nothing sent yet (an empty list is still sent once) */
     let (mut last_save, mut crawled) = (std::time::Instant::now(), HashSet::<String>::new());
     let mut last_identity: Option<std::time::Instant> = None;
     let mut last_shrink = std::time::Instant::now();
@@ -949,8 +949,11 @@ async fn housekeeping(i: Arc<Inner>, client: Client) {
                 tokio::task::spawn_blocking(move || { let _ = index.lock().map(|mut x| x.save()); });
             }
         }
-        let json = serde_json::to_string(&rooms).unwrap_or_else(|_| "[]".into());
-        if json != last_rooms { last_rooms = json.clone(); i.emit("rooms", json); } /* the list rarely changes: the UI rebuilds its sidebar for every event */
+        /* the list rarely changes (the UI rebuilds its sidebar for every event): compare the rows, and write the JSON only when they differ */
+        if last_rooms.as_ref() != Some(&rooms) {
+            i.emit("rooms", serde_json::to_string(&rooms).unwrap_or_else(|_| "[]".into()));
+            last_rooms = Some(rooms.clone());
+        }
         let open = i.open_timeline_of().await.map(|t| t.room().room_id().to_string());
         let focused = i.focused.load(Ordering::Relaxed);
         let alerts = ui::new_alerts(&mut seen_unread, &rooms, if focused { open.as_deref() } else { None });
