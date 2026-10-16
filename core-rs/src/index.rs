@@ -520,11 +520,15 @@ impl MessageIndex {
         Ok(())
     }
 
+    /// Compacting makes ceil(rows / SEGMENT_ROWS) segments, so a big index starts with many: only the segments beyond those count (otherwise every save of
+    /// an index over MAX_SEGMENTS * SEGMENT_ROWS rows would write all of it again).
+    fn too_many_segments(&self) -> bool { self.segments.len() >= MAX_SEGMENTS + self.rows.len() / SEGMENT_ROWS }
+
     /// Write what changed since the last save as a new segment file (several when it is a lot); when there are many segments, all rows are written
     /// again as a few and the old files go.
     pub fn save(&mut self) -> Result<(), String> {
         if !self.dirty { return Ok(()); }
-        if self.legacy || self.segments.len() >= MAX_SEGMENTS { return self.compact(); }
+        if self.legacy || self.too_many_segments() { return self.compact(); }
         self.pending.sort_unstable();
         self.pending.dedup();
         let pending = std::mem::take(&mut self.pending);
@@ -725,6 +729,37 @@ mod tests {
             eprintln!("owned rows {t1:?}, from the arenas {:?} ({} bytes)", t.elapsed(), borrowed.len());
             assert_eq!(owned, borrowed);
         }
+    }
+
+    #[test]
+    #[ignore]
+    fn how_long_a_save_holds_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut idx = MessageIndex::open(dir.path(), "s").unwrap();
+        let add = |idx: &mut MessageIndex, from: u64, to: u64| for n in from..to { idx.insert_row(IndexRow { room_id: format!("!r{}:hs", n % 9), event_id: format!("$event{n}:hs"), sender: format!("user{}", n % 40), time: String::new(), ts: n, body: format!("message number {n} with some words in it to make it longer") }); };
+        add(&mut idx, 0, 250_000);
+        let t = std::time::Instant::now(); idx.save().unwrap(); eprintln!("first save of 250000 rows: {:?}", t.elapsed());
+        add(&mut idx, 250_000, 250_200);
+        let t = std::time::Instant::now(); idx.save().unwrap(); eprintln!("a save of 200 new rows: {:?}", t.elapsed());
+        add(&mut idx, 250_200, 251_200);
+        let t = std::time::Instant::now(); idx.save().unwrap(); eprintln!("a save of 1000 new rows: {:?}", t.elapsed());
+        while idx.segments.len() < MAX_SEGMENTS + idx.len() / SEGMENT_ROWS { let n = 300_000 + idx.segments.len() as u64 * 10; add(&mut idx, n, n + 5); idx.save().unwrap(); }
+        add(&mut idx, 400_000, 400_005);
+        let t = std::time::Instant::now(); idx.save().unwrap(); eprintln!("the save that compacts {} rows: {:?} ({} segments after)", idx.len(), t.elapsed(), idx.segments.len());
+    }
+
+    #[test]
+    fn a_big_index_is_not_written_again_at_every_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut idx = MessageIndex::open(dir.path(), "s").unwrap();
+        idx.rows = vec![Row { ts: 0, room: 0, sender: 0, id_off: 0, body_off: 0, body_len: 0, id_len: 0 }; 13 * SEGMENT_ROWS]; /* what 13 full segments hold */
+        idx.segments = (1..=13).collect();
+        assert!(!idx.too_many_segments(), "the segments a compaction makes of a big index are not too many");
+        idx.segments = (1..=(MAX_SEGMENTS + 13) as u32).collect();
+        assert!(idx.too_many_segments(), "twelve more than that are");
+        idx.rows.clear();
+        idx.segments = (1..=MAX_SEGMENTS as u32).collect();
+        assert!(idx.too_many_segments(), "a small index is compacted at MAX_SEGMENTS");
     }
 
     #[test]
