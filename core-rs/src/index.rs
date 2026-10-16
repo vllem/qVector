@@ -1,6 +1,6 @@
 //! A local, encrypted index of message text, so search reaches back through encrypted rooms (the server cannot search those).
 //!
-//! In memory the rows are packed: one text arena for the event ids and the bodies, 32 bytes of numbers per message, rooms and senders named once
+//! In memory the rows are packed: one text arena for the bodies and one for the event ids, 32 bytes of numbers per message, rooms and senders named once
 //! (about 150 bytes a message; a row of strings in a map was 540). On disk the index is a log of sealed segment files (`seg-000001.enc`, ...), each
 //! holding the rows that were new or changed since the one before, so a save costs what changed and not the whole index (it sealed all of it every
 //! twenty seconds, three times its size in memory at a time); many segments are written again as a few big ones. The plain text is never written to
@@ -106,7 +106,7 @@ pub struct MessageIndex {
     cipher: Arc<StoreCipher>,
     rooms: Names,
     senders: Names,
-    /// the event ids and bodies of all rows, one after the other
+    /// the bodies of all rows, one after the other
     text: String,
     /// the event ids of all rows, apart from the bodies: a search scans `text` and never loads an id into the cache
     ids: String,
