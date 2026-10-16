@@ -96,6 +96,38 @@ struct Segment {
     rows: Vec<IndexRow>,
 }
 
+/// A segment as it is written: the same JSON as `Segment`, made from the arenas without copying a row's text into strings of its own first.
+struct SegmentOut<'a> { forgot: &'a [String], index: &'a MessageIndex, rows: &'a [u32] }
+
+impl Serialize for SegmentOut<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        struct RowOut<'a> { index: &'a MessageIndex, n: u32 }
+        impl Serialize for RowOut<'_> {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                use serde::ser::SerializeStruct;
+                let (ix, r) = (self.index, &self.index.rows[self.n as usize]);
+                let mut o = s.serialize_struct("IndexRow", 6)?;
+                o.serialize_field("room_id", ix.rooms.get(r.room))?;
+                o.serialize_field("event_id", ix.id_of(r))?;
+                o.serialize_field("sender", ix.senders.get(r.sender))?;
+                o.serialize_field("time", &crate::ui::clock(r.ts))?;
+                o.serialize_field("ts", &r.ts)?;
+                o.serialize_field("body", ix.body_of(r))?;
+                o.end()
+            }
+        }
+        struct Rows<'a>(&'a MessageIndex, &'a [u32]);
+        impl Serialize for Rows<'_> {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> { s.collect_seq(self.1.iter().map(|&n| RowOut { index: self.0, n })) }
+        }
+        let mut o = s.serialize_struct("Segment", 2)?;
+        o.serialize_field("forgot", self.forgot)?;
+        o.serialize_field("rows", &Rows(self.index, self.rows))?;
+        o.end()
+    }
+}
+
 /// One message: numbers, and where its event id and body are in the text arena.
 #[derive(Clone, Copy)]
 struct Row { ts: u64, room: u32, sender: u32, id_off: u32, body_off: u32, body_len: u32, id_len: u16 }
@@ -465,11 +497,11 @@ impl MessageIndex {
         if self.drop_room(room_id) { self.forgot.push(room_id.to_string()); self.dirty = true; }
     }
 
-    /// Seal `segment` into a file of its own; returns its number.
-    fn write_segment(&mut self, segment: &Segment) -> Result<u32, String> {
+    /// Seal these rows (by number) and the rooms forgotten into a file of its own; returns its number.
+    fn write_segment(&mut self, forgot: &[String], rows: &[u32]) -> Result<u32, String> {
+        let sealed = self.cipher.encrypt_value(&SegmentOut { forgot, index: self, rows }).map_err(|e| e.to_string())?;
         let n = self.next_segment;
         let path = segment_path(&self.dir, n);
-        let sealed = self.cipher.encrypt_value(segment).map_err(|e| e.to_string())?;
         let tmp = path.with_extension("tmp");
         std::fs::write(&tmp, sealed).and_then(|_| std::fs::rename(&tmp, &path)).map_err(|e| e.to_string())?;
         self.next_segment += 1;
@@ -483,8 +515,7 @@ impl MessageIndex {
         let mut chunks: Vec<&[u32]> = pending.chunks(SEGMENT_ROWS).collect();
         if chunks.is_empty() && !forgot.is_empty() { chunks.push(&[]); }
         for chunk in chunks {
-            let segment = Segment { forgot: std::mem::take(&mut forgot), rows: chunk.iter().map(|&n| self.materialize(n)).collect() };
-            self.write_segment(&segment)?;
+            self.write_segment(&std::mem::take(&mut forgot), chunk)?;
         }
         Ok(())
     }
@@ -511,8 +542,8 @@ impl MessageIndex {
         let mut from = 0;
         while from < total {
             let to = (from + SEGMENT_ROWS).min(total);
-            let segment = Segment { forgot: Vec::new(), rows: (from as u32..to as u32).map(|n| self.materialize(n)).collect() };
-            self.write_segment(&segment)?;
+            let rows: Vec<u32> = (from as u32..to as u32).collect();
+            self.write_segment(&[], &rows)?;
             from = to;
         }
         for n in &old { let _ = std::fs::remove_file(segment_path(&self.dir, *n)); }
@@ -664,6 +695,36 @@ mod tests {
         let t = std::time::Instant::now();
         let idx = MessageIndex::open(dir.path(), "s").unwrap();
         eprintln!("open {} rows in {} segments: {:?}", idx.len(), idx.segments.len(), t.elapsed());
+    }
+
+    #[test]
+    fn a_segment_written_from_the_arenas_is_the_json_of_its_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut idx = MessageIndex::open(dir.path(), "s").unwrap();
+        for n in 0..5u64 { idx.insert_row(IndexRow { room_id: format!("!r{}:hs", n % 2), event_id: format!("$e{n}"), sender: "ünï \"q\"".into(), time: String::new(), ts: n * 61_000, body: format!("line\n{n} \u{1F600} \"quoted\"") }); }
+        let rows = [4u32, 0, 2];
+        let forgot = vec!["!old:hs".to_string()];
+        let owned = Segment { forgot: forgot.clone(), rows: rows.iter().map(|&n| idx.materialize(n)).collect() };
+        let out = serde_json::to_string(&SegmentOut { forgot: &forgot, index: &idx, rows: &rows }).unwrap();
+        assert_eq!(out, serde_json::to_string(&owned).unwrap());
+    }
+
+    #[test]
+    #[ignore]
+    fn making_a_segment_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut idx = MessageIndex::open(dir.path(), "s").unwrap();
+        for n in 0..20_000u64 { idx.insert_row(IndexRow { room_id: format!("!r{}:hs", n % 9), event_id: format!("$event{n}:hs"), sender: format!("user{}", n % 40), time: String::new(), ts: n, body: format!("message number {n} with some words in it to make it longer") }); }
+        let rows: Vec<u32> = (0..20_000).collect();
+        for _ in 0..3 {
+            let t = std::time::Instant::now();
+            let owned = serde_json::to_vec(&Segment { forgot: Vec::new(), rows: rows.iter().map(|&n| idx.materialize(n)).collect() }).unwrap();
+            let t1 = t.elapsed();
+            let t = std::time::Instant::now();
+            let borrowed = serde_json::to_vec(&SegmentOut { forgot: &[], index: &idx, rows: &rows }).unwrap();
+            eprintln!("owned rows {t1:?}, from the arenas {:?} ({} bytes)", t.elapsed(), borrowed.len());
+            assert_eq!(owned, borrowed);
+        }
     }
 
     #[test]
