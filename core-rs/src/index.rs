@@ -82,6 +82,8 @@ fn find_either_simd(h: &[u8], a: u8, b: u8) -> Option<usize> {
 const MAX_QUERY_WORDS: usize = 16;
 /// The most rows one segment file holds (a save of more writes several): sealing one takes about three times its text in memory for a moment.
 const SEGMENT_ROWS: usize = 20_000;
+/// An index with more text than this is searched on several threads.
+const PARALLEL_BYTES: usize = 4 << 20;
 /// More segment files than this are written again as a few big ones.
 const MAX_SEGMENTS: usize = 12;
 
@@ -309,7 +311,10 @@ impl MessageIndex {
     }
 
     /// Messages containing every word of `query` (case-insensitive), in one room or all, newest first, at most `limit`.
-    pub fn search(&self, query: &str, room_id: Option<&str>, limit: usize) -> Vec<IndexRow> {
+    pub fn search(&self, query: &str, room_id: Option<&str>, limit: usize) -> Vec<IndexRow> { self.search_on(query, room_id, limit, None) }
+
+    /// `search` on `threads` threads (`None`: as many as the index is worth).
+    fn search_on(&self, query: &str, room_id: Option<&str>, limit: usize, threads: Option<u32>) -> Vec<IndexRow> {
         let mut words: Vec<String> = Vec::new();
         for w in query.split_whitespace().map(|w| w.to_lowercase()) {
             if !words.contains(&w) { words.push(w); } /* a word said twice asks nothing more (a pasted "rust rust rust ..." cost seconds per search) */
@@ -323,12 +328,23 @@ impl MessageIndex {
         let rare: Vec<usize> = words.iter().map(|w| rarest_byte(w)).collect();
         let by_sender: Vec<u16> = self.senders.list.iter().map(|s| words.iter().enumerate().fold(0u16, |m, (j, w)| m | (contains_ci_at(s, w, rare[j]) as u16) << j)).collect();
         let all_words: u16 = ((1u32 << words.len()) - 1) as u16;
-        let mut hits: Vec<u32> = (0..self.rows.len() as u32).filter(|&n| {
+        let keep = |n: u32| {
             let r = &self.rows[n as usize];
             if !room.map_or(true, |x| x == r.room) { return false; }
             let named = by_sender[r.sender as usize];
             named == all_words || { let body = self.body_of(r); words.iter().enumerate().all(|(j, w)| named >> j & 1 != 0 || contains_ci_at(body, w, rare[j])) }
-        }).collect();
+        };
+        // Every row is judged on its own, so a big index is cut into runs of rows, one thread each (a small one is not worth the threads).
+        let total = self.rows.len() as u32;
+        let threads = if let Some(t) = threads { t } else if self.text.len() < PARALLEL_BYTES { 1 } else { std::thread::available_parallelism().map_or(1, |n| n.get()).min(8) as u32 };
+        let mut hits: Vec<u32> = if threads <= 1 { (0..total).filter(|&n| keep(n)).collect() } else {
+            let step = total.div_ceil(threads).max(1);
+            std::thread::scope(|sc| {
+                let keep = &keep;
+                let runs: Vec<_> = (0..total).step_by(step as usize).map(|from| sc.spawn(move || (from..(from + step).min(total)).filter(|&n| keep(n)).collect::<Vec<u32>>())).collect();
+                runs.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+            })
+        };
         let newest = |a: &u32, b: &u32| {
             let (ra, rb) = (&self.rows[*a as usize], &self.rows[*b as usize]);
             rb.ts.cmp(&ra.ts).then_with(|| self.id_of(rb).cmp(self.id_of(ra)))
@@ -499,6 +515,30 @@ mod tests {
                     assert_eq!(find_either_simd(&h, a, b), h.iter().position(|&c| c == a || c == b), "{len} bytes");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_big_index_searched_on_many_threads_gives_what_one_thread_gives() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut idx = MessageIndex::open(dir.path(), "s").unwrap();
+        let words = ["the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog"];
+        let mut s = 7u32;
+        for n in 0..70_000u64 {
+            let mut body = String::new();
+            for _ in 0..12 { s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223); body.push_str(words[(s >> 20) as usize % 8]); body.push(' '); }
+            idx.insert_row(IndexRow { room_id: format!("!r{}:hs", n % 3), event_id: format!("$e{n}"), sender: format!("user{}", n % 7), time: String::new(), ts: n, body });
+        }
+        assert!(idx.text.len() >= PARALLEL_BYTES);
+        for q in ["fox dog", "user3 lazy", "zebra", "QUICK brown fox"] {
+            let t = std::time::Instant::now();
+            let one = idx.search_on(q, None, 50, Some(1));
+            let t1 = t.elapsed();
+            let t = std::time::Instant::now();
+            let many = idx.search(q, None, 50);
+            eprintln!("{q:16} 1 thread {t1:?}, default {:?}", t.elapsed());
+            assert_eq!(one, many, "{q}");
+            assert_eq!(idx.search_on(q, Some("!r1:hs"), 5, Some(3)), idx.search_on(q, Some("!r1:hs"), 5, Some(1)), "{q} in a room");
         }
     }
 
