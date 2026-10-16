@@ -300,9 +300,15 @@ impl MessageIndex {
         words.sort_by_key(|w| std::cmp::Reverse(w.len())); /* the longest word is the most selective: most rows fail on it first */
         if words.is_empty() || limit == 0 { return Vec::new(); }
         let room = match room_id { Some(id) => match self.rooms.find(id) { Some(n) => Some(n), None => return Vec::new() }, None => None };
+        // Which words each sender's name contains (bit j = word j), worked out once: the scan below then reads this small array (it stays in L1)
+        // instead of following a pointer to a separately allocated name for every row whose body misses a word.
+        let by_sender: Vec<u16> = self.senders.list.iter().map(|s| words.iter().enumerate().fold(0u16, |m, (j, w)| m | (contains_ci(s, w) as u16) << j)).collect();
+        let all_words: u16 = ((1u32 << words.len()) - 1) as u16;
         let mut hits: Vec<u32> = (0..self.rows.len() as u32).filter(|&n| {
             let r = &self.rows[n as usize];
-            room.map_or(true, |x| x == r.room) && words.iter().all(|w| contains_ci(self.body_of(r), w) || contains_ci(self.senders.get(r.sender), w))
+            if !room.map_or(true, |x| x == r.room) { return false; }
+            let named = by_sender[r.sender as usize];
+            named == all_words || { let body = self.body_of(r); words.iter().enumerate().all(|(j, w)| named >> j & 1 != 0 || contains_ci(body, w)) }
         }).collect();
         let newest = |a: &u32, b: &u32| {
             let (ra, rb) = (&self.rows[*a as usize], &self.rows[*b as usize]);
@@ -502,6 +508,20 @@ mod tests {
         let mut v: Vec<String> = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("seg-")).collect();
         v.sort();
         v
+    }
+
+    #[test]
+    fn a_word_may_match_the_sender_or_the_body_and_every_word_must_match_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ix = MessageIndex::open(dir.path(), "secret").unwrap();
+        ix.insert_row(row("!r", "$1", "Alice", 1, "lunch at noon"));
+        ix.insert_row(row("!r", "$2", "Bob", 2, "alice said lunch"));
+        ix.insert_row(row("!r", "$3", "Bob", 3, "dinner"));
+        let ids = |q: &str| ix.search(q, None, 10).into_iter().map(|r| r.event_id).collect::<Vec<_>>();
+        assert_eq!(ids("alice lunch"), ["$2", "$1"]); /* name + body, and body + body */
+        assert_eq!(ids("ALICE"), ["$2", "$1"]);
+        assert_eq!(ids("bob dinner"), ["$3"]);
+        assert_eq!(ids("alice dinner"), Vec::<String>::new());
     }
 
     #[test]
