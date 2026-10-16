@@ -190,16 +190,30 @@ impl MessageIndex {
             for r in &rows { idx.upsert(&r.room_id, &r.event_id, &r.sender, r.ts, &r.body); }
             idx.legacy = true;
         }
-        for n in segment_numbers(dir) {
-            idx.next_segment = n + 1;
-            let path = segment_path(dir, n);
-            match std::fs::read(&path).ok().and_then(|b| idx.cipher.decrypt_value::<Segment>(&b).ok()) {
-                Some(seg) => {
-                    for room in &seg.forgot { idx.drop_room(room); }
-                    for r in &seg.rows { idx.upsert(&r.room_id, &r.event_id, &r.sender, r.ts, &r.body); }
-                    idx.segments.push(n);
+        // Reading and unsealing a file does not depend on the others; applying them does (a forgotten room, an edit). So a few at a time are unsealed on
+        // threads of their own and applied in order (all at once would hold the whole index twice).
+        let numbers = segment_numbers(dir);
+        let wave = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 4);
+        for wave in numbers.chunks(wave) {
+            let cipher = &idx.cipher;
+            let unseal = |n: u32| std::fs::read(segment_path(dir, n)).ok().and_then(|b| cipher.decrypt_value::<Segment>(&b).ok());
+            let segments: Vec<Option<Segment>> = if wave.len() == 1 { vec![unseal(wave[0])] } else {
+                std::thread::scope(|sc| {
+                    let unseal = &unseal;
+                    let runs: Vec<_> = wave.iter().map(|&n| sc.spawn(move || unseal(n))).collect();
+                    runs.into_iter().map(|h| h.join().unwrap_or(None)).collect()
+                })
+            };
+            for (&n, seg) in wave.iter().zip(segments) {
+                idx.next_segment = n + 1;
+                match seg {
+                    Some(seg) => {
+                        for room in &seg.forgot { idx.drop_room(room); }
+                        for r in &seg.rows { idx.upsert(&r.room_id, &r.event_id, &r.sender, r.ts, &r.body); }
+                        idx.segments.push(n);
+                    }
+                    None => { let _ = std::fs::remove_file(segment_path(dir, n)); } /* sealed with another secret, or damaged */
                 }
-                None => { let _ = std::fs::remove_file(&path); } /* sealed with another secret, or damaged */
             }
         }
         idx.pending = Vec::new(); /* what was read is saved already */
@@ -616,6 +630,40 @@ mod tests {
         assert_eq!(ids(&idx, "horse"), vec!["$e2"]);
         idx.repack(None);
         assert!(ids(&idx, "zebra").is_empty() && ids(&idx, "quartz") == vec!["$e4"] && ids(&idx, "horse") == vec!["$e2"]);
+    }
+
+    #[test]
+    fn segments_unsealed_together_are_still_applied_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let row = |room: &str, n: u64, body: &str| IndexRow { room_id: room.into(), event_id: format!("$e{n}"), sender: "alice".into(), time: String::new(), ts: n, body: body.into() };
+        {
+            let mut idx = MessageIndex::open(dir.path(), "s").unwrap();
+            for n in 0..6u64 { idx.insert_row(row("!a:hs", n, &format!("first {n}"))); idx.insert_row(row("!b:hs", 100 + n, &format!("other {n}"))); idx.save().unwrap(); }
+            idx.insert_row(row("!a:hs", 2, "edited two")); idx.save().unwrap(); /* an edit in a later segment than the row */
+            idx.forget_room("!b:hs"); idx.save().unwrap(); /* a room forgotten after its rows were saved */
+            idx.insert_row(row("!b:hs", 200, "came back")); idx.save().unwrap();
+            assert!(idx.segments.len() > 4 && idx.segments.len() < MAX_SEGMENTS, "{} segments", idx.segments.len());
+        }
+        let idx = MessageIndex::open(dir.path(), "s").unwrap();
+        let bodies = |q: &str| idx.search(q, None, 50).into_iter().map(|r| r.body).collect::<Vec<_>>();
+        assert_eq!(bodies("edited"), vec!["edited two"]);
+        assert!(bodies("other").is_empty(), "the forgotten room's rows stay forgotten");
+        assert_eq!(bodies("came"), vec!["came back"]);
+        assert_eq!(idx.len(), 7);
+    }
+
+    #[test]
+    #[ignore]
+    fn opening_a_big_index_time() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut idx = MessageIndex::open(dir.path(), "s").unwrap();
+            for n in 0..200_000u64 { idx.insert_row(IndexRow { room_id: format!("!r{}:hs", n % 9), event_id: format!("$event{n}:hs"), sender: format!("user{}", n % 40), time: String::new(), ts: n, body: format!("message number {n} with some words in it to make it longer") }); }
+            idx.save().unwrap();
+        }
+        let t = std::time::Instant::now();
+        let idx = MessageIndex::open(dir.path(), "s").unwrap();
+        eprintln!("open {} rows in {} segments: {:?}", idx.len(), idx.segments.len(), t.elapsed());
     }
 
     #[test]
