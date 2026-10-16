@@ -22,17 +22,25 @@ use matrix_sdk_ui::timeline::TimelineItem;
 pub struct IndexRow { pub room_id: String, pub event_id: String, pub sender: String, pub time: String, pub ts: u64, pub body: String }
 
 /// Case-insensitive substring test without allocating; `needle` is already lowercase. Non-ASCII needles take the slow path.
-fn contains_ci(hay: &str, needle: &str) -> bool {
+fn contains_ci(hay: &str, needle: &str) -> bool { contains_ci_at(hay, needle, rarest_byte(needle)) }
+
+/// Where in `needle` its rarest byte is: a search works it out once per word and not once per message.
+fn rarest_byte(needle: &str) -> usize {
+    needle.bytes().enumerate().min_by_key(|&(_, b)| byte_rank(b)).map_or(0, |(j, _)| j)
+}
+
+/// `contains_ci` with `k` = `rarest_byte(needle)`.
+fn contains_ci_at(hay: &str, needle: &str, k: usize) -> bool {
     if !needle.is_ascii() { return hay.to_lowercase().contains(needle); }
     let (h, n) = (hay.as_bytes(), needle.as_bytes());
     if n.is_empty() { return true; }
     if n.len() > h.len() { return false; }
-    let (lo, up) = (n[0].to_ascii_lowercase(), n[0].to_ascii_uppercase());
+    // Scan for the needle's rarest byte rather than its first: "the" starts with a common letter and would stop at nearly every word.
+    let (lo, up) = (n[k].to_ascii_lowercase(), n[k].to_ascii_uppercase());
+    let mut i = 0; // where the needle would start
     let last = h.len() - n.len();
-    let mut i = 0;
     while i <= last {
-        // skip quickly to the next byte that could start the needle
-        match find_either(&h[i..=last], lo, up) {
+        match find_either(&h[i + k..=last + k], lo, up) {
             None => return false,
             Some(p) => i += p,
         }
@@ -42,12 +50,18 @@ fn contains_ci(hay: &str, needle: &str) -> bool {
     false
 }
 
+/// How common a byte is in chat text (lower = rarer); only used to pick which byte of a needle to scan for.
+fn byte_rank(b: u8) -> usize {
+    const COMMON: &[u8] = b"zqxjkvbpygfwmucldrhsnioate ";
+    COMMON.iter().position(|&c| c == b.to_ascii_lowercase()).unwrap_or(0)
+}
+
 /// Where the first byte that is `a` or `b` is.
 fn find_either(h: &[u8], a: u8, b: u8) -> Option<usize> {
     #[cfg(feature = "simd")]
     return find_either_simd(h, a, b);
     #[cfg(not(feature = "simd"))]
-    h.iter().position(|&c| c == a || c == b)
+    memchr::memchr2(a, b, h) /* picks AVX2/SSE2 at run time */
 }
 
 /// `find_either` 32 bytes at a time.
@@ -306,13 +320,14 @@ impl MessageIndex {
         let room = match room_id { Some(id) => match self.rooms.find(id) { Some(n) => Some(n), None => return Vec::new() }, None => None };
         // Which words each sender's name contains (bit j = word j), worked out once: the scan below then reads this small array (it stays in L1)
         // instead of following a pointer to a separately allocated name for every row whose body misses a word.
-        let by_sender: Vec<u16> = self.senders.list.iter().map(|s| words.iter().enumerate().fold(0u16, |m, (j, w)| m | (contains_ci(s, w) as u16) << j)).collect();
+        let rare: Vec<usize> = words.iter().map(|w| rarest_byte(w)).collect();
+        let by_sender: Vec<u16> = self.senders.list.iter().map(|s| words.iter().enumerate().fold(0u16, |m, (j, w)| m | (contains_ci_at(s, w, rare[j]) as u16) << j)).collect();
         let all_words: u16 = ((1u32 << words.len()) - 1) as u16;
         let mut hits: Vec<u32> = (0..self.rows.len() as u32).filter(|&n| {
             let r = &self.rows[n as usize];
             if !room.map_or(true, |x| x == r.room) { return false; }
             let named = by_sender[r.sender as usize];
-            named == all_words || { let body = self.body_of(r); words.iter().enumerate().all(|(j, w)| named >> j & 1 != 0 || contains_ci(body, w)) }
+            named == all_words || { let body = self.body_of(r); words.iter().enumerate().all(|(j, w)| named >> j & 1 != 0 || contains_ci_at(body, w, rare[j])) }
         }).collect();
         let newest = |a: &u32, b: &u32| {
             let (ra, rb) = (&self.rows[*a as usize], &self.rows[*b as usize]);
@@ -469,6 +484,7 @@ mod tests {
         }
         assert!(contains_ci(&format!("{}hhhhhhelp", "h".repeat(70)), "help"), "a first letter repeated before the word");
         assert!(!contains_ci("hel", "help") && contains_ci("abc", "") && !contains_ci("", "a"));
+        assert!(contains_ci("the cat and the hat", "hat") && contains_ci("xxxxxQ", "xq") && !contains_ci("xxxxx", "xq"), "rarest byte not first");
         assert!(contains_ci("Grüße aus KÖLN", "köln") && contains_ci("ÜBER alles", "über"), "a word with other letters comes lowercased (the search lowercases it)");
     }
 

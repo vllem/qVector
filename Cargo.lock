@@ -5378,6 +5378,7 @@ dependencies = [
  "matrix-sdk",
  "matrix-sdk-store-encryption",
  "matrix-sdk-ui",
+ "memchr",
  "mime",
  "openh264",
  "opus",
