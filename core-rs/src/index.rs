@@ -108,6 +108,8 @@ pub struct MessageIndex {
     senders: Names,
     /// the event ids and bodies of all rows, one after the other
     text: String,
+    /// the event ids of all rows, apart from the bodies: a search scans `text` and never loads an id into the cache
+    ids: String,
     rows: Vec<Row>,
     /// open-addressing table of row number + 1 (0 = free) by (room, event id); its length is a power of two
     slots: Vec<u32>,
@@ -162,7 +164,7 @@ impl MessageIndex {
     pub fn open(dir: &Path, secret: &str) -> Result<MessageIndex, String> {
         let cipher = Arc::new(open_cipher(dir, "index", secret)?);
         let mut idx = MessageIndex {
-            dir: dir.to_path_buf(), cipher, rooms: Names::default(), senders: Names::default(), text: String::new(), rows: Vec::new(), slots: Vec::new(),
+            dir: dir.to_path_buf(), cipher, rooms: Names::default(), senders: Names::default(), text: String::new(), ids: String::new(), rows: Vec::new(), slots: Vec::new(),
             hasher: Default::default(), pending: Vec::new(), forgot: Vec::new(), segments: Vec::new(), next_segment: 1, legacy: false, garbage: 0, dirty: false,
         };
         /* the index of the earlier versions: one sealed file with every row */
@@ -185,7 +187,8 @@ impl MessageIndex {
         idx.pending = Vec::new(); /* what was read is saved already */
         idx.forgot.clear();
         idx.dirty = idx.legacy;
-        idx.text.shrink_to_fit(); /* the buffers grew by doubling while the files were read */
+        idx.text.shrink_to_fit();
+        idx.ids.shrink_to_fit(); /* the buffers grew by doubling while the files were read */
         idx.rows.shrink_to_fit();
         Ok(idx)
     }
@@ -194,9 +197,9 @@ impl MessageIndex {
 
     /// About how many bytes the rows take in memory (what the text arena, the rows, the table and the list of unsaved rows hold; not the names). The
     /// unused end of a buffer that grew is not counted: it was never touched, so it is not resident.
-    pub fn approx_bytes(&self) -> usize { self.text.len() + self.rows.len() * std::mem::size_of::<Row>() + self.slots.len() * 4 + self.pending.len() * 4 }
+    pub fn approx_bytes(&self) -> usize { self.text.len() + self.ids.len() + self.rows.len() * std::mem::size_of::<Row>() + self.slots.len() * 4 + self.pending.len() * 4 }
 
-    fn id_of(&self, r: &Row) -> &str { &self.text[r.id_off as usize..r.id_off as usize + r.id_len as usize] }
+    fn id_of(&self, r: &Row) -> &str { &self.ids[r.id_off as usize..r.id_off as usize + r.id_len as usize] }
     fn body_of(&self, r: &Row) -> &str { &self.text[r.body_off as usize..r.body_off as usize + r.body_len as usize] }
 
     /// The row of an event of a room, if it is indexed.
@@ -245,7 +248,7 @@ impl MessageIndex {
 
     /// Add a message, or change the one with this event id (an edit). True when the index changed.
     fn upsert(&mut self, room_id: &str, event_id: &str, sender: &str, ts: u64, body: &str) -> bool {
-        if event_id.len() > u16::MAX as usize || self.text.len() + event_id.len() + body.len() >= u32::MAX as usize { return false; } /* no room for it */
+        if event_id.len() > u16::MAX as usize || self.text.len() + body.len() >= u32::MAX as usize || self.ids.len() + event_id.len() >= u32::MAX as usize { return false; } /* no room for it */
         let (room, sender) = (self.rooms.id(room_id), self.senders.id(sender));
         if let Some(n) = self.find(room, event_id) {
             let r = self.rows[n as usize];
@@ -256,7 +259,8 @@ impl MessageIndex {
             (r.ts, r.sender, r.body_off, r.body_len) = (ts, sender, off, len);
             self.pending.push(n);
         } else {
-            let (id_off, id_len) = self.push_text(event_id);
+            let (id_off, id_len) = (self.ids.len() as u32, event_id.len() as u32);
+            self.ids.push_str(event_id);
             let (body_off, body_len) = self.push_text(body);
             let n = self.rows.len() as u32;
             self.rows.push(Row { ts, room, sender, id_off, body_off, body_len, id_len: id_len as u16 });
@@ -328,12 +332,13 @@ impl MessageIndex {
         let mut remap = vec![u32::MAX; self.rows.len()];
         let mut rows = Vec::with_capacity(self.rows.len());
         let mut text = String::with_capacity(self.text.len().saturating_sub(self.garbage));
+        let mut ids = String::with_capacity(self.ids.len());
         for (old, r) in self.rows.iter().enumerate() {
             if Some(r.room) == skip { continue; }
             let mut r = *r;
-            let id = &self.text[r.id_off as usize..r.id_off as usize + r.id_len as usize];
-            r.id_off = text.len() as u32;
-            text.push_str(id);
+            let id = &self.ids[r.id_off as usize..r.id_off as usize + r.id_len as usize];
+            r.id_off = ids.len() as u32;
+            ids.push_str(id);
             let body = &self.text[r.body_off as usize..r.body_off as usize + r.body_len as usize];
             r.body_off = text.len() as u32;
             text.push_str(body);
@@ -342,6 +347,7 @@ impl MessageIndex {
         }
         self.rows = rows;
         self.text = text;
+        self.ids = ids;
         self.garbage = 0;
         self.rebuild_slots();
         remap
