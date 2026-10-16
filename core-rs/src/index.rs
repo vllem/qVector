@@ -141,6 +141,8 @@ pub struct MessageIndex {
     legacy: bool,
     /// bytes of `text` that no row refers to any more (a body that was edited)
     garbage: usize,
+    /// a body was edited: its new text is at the end of the arena, so the rows are no longer in the arena's order (until the next repack)
+    unordered: bool,
     dirty: bool,
 }
 
@@ -181,7 +183,7 @@ impl MessageIndex {
         let cipher = Arc::new(open_cipher(dir, "index", secret)?);
         let mut idx = MessageIndex {
             dir: dir.to_path_buf(), cipher, rooms: Names::default(), senders: Names::default(), text: String::new(), ids: String::new(), rows: Vec::new(), slots: Vec::new(),
-            hasher: Default::default(), pending: Vec::new(), forgot: Vec::new(), segments: Vec::new(), next_segment: 1, legacy: false, garbage: 0, dirty: false,
+            hasher: Default::default(), pending: Vec::new(), forgot: Vec::new(), segments: Vec::new(), next_segment: 1, legacy: false, garbage: 0, unordered: false, dirty: false,
         };
         /* the index of the earlier versions: one sealed file with every row */
         if let Some(rows) = std::fs::read(dir.join("index.enc")).ok().and_then(|b| idx.cipher.decrypt_value::<Vec<IndexRow>>(&b).ok()) {
@@ -271,6 +273,7 @@ impl MessageIndex {
             if r.ts == ts && r.sender == sender && self.body_of(&r) == body { return false; }
             let (off, len) = self.push_text(body); /* the new text goes at the end, the old one is garbage until the arena is packed */
             self.garbage += r.body_len as usize;
+            self.unordered = true;
             let r = &mut self.rows[n as usize];
             (r.ts, r.sender, r.body_off, r.body_len) = (ts, sender, off, len);
             self.pending.push(n);
@@ -310,6 +313,51 @@ impl MessageIndex {
         IndexRow { room_id: self.rooms.get(r.room).into(), event_id: self.id_of(r).into(), sender: self.senders.get(r.sender).into(), time: crate::ui::clock(r.ts), ts: r.ts, body: self.body_of(r).into() }
     }
 
+    /// The rows whose body contains `w` (ASCII, lowercase; `k` = `rarest_byte(w)`) or is cut by it, found by one scan of the whole text arena instead of one
+    /// call per message (a message is about 80 bytes, so the call cost more than the scan). Ascending row numbers. Needs the rows in arena order (`!unordered`).
+    /// `None` when the word is common (more than every fourth message of the first sixteenth has it): then nearly every row is a candidate and the scan per row is cheaper.
+    fn arena_candidates(&self, w: &str, k: usize, threads: u32) -> Option<Vec<u32>> {
+        let (n, text) = (w.as_bytes(), self.text.as_bytes());
+        let (lo, up) = (n[k].to_ascii_lowercase(), n[k].to_ascii_uppercase());
+        // the rows whose match starts in text[from..to]
+        let scan = |from: usize, to: usize| -> Vec<u32> {
+            let mut out = Vec::new();
+            let mut at = from;
+            let end = (to + k).min(text.len());
+            while at + k < end {
+                let Some(p) = find_either(&text[at + k..end], lo, up) else { break };
+                let s = at + p;
+                if s + n.len() <= text.len() && text[s..s + n.len()].eq_ignore_ascii_case(n) {
+                    let r = self.rows.partition_point(|r| (r.body_off as usize) <= s);
+                    if r > 0 {
+                        let row = &self.rows[r - 1];
+                        let e = row.body_off as usize + row.body_len as usize;
+                        if s < e { out.push((r - 1) as u32); at = e; continue; } /* the rest of this body has nothing more to tell */
+                    }
+                } /* else: stale text of an edited message, or a match across two bodies (the rows are checked whole afterwards) */
+                at = s + 1;
+            }
+            out
+        };
+        let sample = (text.len() / 16).max(1 << 16).min(text.len());
+        let mut rows = scan(0, sample);
+        if rows.len() * 4 * (text.len() / self.rows.len().max(1)).max(1) > sample { return None; }
+        let rest = text.len() - sample;
+        let threads = threads.max(1) as usize;
+        let step = rest.div_ceil(threads).max(1);
+        if rest > 0 {
+            if threads == 1 { rows.extend(scan(sample, text.len())); } else {
+                std::thread::scope(|sc| {
+                    let scan = &scan;
+                    let runs: Vec<_> = (sample..text.len()).step_by(step).map(|from| sc.spawn(move || scan(from, (from + step).min(text.len())))).collect();
+                    for h in runs { rows.extend(h.join().unwrap_or_default()); }
+                });
+            }
+        }
+        rows.dedup(); /* a body can hold matches in two of the runs */
+        Some(rows)
+    }
+
     /// Messages containing every word of `query` (case-insensitive), in one room or all, newest first, at most `limit`.
     pub fn search(&self, query: &str, room_id: Option<&str>, limit: usize) -> Vec<IndexRow> { self.search_on(query, room_id, limit, None) }
 
@@ -334,10 +382,14 @@ impl MessageIndex {
             let named = by_sender[r.sender as usize];
             named == all_words || { let body = self.body_of(r); words.iter().enumerate().all(|(j, w)| named >> j & 1 != 0 || contains_ci_at(body, w, rare[j])) }
         };
-        // Every row is judged on its own, so a big index is cut into runs of rows, one thread each (a small one is not worth the threads).
         let total = self.rows.len() as u32;
         let threads = if let Some(t) = threads { t } else if self.text.len() < PARALLEL_BYTES { 1 } else { std::thread::available_parallelism().map_or(1, |n| n.get()).min(8) as u32 };
-        let mut hits: Vec<u32> = if threads <= 1 { (0..total).filter(|&n| keep(n)).collect() } else {
+        // The first word (the longest) is looked for in the whole arena at once, when no sender's name can stand in for it and the rows are in arena order.
+        let arena = if !self.unordered && words[0].is_ascii() && by_sender.iter().all(|m| m & 1 == 0) { self.arena_candidates(&words[0], rare[0], threads) } else { None };
+        let mut hits: Vec<u32> = if let Some(rows) = arena {
+            rows.into_iter().filter(|&n| keep(n)).collect()
+        } else if threads <= 1 { (0..total).filter(|&n| keep(n)).collect() } else {
+            // Every row is judged on its own, so a big index is cut into runs of rows, one thread each (a small one is not worth the threads).
             let step = total.div_ceil(threads).max(1);
             std::thread::scope(|sc| {
                 let keep = &keep;
@@ -380,6 +432,7 @@ impl MessageIndex {
         self.text = text;
         self.ids = ids;
         self.garbage = 0;
+        self.unordered = false;
         self.rebuild_slots();
         remap
     }
@@ -538,8 +591,31 @@ mod tests {
             let many = idx.search(q, None, 50);
             eprintln!("{q:16} 1 thread {t1:?}, default {:?}", t.elapsed());
             assert_eq!(one, many, "{q}");
+            idx.unordered = true;
+            let t = std::time::Instant::now();
+            let per_row = idx.search_on(q, None, 50, Some(1));
+            eprintln!("{q:16} per-row, 1 thread {:?}", t.elapsed());
+            idx.unordered = false;
+            assert_eq!(one, per_row, "{q} per row");
             assert_eq!(idx.search_on(q, Some("!r1:hs"), 5, Some(3)), idx.search_on(q, Some("!r1:hs"), 5, Some(1)), "{q} in a room");
         }
+    }
+
+    #[test]
+    fn the_arena_scan_ignores_matches_across_bodies_and_stale_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut idx = MessageIndex::open(dir.path(), "s").unwrap();
+        let row = |n: u64, body: &str| IndexRow { room_id: "!r:hs".into(), event_id: format!("$e{n}"), sender: "alice".into(), time: String::new(), ts: n, body: body.into() };
+        for (n, b) in ["xxab", "cdxx", "plain zebra", "", "last QUARTZ"].iter().enumerate() { idx.insert_row(row(n as u64, b)); }
+        let ids = |idx: &MessageIndex, q: &str| idx.search(q, None, 10).into_iter().map(|r| r.event_id).collect::<Vec<_>>();
+        assert!(ids(&idx, "abcd").is_empty(), "a word is not found across two messages");
+        assert_eq!(ids(&idx, "zebra"), vec!["$e2"]);
+        assert_eq!(ids(&idx, "quartz"), vec!["$e4"]);
+        idx.insert_row(row(2, "plain horse")); /* an edit: the old text stays in the arena as garbage */
+        assert!(ids(&idx, "zebra").is_empty(), "stale text is not found");
+        assert_eq!(ids(&idx, "horse"), vec!["$e2"]);
+        idx.repack(None);
+        assert!(ids(&idx, "zebra").is_empty() && ids(&idx, "quartz") == vec!["$e4"] && ids(&idx, "horse") == vec!["$e2"]);
     }
 
     #[test]
