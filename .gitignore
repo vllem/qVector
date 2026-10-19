@@ -8,3 +8,5 @@ emsdk/
 dist/
 target/
 *.zst
+AppDir/
+*.AppImage
